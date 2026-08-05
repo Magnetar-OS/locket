@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod editor;
 
 use cosmic::app::Settings;
 use cosmic::iced::Size;

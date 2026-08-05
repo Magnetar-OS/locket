@@ -22,6 +22,7 @@ use passman_core::{
 use uuid::Uuid;
 
 use crate::config::{self, Settings};
+use crate::editor::{Editor, EditorMessage, Outcome};
 
 /// Sidebar entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,13 @@ pub enum Message {
     ToggleFavorite(Uuid),
     Tick,
     CloseToast(widget::ToastId),
+    // -- editing --
+    NewItem,
+    EditSelected,
+    Editor(EditorMessage),
+    RequestDelete(Uuid),
+    ConfirmDelete,
+    CancelDelete,
     Noop,
 }
 
@@ -110,6 +118,11 @@ pub struct App {
     settings: Settings,
     config: Option<cosmic_config::Config>,
     toasts: widget::Toasts<Message>,
+
+    /// `Some` while the item editor is open.
+    editor: Option<Editor>,
+    /// Item awaiting a delete confirmation.
+    pending_delete: Option<Uuid>,
 }
 
 impl App {
@@ -364,12 +377,21 @@ impl App {
         );
 
         column = column.push(
-            widget::button::standard(if item.favorite {
-                "Remove from favorites"
-            } else {
-                "Add to favorites"
-            })
-            .on_press(Message::ToggleFavorite(item.id)),
+            widget::row::with_capacity(3)
+                .spacing(spacing.space_xxs)
+                .push(widget::button::standard("Edit").on_press(Message::EditSelected))
+                .push(
+                    widget::button::standard(if item.favorite {
+                        "Unfavorite"
+                    } else {
+                        "Favorite"
+                    })
+                    .on_press(Message::ToggleFavorite(item.id)),
+                )
+                .push(
+                    widget::button::destructive("Delete")
+                        .on_press(Message::RequestDelete(item.id)),
+                ),
         );
 
         // The primary secret, as other applications see it over the
@@ -484,6 +506,8 @@ impl cosmic::Application for App {
             settings,
             config,
             toasts: widget::Toasts::new(Message::CloseToast),
+            editor: None,
+            pending_delete: None,
         };
 
         (app, Task::none())
@@ -655,6 +679,83 @@ impl cosmic::Application for App {
             Message::Tick => {}
 
             Message::CloseToast(id) => self.toasts.remove(id),
+
+            Message::NewItem => {
+                let kind = match self.category() {
+                    Category::Kind(k) => k,
+                    _ => ItemKind::Login,
+                };
+                self.editor = Some(Editor::new(kind));
+                self.core.window.show_context = false;
+            }
+
+            Message::EditSelected => {
+                if let Some(item) = self.selected_item() {
+                    self.editor = Some(Editor::from_item(item));
+                    self.core.window.show_context = false;
+                }
+            }
+
+            Message::Editor(msg) => {
+                let Some(editor) = self.editor.as_mut() else {
+                    return Task::none();
+                };
+                match editor.update(msg) {
+                    Outcome::Continue => {}
+                    Outcome::Cancel => self.editor = None,
+                    Outcome::Save { id, item } => {
+                        let label = item.label.clone();
+                        let new_id = item.id;
+                        let Some(vault) = self.vault.as_mut() else {
+                            return Task::none();
+                        };
+                        match id {
+                            // Replace in place so the item keeps its position
+                            // and its D-Bus object path stays meaningful.
+                            Some(existing) => {
+                                if let Some(slot) = vault.item_mut(existing) {
+                                    let created = slot.created;
+                                    *slot = item;
+                                    slot.created = created;
+                                    slot.touch();
+                                }
+                            }
+                            None => {
+                                vault.add_item_default(item);
+                            }
+                        }
+                        if let Err(e) = vault.save() {
+                            return self.toast(format!("Could not save: {e}"));
+                        }
+                        self.editor = None;
+                        self.selected = Some(new_id);
+                        return self.toast(format!("Saved {label}"));
+                    }
+                }
+            }
+
+            Message::RequestDelete(id) => self.pending_delete = Some(id),
+            Message::CancelDelete => self.pending_delete = None,
+
+            Message::ConfirmDelete => {
+                let Some(id) = self.pending_delete.take() else {
+                    return Task::none();
+                };
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                let removed = vault.remove_item(id).map(|i| i.label);
+                if let Err(e) = vault.save() {
+                    return self.toast(format!("Could not save: {e}"));
+                }
+                if self.selected == Some(id) {
+                    self.selected = None;
+                    self.core.window.show_context = false;
+                }
+                if let Some(label) = removed {
+                    return self.toast(format!("Deleted {label}"));
+                }
+            }
         }
 
         Task::none()
@@ -663,13 +764,16 @@ impl cosmic::Application for App {
     fn view(&self) -> Element<'_, Self::Message> {
         let content = match self.screen {
             Screen::Locked | Screen::Unlocking => self.unlock_view(),
-            Screen::Browsing => self.browse_view(),
+            Screen::Browsing => match &self.editor {
+                Some(editor) => editor.view().map(Message::Editor),
+                None => self.browse_view(),
+            },
         };
         widget::toaster(&self.toasts, content)
     }
 
     fn context_drawer(&self) -> Option<ContextDrawer<'_, Self::Message>> {
-        if !self.core.window.show_context {
+        if !self.core.window.show_context || self.editor.is_some() {
             return None;
         }
         let item = self.selected_item()?;
@@ -681,11 +785,47 @@ impl cosmic::Application for App {
         if self.screen != Screen::Browsing {
             return Vec::new();
         }
-        vec![
+        let mut actions = Vec::new();
+        if self.editor.is_none() {
+            actions.push(
+                widget::button::suggested("New item")
+                    .on_press(Message::NewItem)
+                    .into(),
+            );
+        }
+        actions.push(
             widget::button::standard("Lock")
                 .on_press(Message::Lock)
                 .into(),
-        ]
+        );
+        actions
+    }
+
+    fn dialog(&self) -> Option<Element<'_, Self::Message>> {
+        let id = self.pending_delete?;
+        let label = self
+            .vault
+            .as_ref()
+            .and_then(|v| v.item(id))
+            .map(|i| i.label.clone())
+            .unwrap_or_else(|| "this item".to_owned());
+
+        Some(
+            widget::dialog()
+                .title("Delete item?")
+                .body(format!(
+                    "\u{201c}{label}\u{201d} will be removed from the vault. \
+                     This cannot be undone, and any application that reads it \
+                     through the Secret Service will stop finding it."
+                ))
+                .primary_action(
+                    widget::button::destructive("Delete").on_press(Message::ConfirmDelete),
+                )
+                .secondary_action(
+                    widget::button::standard("Cancel").on_press(Message::CancelDelete),
+                )
+                .into(),
+        )
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {

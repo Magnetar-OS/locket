@@ -147,6 +147,35 @@ pub enum FieldKind {
 }
 
 impl FieldKind {
+    /// Every kind, in the order the editor offers them.
+    pub const ALL: &'static [FieldKind] = &[
+        FieldKind::Text,
+        FieldKind::Secret,
+        FieldKind::Url,
+        FieldKind::Totp,
+        FieldKind::Note,
+        FieldKind::Email,
+        FieldKind::Phone,
+        FieldKind::Date,
+        FieldKind::PrivateKey,
+        FieldKind::PublicKey,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            FieldKind::Text => "Text",
+            FieldKind::Secret => "Secret",
+            FieldKind::Url => "URL",
+            FieldKind::Totp => "One-time code",
+            FieldKind::Note => "Note",
+            FieldKind::Email => "Email",
+            FieldKind::Phone => "Phone",
+            FieldKind::Date => "Date",
+            FieldKind::PrivateKey => "Private key",
+            FieldKind::PublicKey => "Public key",
+        }
+    }
+
     /// Whether the value must be masked in the UI and redacted in logs.
     pub const fn is_sensitive(self) -> bool {
         matches!(

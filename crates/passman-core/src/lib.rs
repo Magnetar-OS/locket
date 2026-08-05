@@ -21,6 +21,7 @@ pub mod error;
 pub mod generator;
 pub mod model;
 pub mod secret;
+pub mod slots;
 pub mod totp;
 pub mod vault;
 

@@ -35,11 +35,24 @@ crates/
   passman-agent    SSH agent protocol
   passman-cli      command line interface
   passman-cosmic   libcosmic GUI (binary: `passman`)
+  passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
 ```
 
 The daemon holds the only copy of the data-encryption key. The GUI, the CLI and
 every `libsecret` client are clients of it, so the vault is unlocked once per
 session rather than once per application.
+
+### Key slots
+
+The body is encrypted once, under a random data-encryption key. Each *slot*
+stores that same DEK wrapped under a different factor — a passphrase
+(Argon2id), a TPM-sealed secret, or a FIDO2 token's `hmac-secret` output.
+Enrolling hardware therefore **adds** a way in rather than replacing the
+passphrase, so a dead motherboard is not a dead vault. `Vault::remove_slot`
+refuses to remove the last one.
+
+`SlotOpener` is the seam: a factor only has to produce 32 bytes, which is why
+`passman-core` has no hardware dependencies.
 
 ### Vault format
 
@@ -134,16 +147,18 @@ make xdg-desktop-portal route to it.
 
 Next:
 
-1. **GUI editing** — create/edit/delete items, password generator UI.
+1. **FIDO2 adapter** — `SlotFactor::Fido2` and its slot handling are done and
+   tested; the device half (`libfido2`, `hmac-secret`) is not written. Unlike a
+   fingerprint, `hmac-secret` returns real key material, so a token can derive
+   a slot key rather than merely voting yes.
 2. **Prompt UI** — the daemon exposes `Prompt` objects and a channel; the
    frontend needs to answer them so a locked vault can unlock on demand.
 3. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
    KeePassXC, Bitwarden.
 4. **COSMIC applet** — panel indicator with lock state and quick copy.
-5. **TPM2 sealing + PIN** — see below; the prerequisite for a credible
-   `pam_passman.so`.
-6. **PAM module** — unlock at login and authorise `sudo`.
-7. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+5. **PAM module** — unlock at login and authorise `sudo`, on top of the TPM
+   slot below.
+6. **PKCS#11** — for consumers of gnome-keyring's certificate store.
 
 ## On authorising `sudo`
 
@@ -154,14 +169,24 @@ forge, which is exactly what Windows Hello does — the PIN is not a password,
 it unlocks a TPM-bound key, and the TPM's dictionary-attack lockout is what
 makes a 6-digit PIN viable.
 
-The same primitive exists here. This machine has a TPM 2.0 (`/dev/tpmrm0`),
-`tpm2-tss`, and `systemd-cryptenroll --tpm2-with-pin` as a reference
-implementation; `tss-esapi` is the Rust binding. Sealing a secret under a
-TPM policy with an `authValue` gives a PIN that is rate-limited in hardware.
-Note the device node is `root:tss 0660` and your user is not in `tss` — which
-is the right shape, since the PAM module runs as root.
+`passman-tpm` implements that: a random 32-byte secret sealed to the TPM under
+an `authValue`, enrolled as a key slot. One detail is load-bearing —
+`tss-esapi`'s own sealing example builds the object with `no_da(true)`, which
+**exempts it from dictionary-attack lockout**. That would reduce the PIN to a
+~20-bit password with unlimited guesses. `passman-tpm` clears `noDA` whenever a
+PIN is set, and there is a test asserting it.
 
-Ordering matters: TPM sealing first, `pam_passman.so` only after.
+PCR binding is deliberately *not* used: binding to firmware measurements means
+a BIOS update locks you out of your own vault, and the PIN is what provides the
+security here.
+
+**Not verified on hardware.** `/dev/tpmrm0` is `root:tss 0660` and the
+developing user is not in `tss`, and no `swtpm` simulator is installed, so the
+two round-trip tests are `#[ignore]`d behind `PASSMAN_TPM_TESTS=1`. Run them
+against a real TPM before trusting this path.
+
+Ordering still matters: prove the TPM slot on hardware first, `pam_passman.so`
+only after.
 
 ## Licence
 

@@ -79,10 +79,7 @@ async fn handle_connection(mut stream: UnixStream, agent: Arc<Mutex<Agent>>) -> 
     loop {
         // Drain every complete message already buffered before reading more,
         // since clients may pipeline requests.
-        loop {
-            let Some((body, used)) = protocol::take_message(&buf)? else {
-                break;
-            };
+        while let Some((body, used)) = protocol::take_message(&buf)? {
             let response = {
                 let mut guard = agent.lock().await;
                 guard.handle(body)
