@@ -61,6 +61,25 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         length: usize,
     },
+    /// List the vault's unlock factors.
+    Slots,
+    /// Import every readable secret from a running Secret Service.
+    ///
+    /// Reads from gnome-keyring by default. Idempotent: an item whose
+    /// attributes already exist in the vault is skipped, so re-running after
+    /// adding a few secrets does not duplicate anything.
+    Import {
+        /// Bus name to read from.
+        #[arg(long, default_value = "org.freedesktop.secrets")]
+        from: String,
+        /// Put everything in one named collection instead of mirroring the
+        /// source's layout.
+        #[arg(long)]
+        into: Option<String>,
+        /// Report what would be imported without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Generate a password without storing it.
     Generate {
         #[arg(long, default_value_t = 20)]
@@ -173,6 +192,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("{value}");
                 }
                 None => println!("{}", item.secret.expose()),
+            }
+        }
+
+        Command::Slots => {
+            let vault = Vault::open(&path, &passphrase)?;
+            for slot in vault.slots() {
+                let detail = match &slot.factor {
+                    passman_core::slots::SlotFactor::Passphrase { params, .. } => {
+                        format!("argon2id m={}KiB t={} p={}", params.m_cost, params.t_cost, params.p_cost)
+                    }
+                    passman_core::slots::SlotFactor::Tpm2 { with_pin, pcrs, .. } => format!(
+                        "TPM 2.0{}{}",
+                        if *with_pin { " + PIN" } else { "" },
+                        if pcrs.is_empty() { String::new() } else { format!(" PCRs {pcrs:?}") }
+                    ),
+                    passman_core::slots::SlotFactor::Fido2 { rp_id, user_verification, .. } => {
+                        format!("FIDO2 rp={rp_id}{}", if *user_verification { " + UV" } else { "" })
+                    }
+                };
+                println!("{}  {:<16} {}", slot.id, slot.label, detail);
+            }
+        }
+
+        Command::Import { from, into, dry_run } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let before = vault.data().item_count();
+
+            let summary = tokio::runtime::Runtime::new()?.block_on(
+                passman_secret::import::import_from(&mut vault, &from, into.as_deref()),
+            )?;
+
+            if dry_run {
+                println!("would import {summary}");
+                println!("(dry run; nothing written)");
+            } else {
+                vault.save()?;
+                println!("imported {summary}");
+                println!(
+                    "vault now holds {} item(s), up from {before}",
+                    vault.data().item_count()
+                );
             }
         }
 

@@ -155,6 +155,36 @@ Next:
    slot below.
 5. **PKCS#11** — for consumers of gnome-keyring's certificate store.
 
+## Migrating off gnome-keyring
+
+```sh
+passman-cli import --dry-run          # see what would come across
+passman-cli import                    # from org.freedesktop.secrets
+passman-cli import --from org.passman.secrets --into Imported
+```
+
+The importer is a Secret Service *client*, not a file parser: gnome-keyring's
+on-disk format is undocumented and version-specific, but its D-Bus surface is a
+standard passman already implements the other half of. The same code therefore
+imports from KWallet or anything else conforming.
+
+It is read-only against the source and idempotent against the target — an item
+whose attribute set already exists is skipped, since attribute identity is what
+the Secret Service itself uses for replace-on-store. Re-running after adding a
+few secrets does not duplicate anything.
+
+Verified end to end: 9 items across 2 collections transfer with byte-identical
+secrets, a dry run writes nothing, and a second run imports 0 while recognising
+all 9 as already present.
+
+**One thing does not survive, by construction.** The Secret Service carries a
+label, an `a{ss}` attribute map and a schema string — it has no concept of item
+*kind*. Logins, notes and Wi-Fi passwords are recovered because they have
+recognisable schema or attribute signatures; an SSH key or a payment card
+arrives as a generic application secret and needs retyping in the UI. That is a
+limit of the source format, not of the importer, and it is why moving a passman
+vault between machines should be a file copy rather than an import.
+
 ## Unlocking on demand
 
 The Secret Service spec has no way to *unlock* a service — its `Prompt` objects

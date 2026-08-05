@@ -9,6 +9,7 @@
 
 pub mod dh;
 pub mod error;
+pub mod import;
 pub mod manager;
 pub mod portal;
 pub mod service;
