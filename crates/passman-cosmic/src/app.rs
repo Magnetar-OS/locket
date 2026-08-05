@@ -22,6 +22,7 @@ use passman_core::{
 use uuid::Uuid;
 
 use crate::config::{self, Settings};
+use crate::daemon::{self, DaemonEvent};
 use crate::editor::{Editor, EditorMessage, Outcome};
 
 /// Sidebar entries.
@@ -84,6 +85,9 @@ pub enum Message {
     RequestDelete(Uuid),
     ConfirmDelete,
     CancelDelete,
+    // -- daemon --
+    Daemon(DaemonEvent),
+    DaemonUnlocked(bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +129,12 @@ pub struct App {
     editor: Option<Editor>,
     /// Item awaiting a delete confirmation.
     pending_delete: Option<Uuid>,
+
+    /// Set when the daemon asked for an unlock on an application's behalf, so
+    /// the unlock screen can say why it appeared.
+    unlock_requested_by_app: bool,
+    /// Whether a passmand is reachable at all.
+    daemon_present: bool,
 }
 
 impl App {
@@ -178,6 +188,9 @@ impl App {
         let blurb = if creating {
             "Choose a strong passphrase. It is the only thing protecting your \
              secrets, and it cannot be recovered if you forget it."
+        } else if self.unlock_requested_by_app {
+            "An application asked for a secret from your vault. Unlock to let \
+             it through."
         } else {
             "Enter your passphrase to unlock the vault."
         };
@@ -510,6 +523,8 @@ impl cosmic::Application for App {
             toasts: widget::Toasts::new(Message::CloseToast),
             editor: None,
             pending_delete: None,
+            unlock_requested_by_app: false,
+            daemon_present: false,
         };
 
         (app, Task::none())
@@ -557,6 +572,9 @@ impl cosmic::Application for App {
 
                 let path = self.vault_path.clone();
                 let passphrase = std::mem::take(&mut self.passphrase);
+                // Kept only long enough to forward to the daemon, so one entry
+                // unlocks the GUI and every libsecret client together.
+                let for_daemon = passphrase.clone();
                 self.confirm.clear();
                 self.screen = Screen::Unlocking;
                 self.error = None;
@@ -575,6 +593,8 @@ impl cosmic::Application for App {
 
                     match outcome {
                         Ok(Ok(vault)) => {
+                            // Best effort: no daemon is a supported setup.
+                            let _ = daemon::unlock(for_daemon).await;
                             Message::VaultOpened(Arc::new(Mutex::new(Some(vault))), None)
                         }
                         Ok(Err(e)) => {
@@ -613,7 +633,15 @@ impl cosmic::Application for App {
                 self.revealed.clear();
                 self.search.clear();
                 self.core.window.show_context = false;
-                return self.update_title();
+                self.unlock_requested_by_app = false;
+                let title = self.update_title();
+                return Task::batch([
+                    title,
+                    cosmic::task::future(async {
+                        daemon::lock().await;
+                        Message::DaemonUnlocked(false)
+                    }),
+                ]);
             }
 
             Message::SearchChanged(v) => {
@@ -735,6 +763,35 @@ impl cosmic::Application for App {
                 }
             }
 
+            Message::Daemon(event) => match event {
+                DaemonEvent::Connected { locked } => {
+                    self.daemon_present = true;
+                    if !locked {
+                        self.unlock_requested_by_app = false;
+                    }
+                }
+                DaemonEvent::UnlockRequested => {
+                    // Surface it wherever the user is: if the GUI is already
+                    // unlocked we still cannot help, because the passphrase is
+                    // not retained — so ask again, explaining why.
+                    self.unlock_requested_by_app = true;
+                    self.editor = None;
+                    self.core.window.show_context = false;
+                    if self.screen == Screen::Browsing {
+                        self.vault = None;
+                        self.screen = Screen::Locked;
+                    }
+                }
+                DaemonEvent::Unavailable => self.daemon_present = false,
+            },
+
+            Message::DaemonUnlocked(ok) => {
+                if ok {
+                    self.unlock_requested_by_app = false;
+                    return self.toast("Unlocked for other applications too");
+                }
+            }
+
             Message::RequestDelete(id) => self.pending_delete = Some(id),
             Message::CancelDelete => self.pending_delete = None,
 
@@ -830,11 +887,17 @@ impl cosmic::Application for App {
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
+        let daemon = daemon::subscription().map(Message::Daemon);
+
         if self.screen == Screen::Browsing && self.selected_item().is_some_and(has_totp) {
             // Only tick while a live one-time code is on screen.
-            cosmic::iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick)
+            Subscription::batch([
+                daemon,
+                cosmic::iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::Tick),
+            ])
         } else {
-            Subscription::none()
+            daemon
         }
     }
 }

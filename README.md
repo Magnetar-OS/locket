@@ -169,11 +169,23 @@ of listing locked items is unavailable. Returning "no matches" would be a lie
 clients believe, reporting a secret as *missing* rather than locked. So
 `SearchItems` on a locked vault emits `UnlockRequested` and waits.
 
+The GUI closes the loop in both directions: it subscribes to `UnlockRequested`
+and raises its unlock screen saying *why* it appeared, and when you unlock it
+forwards the same passphrase to the daemon — otherwise the GUI would show your
+secrets while every `libsecret` app still saw a locked vault. Locking the GUI
+locks the daemon too. A missing daemon is a supported configuration, not an
+error; the GUI falls back to editing the vault file directly.
+
 Verified end to end on a private bus: with the vault locked, `secret-tool
 lookup` blocks, `UnlockRequested` fires, a frontend answering with `Unlock`
 releases the pending call, and the client gets its secret. A wrong passphrase
 returns `false` rather than a D-Bus error, since a typo is an expected outcome
 and not a fault.
+
+Also verified across two real processes on a live COSMIC session: `passmand`
+logs *"asked the frontend to unlock"*, the GUI logs *"daemon asked for an
+unlock"*, and the unlock screen appears reading "An application asked for a
+secret from your vault."
 
 ## Security keys (FIDO2)
 

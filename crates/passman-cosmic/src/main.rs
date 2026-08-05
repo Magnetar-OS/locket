@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod daemon;
 mod editor;
 
 use cosmic::app::Settings;
