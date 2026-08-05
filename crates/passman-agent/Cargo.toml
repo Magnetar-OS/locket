@@ -1,0 +1,18 @@
+[package]
+name = "passman-agent"
+description = "SSH agent protocol implementation backed by a passman vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+passman-core.workspace = true
+ssh-key.workspace = true
+ssh-encoding.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true

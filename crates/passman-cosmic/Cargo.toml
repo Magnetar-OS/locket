@@ -1,0 +1,46 @@
+[package]
+name = "passman-cosmic"
+description = "COSMIC desktop frontend for passman"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "passman"
+path = "src/main.rs"
+
+[dependencies]
+passman-core.workspace = true
+passman-secret.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "43a50cb6f5af18fa6cbea535fb46460a3c5cd573"
+default-features = false
+features = [
+    "winit",
+    "tokio",
+    "a11y",
+    "dbus-config",
+    "wayland",
+    "x11",
+    "multi-window",
+    "wgpu",
+    "about",
+    "desktop",
+    "xdg-portal",
+    "qr_code",
+]
+
+[dependencies.cosmic-config]
+git = "https://github.com/pop-os/libcosmic"
+rev = "43a50cb6f5af18fa6cbea535fb46460a3c5cd573"
+features = ["macro"]

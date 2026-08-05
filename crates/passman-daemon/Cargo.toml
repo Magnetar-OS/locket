@@ -1,0 +1,29 @@
+[package]
+name = "passman-daemon"
+description = "passman session daemon: holds the unlocked vault, serves D-Bus and the SSH agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "passmand"
+path = "src/main.rs"
+
+[dependencies]
+passman-core.workspace = true
+passman-secret.workspace = true
+passman-agent.workspace = true
+zbus.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+uuid.workspace = true
+clap.workspace = true
+dirs.workspace = true
+rpassword = "7"

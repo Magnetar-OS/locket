@@ -1,0 +1,73 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/passman-core",
+    "crates/passman-secret",
+    "crates/passman-agent",
+    "crates/passman-daemon",
+    "crates/passman-cli",
+    "crates/passman-cosmic",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/idominikos/passman"
+
+[workspace.dependencies]
+passman-core = { path = "crates/passman-core" }
+passman-secret = { path = "crates/passman-secret" }
+passman-agent = { path = "crates/passman-agent" }
+
+# --- Async / IPC -----------------------------------------------------------
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+zbus = { version = "5.18", default-features = false, features = ["tokio"] }
+
+# --- Crypto ----------------------------------------------------------------
+# Pinned to the aead 0.5 generation: argon2 0.5 + chacha20poly1305 0.10 are the
+# combination with the most deployment mileage. Bumping either requires moving
+# both, plus the aead 0.6 API migration.
+argon2 = { version = "0.5", features = ["alloc", "password-hash"] }
+chacha20poly1305 = { version = "0.10", features = ["alloc"] }
+getrandom = "0.3"
+zeroize = { version = "1.9", features = ["derive", "alloc"] }
+subtle = "2.6"
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+# Secret Service's `dh-ietf1024-sha256-aes128-cbc-pkcs7` session transport.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc", "block-padding"] }
+num-bigint = "0.4"
+base32 = "0.5"
+base64ct = { version = "1.8", features = ["alloc"] }
+
+# --- SSH -------------------------------------------------------------------
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std"] }
+ssh-encoding = "0.2"
+
+# --- Serialization / errors / logging --------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = { version = "2", features = ["serde"] }
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Building the COSMIC GUI pulls in iced + wgpu; unoptimised dependency builds
+# make the debug binary unusable for real UI work.
+[profile.dev.package."*"]
+opt-level = 2
