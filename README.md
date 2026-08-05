@@ -4,9 +4,10 @@ A password and secrets manager for Linux, built for COSMIC — aiming to be what
 Passwords + Keychain Access are on macOS, and to replace `gnome-keyring` as the
 system's secret store rather than sit beside it.
 
-Status: **early, but real.** The vault, the cryptography and the freedesktop
-Secret Service are implemented and verified against actual `libsecret` clients.
-The GUI browses and reveals; it does not yet edit. See [Roadmap](#roadmap).
+Status: **early, but real.** The vault, the cryptography, the freedesktop
+Secret Service, the Secret portal and the SSH agent are implemented and
+verified against actual `libsecret` and OpenSSH clients. The GUI browses and
+reveals; it does not yet edit. See [Roadmap](#roadmap).
 
 ## Why replace gnome-keyring rather than wrap it
 
@@ -29,10 +30,10 @@ passman implements the same D-Bus contracts on top of a modern vault instead.
 ```
 crates/
   passman-core     vault format, Argon2id + XChaCha20-Poly1305, item model  (no I/O, no D-Bus, no UI)
-  passman-secret   org.freedesktop.secrets: Service/Collection/Item/Session/Prompt
-  passman-daemon   passmand — owns the unlocked vault, serves D-Bus
-  passman-agent    SSH agent protocol                                       (placeholder)
-  passman-cli      command line interface                                   (placeholder)
+  passman-secret   org.freedesktop.secrets + org.freedesktop.impl.portal.Secret
+  passman-daemon   passmand — owns the unlocked vault, serves D-Bus and the agent
+  passman-agent    SSH agent protocol
+  passman-cli      command line interface
   passman-cosmic   libcosmic GUI (binary: `passman`)
 ```
 
