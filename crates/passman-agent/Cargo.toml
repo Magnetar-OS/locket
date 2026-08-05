@@ -11,8 +11,12 @@ repository.workspace = true
 passman-core.workspace = true
 ssh-key.workspace = true
 ssh-encoding.workspace = true
+signature.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

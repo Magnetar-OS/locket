@@ -4350,8 +4350,10 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "passman-core",
+ "signature",
  "ssh-encoding",
  "ssh-key",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -4452,6 +4454,7 @@ dependencies = [
  "passman-core",
  "serde",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",

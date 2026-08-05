@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.passman
+Interfaces=org.freedesktop.impl.portal.Secret;
+UseIn=COSMIC;GNOME;

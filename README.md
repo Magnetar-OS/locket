@@ -115,24 +115,52 @@ without duplicates, delete, unicode secrets, both session algorithms, and
 ## Roadmap
 
 Implemented: vault + crypto, Secret Service (Service/Collection/Item/Session,
-Prompt objects), daemon, GUI browse/search/reveal/copy with clipboard
-auto-clear, `cosmic-config` settings.
+Prompt objects), the Secret portal backend, an SSH agent, the daemon, the CLI,
+and a GUI that browses/searches/reveals/copies with clipboard auto-clear.
 
-Next, roughly in order of how much each unties you from gnome-keyring:
+**SSH agent** (`passmand --ssh-agent`) serves vault items of kind `SshKey`.
+Verified with real OpenSSH: `ssh-add -l` lists the key with a matching
+fingerprint, `ssh-keygen -Y sign` signs through the agent, and `-Y verify`
+accepts the result. It refuses `ADD_IDENTITY`/`REMOVE_IDENTITY` on purpose —
+every process running as you can reach that socket.
 
-1. **SSH agent** — `passman-agent` is a placeholder; the socket is unclaimed on
-   this machine, so this is free ground.
-2. **`org.freedesktop.impl.portal.Secret` backend** — makes passman the Flatpak
-   per-app key provider. Single method, `RetrieveSecret`, over a pipe FD.
-3. **GUI editing** — create/edit/delete items, password generator UI, import.
-4. **Prompt UI** — the daemon exposes `Prompt` objects and a channel; the
-   frontend needs to answer them so a locked vault can be unlocked on demand.
-5. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
-   KeePassXC, Bitwarden, macOS Keychain.
-6. **COSMIC applet** — panel indicator with lock state and quick copy.
-7. **PAM module** — unlock at login, the last thing tying a session to
-   gnome-keyring.
-8. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+**Secret portal** (`passmand --portal`) implements
+`org.freedesktop.impl.portal.Secret`. App secrets are *derived*, not stored:
+`HKDF-SHA256(portal_master, info = "org.freedesktop.portal.Secret\0" || app_id)`,
+so they are reproducible from a vault backup and no two apps can collide.
+Install `res/passman.portal` into `/usr/share/xdg-desktop-portal/portals/` to
+make xdg-desktop-portal route to it.
+
+Next:
+
+1. **GUI editing** — create/edit/delete items, password generator UI.
+2. **Prompt UI** — the daemon exposes `Prompt` objects and a channel; the
+   frontend needs to answer them so a locked vault can unlock on demand.
+3. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
+   KeePassXC, Bitwarden.
+4. **COSMIC applet** — panel indicator with lock state and quick copy.
+5. **TPM2 sealing + PIN** — see below; the prerequisite for a credible
+   `pam_passman.so`.
+6. **PAM module** — unlock at login and authorise `sudo`.
+7. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+
+## On authorising `sudo`
+
+A PAM module that accepts "the user's daemon said yes" is *weaker* than typing
+a password: any process running as you could claim the bus name and mint root
+for itself. The fix is to anchor the decision in something your own uid cannot
+forge, which is exactly what Windows Hello does — the PIN is not a password,
+it unlocks a TPM-bound key, and the TPM's dictionary-attack lockout is what
+makes a 6-digit PIN viable.
+
+The same primitive exists here. This machine has a TPM 2.0 (`/dev/tpmrm0`),
+`tpm2-tss`, and `systemd-cryptenroll --tpm2-with-pin` as a reference
+implementation; `tss-esapi` is the Rust binding. Sealing a secret under a
+TPM policy with an `authValue` gives a PIN that is rate-limited in hardware.
+Note the device node is `root:tss 0660` and your user is not in `tss` — which
+is the right shape, since the PAM module runs as root.
+
+Ordering matters: TPM sealing first, `pam_passman.so` only after.
 
 ## Licence
 

@@ -9,6 +9,7 @@
 
 pub mod dh;
 pub mod error;
+pub mod portal;
 pub mod service;
 pub mod session;
 

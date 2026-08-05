@@ -48,7 +48,8 @@ base32 = "0.5"
 base64ct = { version = "1.8", features = ["alloc"] }
 
 # --- SSH -------------------------------------------------------------------
-ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std"] }
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std", "getrandom"] }
+signature = "2"
 ssh-encoding = "0.2"
 
 # --- Serialization / errors / logging --------------------------------------

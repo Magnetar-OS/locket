@@ -42,6 +42,20 @@ struct Args {
     /// is visible to anything that can read /proc/<pid>/environ.
     #[arg(long, value_name = "VAR")]
     passphrase_env: Option<String>,
+
+    /// Also serve org.freedesktop.impl.portal.Secret, so sandboxed Flatpak
+    /// apps get their per-application key from passman. Requires the matching
+    /// .portal file to be installed; see res/passman.portal.
+    #[arg(long)]
+    portal: bool,
+
+    /// Serve an SSH agent from the vault's SSH keys.
+    #[arg(long)]
+    ssh_agent: bool,
+
+    /// Agent socket path. Defaults to $XDG_RUNTIME_DIR/passman/ssh-agent.sock
+    #[arg(long, value_name = "PATH")]
+    ssh_agent_socket: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -93,6 +107,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "vault unlocked"
     );
 
+    // Load SSH identities before the vault moves into the shared state.
+    let ssh_agent = args.ssh_agent.then(|| {
+        let agent = passman_agent::Agent::load_from_vault(&vault);
+        tracing::info!(keys = agent.len(), "loaded SSH identities");
+        Arc::new(Mutex::new(agent))
+    });
+
     let mut state = ServiceState::new(ServiceConfig {
         bus_name: bus_name.clone(),
         autosave: true,
@@ -100,8 +121,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.vault = Some(vault);
     let state = Arc::new(Mutex::new(state));
 
+    if let Some(agent) = ssh_agent {
+        let socket = match args.ssh_agent_socket {
+            Some(p) => p,
+            None => passman_agent::listener::default_socket_path()
+                .ok_or("XDG_RUNTIME_DIR is unset; pass --ssh-agent-socket")?,
+        };
+        let listener = passman_agent::listener::bind(&socket)?;
+        tracing::info!(socket = %socket.display(), "serving SSH agent");
+        println!("SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;", socket.display());
+        tokio::spawn(passman_agent::listener::serve(listener, agent));
+    }
+
     let connection = zbus::connection::Builder::session()?.build().await?;
     register_objects(connection.object_server(), &state).await?;
+
+    if args.portal {
+        connection
+            .object_server()
+            .at(
+                "/org/freedesktop/portal/desktop",
+                passman_secret::portal::SecretPortal::new(state.clone()),
+            )
+            .await?;
+        connection
+            .request_name_with_flags(
+                "org.freedesktop.impl.portal.desktop.passman",
+                RequestNameFlags::AllowReplacement.into(),
+            )
+            .await?;
+        tracing::info!("serving org.freedesktop.impl.portal.Secret");
+    }
 
     // AllowReplacement lets a newer passmand — or the user's real keyring —
     // take the name back without a manual kill.
