@@ -148,14 +148,32 @@ make xdg-desktop-portal route to it.
 
 Next:
 
-1. **Prompt UI** — the daemon exposes `Prompt` objects and a channel; the
-   frontend needs to answer them so a locked vault can unlock on demand.
-2. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
+1. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
    KeePassXC, Bitwarden.
 3. **COSMIC applet** — panel indicator with lock state and quick copy.
 4. **PAM module** — unlock at login and authorise `sudo`, on top of the TPM
    slot below.
 5. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+
+## Unlocking on demand
+
+The Secret Service spec has no way to *unlock* a service — its `Prompt` objects
+say "ask the user" without saying how, because on GNOME the answer is a
+gnome-keyring-specific dialog. `org.passman.Manager1` is that missing half:
+`Unlock(passphrase) -> bool`, `Lock()`, and `Locked`/`ItemCount`/`VaultPath`
+properties, plus an `UnlockRequested` signal.
+
+A locked passman vault cannot be enumerated at all — labels and attributes live
+inside the sealed body, which is the point, but it means gnome-keyring's trick
+of listing locked items is unavailable. Returning "no matches" would be a lie
+clients believe, reporting a secret as *missing* rather than locked. So
+`SearchItems` on a locked vault emits `UnlockRequested` and waits.
+
+Verified end to end on a private bus: with the vault locked, `secret-tool
+lookup` blocks, `UnlockRequested` fires, a frontend answering with `Unlock`
+releases the pending call, and the client gets its secret. A wrong passphrase
+returns `false` rather than a D-Bus error, since a typo is an expected outcome
+and not a fault.
 
 ## Security keys (FIDO2)
 

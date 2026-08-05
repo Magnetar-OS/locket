@@ -119,6 +119,28 @@ impl ServiceState {
         }
     }
 
+    /// Ask the frontend to unlock, and report whether it did.
+    ///
+    /// Returns `false` immediately when no frontend is attached, so a headless
+    /// daemon fails fast instead of stalling every caller.
+    pub async fn request_unlock(state: &SharedState) -> bool {
+        let sender = {
+            let guard = state.lock().await;
+            if !guard.is_locked() {
+                return true;
+            }
+            guard.prompts.clone()
+        };
+        let Some(tx) = sender else {
+            return false;
+        };
+        let (reply, wait) = oneshot::channel();
+        if tx.send(PromptRequest::Unlock { reply }).await.is_err() {
+            return false;
+        }
+        wait.await.unwrap_or(false)
+    }
+
     fn next_prompt_path(&self) -> Result<OwnedObjectPath> {
         let n = self.prompt_counter.fetch_add(1, Ordering::Relaxed);
         OwnedObjectPath::try_from(format!("{}/p{n}", crate::PROMPT_PREFIX))
@@ -331,12 +353,23 @@ impl SecretService {
         &self,
         attributes: HashMap<String, String>,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
+        // A locked passman vault cannot be enumerated at all: labels and
+        // attributes live inside the sealed body, which is the point — nothing
+        // about your secrets leaks at rest. gnome-keyring can list locked items
+        // because its metadata is plaintext.
+        //
+        // The consequence is that returning "no matches" here would be a lie
+        // that clients believe: libsecret would report the secret as missing
+        // rather than prompting. So ask for an unlock and wait.
+        if self.state.lock().await.is_locked() {
+            let unlocked = ServiceState::request_unlock(&self.state).await;
+            if !unlocked {
+                return Err(fdo::Error::from(Error::Locked));
+            }
+        }
+
         let state = self.state.lock().await;
-        let Ok(vault) = state.vault() else {
-            // Locked: we genuinely cannot enumerate. Clients respond by
-            // unlocking the aliased collection and retrying.
-            return Ok((Vec::new(), Vec::new()));
-        };
+        let vault = state.vault().map_err(fdo::Error::from)?;
 
         let query: std::collections::BTreeMap<String, String> = attributes.into_iter().collect();
         let mut unlocked = Vec::new();

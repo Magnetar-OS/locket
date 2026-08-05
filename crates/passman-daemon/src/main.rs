@@ -133,8 +133,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(passman_agent::listener::serve(listener, agent));
     }
 
+    // The prompt bridge turns a locked-vault Prompt into a request the
+    // frontend can answer; without a receiver the Prompt objects can only
+    // refuse.
+    let (prompt_tx, prompt_rx) = tokio::sync::mpsc::channel(8);
+    state.lock().await.prompts = Some(prompt_tx);
+
     let connection = zbus::connection::Builder::session()?.build().await?;
     register_objects(connection.object_server(), &state).await?;
+
+    connection
+        .object_server()
+        .at(
+            passman_secret::manager::MANAGER_PATH,
+            passman_secret::manager::Manager::new(state.clone(), vault_path.clone()),
+        )
+        .await?;
+    tokio::spawn(passman_secret::manager::serve_prompts(
+        connection.clone(),
+        state.clone(),
+        prompt_rx,
+    ));
 
     if args.portal {
         connection
