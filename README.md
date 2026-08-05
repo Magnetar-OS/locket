@@ -180,13 +180,26 @@ PCR binding is deliberately *not* used: binding to firmware measurements means
 a BIOS update locks you out of your own vault, and the PIN is what provides the
 security here.
 
-**Not verified on hardware.** `/dev/tpmrm0` is `root:tss 0660` and the
-developing user is not in `tss`, and no `swtpm` simulator is installed, so the
-two round-trip tests are `#[ignore]`d behind `PASSMAN_TPM_TESTS=1`. Run them
-against a real TPM before trusting this path.
+**Verified against a TPM 2.0 simulator** (`swtpm`, rev 1.83) — seal/unseal
+round trip, wrong-PIN rejection, and a TPM slot opening a real vault. The tests
+are `#[ignore]`d behind `PASSMAN_TPM_TESTS=1` and a TCTI:
 
-Ordering still matters: prove the TPM slot on hardware first, `pam_passman.so`
-only after.
+```sh
+swtpm socket --tpm2 --tpmstate dir=/tmp/tpm --ctrl type=tcp,port=2322 \
+  --server type=tcp,port=2321 --flags not-need-init,startup-clear &
+TCTI="swtpm:host=localhost,port=2321" PASSMAN_TPM_TESTS=1 \
+  cargo test -p passman-tpm -- --ignored
+```
+
+The lockout claim is verified too, by `examples/da_probe.rs`. With the
+simulator's `MAX_AUTH_FAIL = 3`, two wrong PINs increment the DA counter and
+the third puts the TPM in lockout mode — after which **the correct PIN is also
+refused** until the recovery interval expires. Lockout is device-wide, so this
+is not free: it is exactly why a passphrase slot must always remain enrolled.
+
+Still to do before `pam_passman.so`: confirm the same behaviour on the discrete
+TPM rather than the simulator, since `MAX_AUTH_FAIL` and the recovery interval
+are vendor-set.
 
 ## Licence
 

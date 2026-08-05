@@ -38,7 +38,7 @@ pub enum Outcome {
     /// Keep editing.
     Continue,
     /// Commit `item`; `id` is `None` when it is a new item.
-    Save { id: Option<Uuid>, item: Item },
+    Save { id: Option<Uuid>, item: Box<Item> },
     Cancel,
 }
 
@@ -238,7 +238,7 @@ impl Editor {
 
             EditorMessage::Save => match self.to_item() {
                 Ok(item) => {
-                    return Outcome::Save { id: self.id, item };
+                    return Outcome::Save { id: self.id, item: Box::new(item) };
                 }
                 Err(e) => self.error = Some(e),
             },
@@ -406,7 +406,7 @@ mod tests {
 
     fn saved(editor: &mut Editor) -> Option<Item> {
         match editor.update(EditorMessage::Save) {
-            Outcome::Save { item, .. } => Some(item),
+            Outcome::Save { item, .. } => Some(*item),
             _ => None,
         }
     }

@@ -29,28 +29,47 @@ futures-util = "0.3"
 zbus = { version = "5.18", default-features = false, features = ["tokio"] }
 
 # --- Crypto ----------------------------------------------------------------
-# Pinned to the aead 0.5 generation: argon2 0.5 + chacha20poly1305 0.10 are the
-# combination with the most deployment mileage. Bumping either requires moving
-# both, plus the aead 0.6 API migration.
-argon2 = { version = "0.5", features = ["alloc", "password-hash"] }
-chacha20poly1305 = { version = "0.11", features = ["alloc"] }
+# HELD BACK DELIBERATELY — do not `cargo upgrade --incompatible` these.
+#
+# chacha20poly1305, aes, cbc, hmac, sha2, sha1, hkdf and signature form one
+# RustCrypto generation (aead 0.5 / cipher 0.4 / digest 0.10 / signature 2).
+# Newer releases of all of them exist, but two crates we depend on have not
+# followed and have no newer release as of 2026-08:
+#
+#   * ssh-key 0.6.7 (newest) implements `Signer<Signature>` from signature 2.
+#     Bumping to signature 3 breaks the SSH agent with no forward fix.
+#   * argon2 0.5.3 (newest) is built on password-hash 0.5 / digest 0.10.
+#     Bumping sha2/hmac to the digest 0.11 line splits the tree.
+#
+# Upgrading anyway compiles nothing: aes 0.9/cbc 0.2 drop
+# `encrypt_padded_vec_mut`, and hmac 0.13 moves `new_from_slice` from `Mac` to
+# `KeyInit`. Revisit when ssh-key and argon2 publish against the new
+# generation, and move the whole block together.
+#
+# These carry exact `=` requirements on purpose: `cargo upgrade` treats a
+# pinned requirement as opt-out and skips it even with `--incompatible`
+# (`--pinned` defaults to `ignore`), so the set cannot drift apart by accident.
+# Everything NOT entangled with digest/signature is kept current — see
+# getrandom 0.4 and num-bigint 0.5 below.
+argon2 = { version = "=0.5.3", features = ["alloc", "password-hash"] }
+chacha20poly1305 = { version = "=0.10.1", features = ["alloc"] }
 getrandom = "0.4"
 zeroize = { version = "1.9", features = ["derive", "alloc"] }
 subtle = "2.6"
-sha2 = "0.11"
-sha1 = "0.11"
-hmac = "0.13"
-hkdf = "0.13"
+sha2 = "=0.10.9"
+sha1 = "=0.10.7"
+hmac = "=0.12.1"
+hkdf = "=0.12.4"
 # Secret Service's `dh-ietf1024-sha256-aes128-cbc-pkcs7` session transport.
-aes = "0.9"
-cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+aes = "=0.8.4"
+cbc = { version = "=0.1.2", features = ["alloc", "block-padding"] }
 num-bigint = "0.5"
 base32 = "0.5"
 base64ct = { version = "1.8", features = ["alloc"] }
 
 # --- SSH -------------------------------------------------------------------
-ssh-key = { version = "0.6", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std", "getrandom"] }
-signature = "3"
+ssh-key = { version = "=0.6.7", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std", "getrandom"] }
+signature = "=2.2.0"
 ssh-encoding = "0.3"
 
 # --- Serialization / errors / logging --------------------------------------

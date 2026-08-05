@@ -84,7 +84,6 @@ pub enum Message {
     RequestDelete(Uuid),
     ConfirmDelete,
     CancelDelete,
-    Noop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +115,9 @@ pub struct App {
     revealed: HashSet<String>,
 
     settings: Settings,
+    /// Retained for the write path; nothing mutates settings until there is a
+    /// preferences UI, so this is read-only for now.
+    #[allow(dead_code)]
     config: Option<cosmic_config::Config>,
     toasts: widget::Toasts<Message>,
 
@@ -529,8 +531,6 @@ impl cosmic::Application for App {
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
         match message {
-            Message::Noop => {}
-
             Message::PassphraseChanged(v) => {
                 self.passphrase = v;
                 self.error = None;
@@ -704,6 +704,7 @@ impl cosmic::Application for App {
                     Outcome::Continue => {}
                     Outcome::Cancel => self.editor = None,
                     Outcome::Save { id, item } => {
+                        let item = *item;
                         let label = item.label.clone();
                         let new_id = item.id;
                         let Some(vault) = self.vault.as_mut() else {
