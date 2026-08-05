@@ -8,6 +8,7 @@ members = [
     "crates/passman-cli",
     "crates/passman-cosmic",
     "crates/passman-tpm",
+    "crates/passman-fido",
 ]
 
 [workspace.package]

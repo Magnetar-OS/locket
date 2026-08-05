@@ -58,9 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ))
             .with_field(Field::text(field_names::KEY_COMMENT, "idominikos@cachyos"))
             .with_attribute("host", "build.internal"),
-        Item::new(ItemKind::ApiToken, "Anthropic API")
-            .with_secret("sk-ant-not-a-real-key-0000")
-            .with_attribute("service", "api.anthropic.com"),
+        Item::new(ItemKind::ApiToken, "CI deploy token")
+            .with_secret("tok-not-a-real-key-0000")
+            .with_attribute("service", "ci.example.internal"),
         Item::new(ItemKind::OAuth, "Nextcloud desktop")
             .with_field(Field::text(field_names::CLIENT_ID, "nc-desktop"))
             .with_field(Field::secret(field_names::CLIENT_SECRET, "oauth-secret-value"))

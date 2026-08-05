@@ -36,6 +36,7 @@ crates/
   passman-cli      command line interface
   passman-cosmic   libcosmic GUI (binary: `passman`)
   passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
+  passman-fido     FIDO2 hmac-secret key slots (ctap-hid-fido2)
 ```
 
 The daemon holds the only copy of the data-encryption key. The GUI, the CLI and
@@ -147,18 +148,31 @@ make xdg-desktop-portal route to it.
 
 Next:
 
-1. **FIDO2 adapter** — `SlotFactor::Fido2` and its slot handling are done and
-   tested; the device half (`libfido2`, `hmac-secret`) is not written. Unlike a
-   fingerprint, `hmac-secret` returns real key material, so a token can derive
-   a slot key rather than merely voting yes.
-2. **Prompt UI** — the daemon exposes `Prompt` objects and a channel; the
+1. **Prompt UI** — the daemon exposes `Prompt` objects and a channel; the
    frontend needs to answer them so a locked vault can unlock on demand.
-3. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
+2. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
    KeePassXC, Bitwarden.
-4. **COSMIC applet** — panel indicator with lock state and quick copy.
-5. **PAM module** — unlock at login and authorise `sudo`, on top of the TPM
+3. **COSMIC applet** — panel indicator with lock state and quick copy.
+4. **PAM module** — unlock at login and authorise `sudo`, on top of the TPM
    slot below.
-6. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+5. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+
+## Security keys (FIDO2)
+
+`passman-fido` enrols a slot whose key comes from a token's `hmac-secret`
+extension. The distinction from a fingerprint reader matters: `fprintd` returns
+a *verdict*, so a daemon must already hold the key and merely gates releasing
+it. A FIDO2 token given a salt returns `HMAC-SHA256(credential_secret, salt)` —
+32 bytes that exist nowhere but on the device. The vault key therefore cannot
+be reconstructed from a stolen disk image at all.
+
+Credentials are created under the relying-party id `passman.local`, which is
+deliberately not a real domain: `hmac-secret` is scoped per (rp_id, credential),
+so a passman credential cannot be exercised by a website.
+
+**Not verified on hardware** — no FIDO2 token is attached to this machine. The
+two round-trip tests are `#[ignore]`d behind `PASSMAN_FIDO_TESTS=1` (plus
+`PASSMAN_FIDO_PIN` if your token has one); they need a physical touch.
 
 ## On authorising `sudo`
 
