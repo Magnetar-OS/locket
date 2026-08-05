@@ -1,0 +1,21 @@
+[package]
+name = "passman-import"
+description = "Importers for pass (password-store) and KeePass databases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+passman-core.workspace = true
+uuid.workspace = true
+dirs.workspace = true
+keepass = "0.13"
+csv = "1"
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

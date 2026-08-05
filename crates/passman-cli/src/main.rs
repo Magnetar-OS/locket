@@ -80,6 +80,41 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Import a `pass` (password-store) tree.
+    ImportPass {
+        /// Store directory. Defaults to $PASSWORD_STORE_DIR or ~/.password-store
+        #[arg(long)]
+        store: Option<PathBuf>,
+        /// gpg binary to decrypt with.
+        #[arg(long, default_value = "gpg")]
+        gpg: String,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import a KeePass/KeePassXC `.kdbx` database.
+    ImportKeepass {
+        /// Path to the .kdbx file.
+        database: PathBuf,
+        /// Read the database password from this environment variable.
+        #[arg(long, value_name = "VAR")]
+        db_passphrase_env: Option<String>,
+        /// Optional key file.
+        #[arg(long)]
+        keyfile: Option<PathBuf>,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import a browser/manager CSV export.
+    ///
+    /// Understands Chrome, Edge, Brave, Firefox, Safari, Bitwarden, 1Password
+    /// and KeePassXC exports by matching column aliases rather than guessing a
+    /// dialect, so a renamed column does not break the import.
+    ImportCsv {
+        /// The exported .csv file.
+        file: PathBuf,
+        #[arg(long)]
+        into: Option<String>,
+    },
     /// Generate a password without storing it.
     Generate {
         #[arg(long, default_value_t = 20)]
@@ -234,6 +269,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     vault.data().item_count()
                 );
             }
+        }
+
+        Command::ImportPass { store, gpg, into } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let store = match store {
+                Some(s) => s,
+                None => passman_import::pass::default_store_dir()
+                    .ok_or("could not determine the password-store directory")?,
+            };
+            let summary =
+                passman_import::pass::import_store(&mut vault, &store, &gpg, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", store.display());
+        }
+
+        Command::ImportKeepass {
+            database,
+            db_passphrase_env,
+            keyfile,
+            into,
+        } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let db_pw = match &db_passphrase_env {
+                Some(var) => std::env::var(var)
+                    .map_err(|_| format!("environment variable `{var}` is not set"))?,
+                None => rpassword::prompt_password(format!(
+                    "Password for {}: ",
+                    database.display()
+                ))?,
+            };
+            let summary = passman_import::keepass::import_kdbx(
+                &mut vault,
+                &database,
+                &db_pw,
+                keyfile.as_deref(),
+                into.as_deref(),
+            )?;
+            vault.save()?;
+            println!("imported {summary} from {}", database.display());
+        }
+
+        Command::ImportCsv { file, into } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary = passman_import::csv::import_file(&mut vault, &file, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", file.display());
+            // The export is every credential you own, in the clear.
+            eprintln!(
+                "\nNow delete {} — it is a plaintext copy of every password it held.",
+                file.display()
+            );
         }
 
         Command::Add {

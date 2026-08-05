@@ -37,6 +37,7 @@ crates/
   passman-cosmic   libcosmic GUI (binary: `passman`)
   passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
   passman-fido     FIDO2 hmac-secret key slots (ctap-hid-fido2)
+  passman-import   pass, KeePass/.kdbx and browser CSV importers
 ```
 
 The daemon holds the only copy of the data-encryption key. The GUI, the CLI and
@@ -163,7 +164,30 @@ passman-cli import                    # from org.freedesktop.secrets
 passman-cli import --from org.passman.secrets --into Imported
 ```
 
-The importer is a Secret Service *client*, not a file parser: gnome-keyring's
+There are importers for the other common escape routes too:
+
+```sh
+passman-cli import-csv chrome-passwords.csv     # Chrome, Edge, Brave, Firefox,
+                                                # Safari, Bitwarden, 1Password
+passman-cli import-pass                         # ~/.password-store
+passman-cli import-keepass secrets.kdbx
+```
+
+The CSV importer matches *column aliases* rather than detecting a vendor
+dialect, because every exporter names things differently and renames them
+between releases. Chrome's `name,url,username,password,note` and Bitwarden's
+`login_uri,login_username,login_password,login_totp` fall out of one table, and
+columns nothing recognises are kept as custom fields instead of being dropped.
+A browser export is a plaintext copy of every credential you own, so the CLI
+tells you to delete it afterwards.
+
+`import-pass` shells out to `gpg` rather than linking OpenPGP: the entries are
+encrypted to your own key, which lives in your `gpg-agent` behind its own
+pinentry and possibly a smartcard. It is tolerant by design — an unrecognised
+line becomes notes rather than being lost, and `note to self: rotate in June`
+stays prose instead of becoming a field called `note to self`.
+
+The Secret Service importer is a *client*, not a file parser: gnome-keyring's
 on-disk format is undocumented and version-specific, but its D-Bus surface is a
 standard passman already implements the other half of. The same code therefore
 imports from KWallet or anything else conforming.
