@@ -43,6 +43,14 @@ pub enum SlotFactor {
     Tpm2 {
         /// Base64 of the TPM's sealed object (public + private parts).
         sealed: String,
+        /// Which storage parent the blob was sealed under.
+        ///
+        /// The parent is regenerated from a fixed template on every use, so a
+        /// blob is only loadable under the exact template that sealed it.
+        /// Recording it means changing the default parent cannot silently
+        /// brick a slot somebody already enrolled.
+        #[serde(default)]
+        parent: TpmParent,
         /// PCRs bound into the policy, if any. Empty means PIN only.
         #[serde(default)]
         pcrs: Vec<u32>,
@@ -73,6 +81,19 @@ impl SlotFactor {
             SlotFactor::Fido2 { .. } => SlotKind::Fido2,
         }
     }
+}
+
+/// The storage-root template a TPM slot's blob was sealed under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TpmParent {
+    /// RSA-2048. The historical default, and painfully slow on firmware TPMs:
+    /// key generation alone costs seconds.
+    #[default]
+    Rsa2048,
+    /// NIST P-256. Same security envelope, orders of magnitude faster to
+    /// derive, which matters because the parent is regenerated on every unlock.
+    EccP256,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -348,6 +369,7 @@ mod tests {
             "TPM 2.0",
             SlotFactor::Tpm2 {
                 sealed: base64_encode(b"opaque-tpm-blob"),
+                parent: Default::default(),
                 pcrs: vec![7],
                 with_pin: true,
             },
@@ -396,6 +418,7 @@ mod tests {
             },
             SlotFactor::Tpm2 {
                 sealed: base64_encode(b"blob"),
+                parent: Default::default(),
                 pcrs: vec![0, 7],
                 with_pin: true,
             },

@@ -34,19 +34,21 @@
 use base64ct::{Base64, Encoding};
 use passman_core::{
     crypto::SymKey,
-    slots::{SlotFactor, SlotOpener},
+    slots::{SlotFactor, SlotOpener, TpmParent},
 };
 use tss_esapi::{
     Context, TctiNameConf,
     attributes::ObjectAttributesBuilder,
     interface_types::{
         algorithm::{HashingAlgorithm, PublicAlgorithm},
+        ecc::EccCurve,
         key_bits::RsaKeyBits,
         resource_handles::Hierarchy,
     },
     structures::{
-        Auth, KeyedHashScheme, Private, Public, PublicBuilder, PublicKeyedHashParameters,
-        RsaExponent, SensitiveData, SymmetricDefinitionObject,
+        Auth, EccScheme, KeyDerivationFunctionScheme, KeyedHashScheme, Private, Public,
+        PublicBuilder, PublicEccParametersBuilder, PublicKeyedHashParameters, RsaExponent,
+        SensitiveData, SymmetricDefinitionObject,
     },
     traits::{Marshall, UnMarshall},
     utils::create_restricted_decryption_rsa_public,
@@ -116,15 +118,58 @@ fn unpack(blob: &str) -> Result<(Vec<u8>, Vec<u8>)> {
 // Templates
 // ---------------------------------------------------------------------------
 
+/// The default parent for *new* enrolments.
+///
+/// ECC, because the parent is regenerated from its template on every single
+/// unlock and firmware TPMs are painfully slow at RSA key generation — on the
+/// AMD fTPM this machine has, RSA-2048 costs seconds per unlock where P-256
+/// costs milliseconds. Existing slots keep whatever they recorded.
+pub const DEFAULT_PARENT: TpmParent = TpmParent::EccP256;
+
 /// The storage-root-key template. Deterministic, so the parent is recreated on
 /// demand rather than occupying one of the TPM's few persistent handles.
-fn primary_template() -> Result<Public> {
-    create_restricted_decryption_rsa_public(
-        SymmetricDefinitionObject::AES_128_CFB,
-        RsaKeyBits::Rsa2048,
-        RsaExponent::default(),
-    )
-    .map_err(Into::into)
+///
+/// A blob is only loadable under the exact template that sealed it, which is
+/// why the choice is recorded in the slot rather than assumed.
+fn primary_template(parent: TpmParent) -> Result<Public> {
+    match parent {
+        TpmParent::Rsa2048 => create_restricted_decryption_rsa_public(
+            SymmetricDefinitionObject::AES_128_CFB,
+            RsaKeyBits::Rsa2048,
+            RsaExponent::default(),
+        )
+        .map_err(Into::into),
+
+        TpmParent::EccP256 => {
+            let object_attributes = ObjectAttributesBuilder::new()
+                .with_fixed_tpm(true)
+                .with_fixed_parent(true)
+                .with_sensitive_data_origin(true)
+                .with_user_with_auth(true)
+                .with_restricted(true)
+                .with_decrypt(true)
+                .build()?;
+
+            let ecc_parameters = PublicEccParametersBuilder::new()
+                .with_symmetric(SymmetricDefinitionObject::AES_128_CFB)
+                .with_ecc_scheme(EccScheme::Null)
+                .with_curve(EccCurve::NistP256)
+                .with_key_derivation_function_scheme(KeyDerivationFunctionScheme::Null)
+                .with_is_signing_key(false)
+                .with_is_decryption_key(true)
+                .with_restricted(true)
+                .build()?;
+
+            PublicBuilder::new()
+                .with_public_algorithm(PublicAlgorithm::Ecc)
+                .with_name_hashing_algorithm(HashingAlgorithm::Sha256)
+                .with_object_attributes(object_attributes)
+                .with_ecc_parameters(ecc_parameters)
+                .with_ecc_unique_identifier(Default::default())
+                .build()
+                .map_err(Into::into)
+        }
+    }
 }
 
 /// The template for the sealed data object.
@@ -189,8 +234,14 @@ pub fn enroll(pin: Option<&str>) -> Result<(SlotFactor, SymKey)> {
 
     let mut context = open_context()?;
     let (public, private) = context.execute_with_nullauth_session(|ctx| {
-        let primary =
-            ctx.create_primary(Hierarchy::Owner, primary_template()?, None, None, None, None)?;
+        let primary = ctx.create_primary(
+            Hierarchy::Owner,
+            primary_template(DEFAULT_PARENT)?,
+            None,
+            None,
+            None,
+            None,
+        )?;
         let sealed = ctx.create(
             primary.key_handle,
             sealed_template(with_pin)?,
@@ -206,6 +257,7 @@ pub fn enroll(pin: Option<&str>) -> Result<(SlotFactor, SymKey)> {
         // `Public` is a structure and marshalls; `Private` is already an
         // opaque TPM-encrypted buffer, so its bytes go through verbatim.
         sealed: pack(&public.marshall()?, private.value()),
+        parent: DEFAULT_PARENT,
         // PCR binding is a separate decision from the PIN and is deliberately
         // not taken here: binding to firmware measurements means a BIOS update
         // locks you out of your own vault.
@@ -220,7 +272,10 @@ pub fn enroll(pin: Option<&str>) -> Result<(SlotFactor, SymKey)> {
 /// Recover a sealed slot's key-encryption key.
 pub fn unseal(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
     let SlotFactor::Tpm2 {
-        sealed, with_pin, ..
+        sealed,
+        with_pin,
+        parent,
+        ..
     } = factor
     else {
         return Err(Error::WrongFactor);
@@ -239,8 +294,14 @@ pub fn unseal(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
 
     let mut context = open_context()?;
     let data = context.execute_with_nullauth_session(|ctx| {
-        let primary =
-            ctx.create_primary(Hierarchy::Owner, primary_template()?, None, None, None, None)?;
+        let primary = ctx.create_primary(
+            Hierarchy::Owner,
+            primary_template(*parent)?,
+            None,
+            None,
+            None,
+            None,
+        )?;
         let handle = ctx.load(primary.key_handle, private, public)?;
         if let Some(auth) = auth {
             ctx.tr_set_auth(handle.into(), auth)?;
@@ -351,6 +412,7 @@ mod tests {
     fn a_pinned_slot_refuses_a_missing_pin_without_touching_hardware() {
         let factor = SlotFactor::Tpm2 {
             sealed: pack(&[0u8; 8], &[0u8; 8]),
+            parent: Default::default(),
             pcrs: vec![],
             with_pin: true,
         };

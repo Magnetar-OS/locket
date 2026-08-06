@@ -276,6 +276,7 @@ mod tests {
         let opener = FidoOpener::new(None);
         let tpm = SlotFactor::Tpm2 {
             sealed: Base64::encode_string(b"blob"),
+            parent: Default::default(),
             pcrs: vec![],
             with_pin: true,
         };

@@ -278,9 +278,12 @@ PCR binding is deliberately *not* used: binding to firmware measurements means
 a BIOS update locks you out of your own vault, and the PIN is what provides the
 security here.
 
-**Verified against a TPM 2.0 simulator** (`swtpm`, rev 1.83) — seal/unseal
-round trip, wrong-PIN rejection, and a TPM slot opening a real vault. The tests
-are `#[ignore]`d behind `PASSMAN_TPM_TESTS=1` and a TCTI:
+**Verified on real hardware** — an AMD firmware TPM — as well as against
+`swtpm`. Seal/unseal round trip, wrong-PIN rejection, and a TPM slot opening a
+real vault all pass, and the chip's dictionary-attack counter incremented
+exactly once per wrong PIN, which is the property the whole design rests on.
+
+The tests are `#[ignore]`d behind `PASSMAN_TPM_TESTS=1` and a TCTI:
 
 ```sh
 swtpm socket --tpm2 --tpmstate dir=/tmp/tpm --ctrl type=tcp,port=2322 \
@@ -289,15 +292,31 @@ TCTI="swtpm:host=localhost,port=2321" PASSMAN_TPM_TESTS=1 \
   cargo test -p passman-tpm -- --ignored
 ```
 
-The lockout claim is verified too, by `examples/da_probe.rs`. With the
+The lockout claim is demonstrated by `examples/da_probe.rs`. With the
 simulator's `MAX_AUTH_FAIL = 3`, two wrong PINs increment the DA counter and
-the third puts the TPM in lockout mode — after which **the correct PIN is also
-refused** until the recovery interval expires. Lockout is device-wide, so this
-is not free: it is exactly why a passphrase slot must always remain enrolled.
+the third puts the TPM in lockout — after which **the correct PIN is also
+refused** until recovery. Lockout is device-wide, so this is not free: it is
+exactly why a passphrase slot must always remain enrolled.
 
-Still to do before `pam_passman.so`: confirm the same behaviour on the discrete
-TPM rather than the simulator, since `MAX_AUTH_FAIL` and the recovery interval
-are vendor-set.
+**Vendor variance is large, so read your own chip's numbers before trusting
+any of this.** `tpm2_getcap properties-variable` reports them. The AMD fTPM
+tested here allows 32 failures with a 2-hour decay and a 24-hour lockout
+recovery; the simulator allows 3. Run `da_probe` only after confirming nothing
+else on the machine depends on the TPM — on a dual-boot system that plausibly
+includes BitLocker.
+
+### Why the parent key is ECC
+
+The storage parent is regenerated from a fixed template on *every* unlock
+rather than occupying a persistent handle. Firmware TPMs are slow at RSA key
+generation, and it shows: on the AMD fTPM here the hardware tests took 12.15 s
+with an RSA-2048 parent and **2.51 s** with NIST P-256 — roughly 3 s versus
+0.6 s per unlock. At three seconds a `sudo` prompt is unusable.
+
+A sealed blob is only loadable under the exact template that sealed it, so the
+choice is recorded per slot (`TpmParent`) and defaults to RSA for anything
+enrolled before this change. Changing the default cannot silently brick an
+enrolled factor.
 
 ## Licence
 

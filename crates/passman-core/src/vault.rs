@@ -594,6 +594,7 @@ mod tests {
             "TPM 2.0",
             SlotFactor::Tpm2 {
                 sealed: base64_encode(b"opaque"),
+                parent: Default::default(),
                 pcrs: vec![],
                 with_pin: true,
             },
@@ -626,6 +627,7 @@ mod tests {
             "TPM 2.0",
             SlotFactor::Tpm2 {
                 sealed: base64_encode(b"opaque"),
+                parent: Default::default(),
                 pcrs: vec![],
                 with_pin: false,
             },
@@ -656,6 +658,7 @@ mod tests {
                 "TPM 2.0",
                 SlotFactor::Tpm2 {
                     sealed: base64_encode(b"o"),
+                    parent: Default::default(),
                     pcrs: vec![],
                     with_pin: false,
                 },
