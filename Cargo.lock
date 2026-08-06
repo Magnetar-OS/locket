@@ -1436,6 +1436,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmic-panel-config"
+version = "0.1.0"
+source = "git+https://github.com/pop-os/cosmic-panel#d6699ffc423a3830bf4cab7e2c7f08a173e998f0"
+dependencies = [
+ "anyhow",
+ "cosmic-config 1.0.0 (git+https://github.com/pop-os/libcosmic)",
+ "serde",
+ "smithay-client-toolkit",
+ "tracing",
+ "wayland-protocols-wlr",
+ "xdg-shell-wrapper-config",
+]
+
+[[package]]
 name = "cosmic-protocols"
 version = "0.2.0"
 source = "git+https://github.com/pop-os/cosmic-protocols?rev=32283d7#32283d76a8d0342da74c4cc022a533c52dcf378f"
@@ -3783,6 +3797,7 @@ dependencies = [
  "cosmic-client-toolkit",
  "cosmic-config 1.0.0 (git+https://github.com/pop-os/libcosmic?rev=43a50cb6f5af18fa6cbea535fb46460a3c5cd573)",
  "cosmic-freedesktop-icons",
+ "cosmic-panel-config",
  "cosmic-settings-config",
  "cosmic-settings-daemon",
  "cosmic-theme",
@@ -3813,6 +3828,7 @@ dependencies = [
  "palette",
  "phf",
  "rfd",
+ "ron 0.12.2",
  "rust-embed",
  "rustix 1.1.4",
  "serde",
@@ -4813,6 +4829,17 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "passman-applet"
+version = "0.1.0"
+dependencies = [
+ "libcosmic",
+ "passman-secret",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -8369,6 +8396,15 @@ name = "xdg"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
+
+[[package]]
+name = "xdg-shell-wrapper-config"
+version = "0.1.0"
+source = "git+https://github.com/pop-os/cosmic-panel#d6699ffc423a3830bf4cab7e2c7f08a173e998f0"
+dependencies = [
+ "serde",
+ "wayland-protocols-wlr",
+]
 
 [[package]]
 name = "xkbcommon"

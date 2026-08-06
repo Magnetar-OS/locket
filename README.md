@@ -35,6 +35,7 @@ crates/
   passman-agent    SSH agent protocol
   passman-cli      command line interface
   passman-cosmic   libcosmic GUI (binary: `passman`)
+  passman-applet   COSMIC panel indicator
   passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
   passman-fido     FIDO2 hmac-secret key slots (ctap-hid-fido2)
   passman-import   pass, KeePass/.kdbx and browser CSV importers
@@ -277,6 +278,22 @@ touched no system PAM config:
 * wrong login password → `pam_unix` rejects it, vault untouched;
 * correct login password but a *different* vault passphrase → **the session
   still opens**, the vault stays locked, and the module says so once.
+
+## Panel applet
+
+`passman-applet` shows lock state in the COSMIC panel: a secure icon when the
+vault is open, an insecure one when it is not, and a neutral one when no daemon
+is running — it does not claim "locked" for a vault it cannot see.
+
+It can **lock** in one click but deliberately cannot **unlock**: that button
+opens the main window instead. A panel popup is a poor place to type a master
+passphrase — small, undecorated, untitled, and appearing exactly where users
+are trained to expect system prompts, which is the shape a spoofed prompt would
+take. Locking is safe to expose because a fake "lock" button costs nothing.
+
+The applet and the GUI share one `ManagerProxy` definition in
+`passman-secret::client`; a drifting copy is the kind of bug that surfaces as
+"the applet says locked but the window says unlocked".
 
 ## Managing unlock factors
 

@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client;
 pub mod dh;
 pub mod error;
 pub mod import;

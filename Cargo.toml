@@ -7,6 +7,7 @@ members = [
     "crates/passman-daemon",
     "crates/passman-cli",
     "crates/passman-cosmic",
+    "crates/passman-applet",
     "crates/passman-tpm",
     "crates/passman-fido",
     "crates/passman-import",
