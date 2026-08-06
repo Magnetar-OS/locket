@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod daemon;
 mod editor;
+mod security;
 
 use cosmic::app::Settings;
 use cosmic::iced::Size;

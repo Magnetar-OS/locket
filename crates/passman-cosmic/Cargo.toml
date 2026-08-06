@@ -11,8 +11,18 @@ repository.workspace = true
 name = "passman"
 path = "src/main.rs"
 
+[features]
+# Hardware factors are optional at build time: tss-esapi needs libtss2 and
+# ctap-hid-fido2 needs hidapi, and neither is present everywhere. The GUI
+# degrades to passphrase-only enrolment without them.
+default = ["tpm", "fido"]
+tpm = ["dep:passman-tpm"]
+fido = ["dep:passman-fido"]
+
 [dependencies]
 passman-core.workspace = true
+passman-tpm = { path = "../passman-tpm", optional = true }
+passman-fido = { path = "../passman-fido", optional = true }
 passman-secret.workspace = true
 zbus.workspace = true
 tokio.workspace = true
@@ -45,3 +55,6 @@ features = [
 git = "https://github.com/pop-os/libcosmic"
 rev = "43a50cb6f5af18fa6cbea535fb46460a3c5cd573"
 features = ["macro"]
+
+[dev-dependencies]
+tempfile = "3"

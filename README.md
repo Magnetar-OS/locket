@@ -278,6 +278,38 @@ touched no system PAM config:
 * correct login password but a *different* vault passphrase → **the session
   still opens**, the vault stays locked, and the module says so once.
 
+## Managing unlock factors
+
+The **Security** page in the GUI lists every slot and adds or removes them. Two
+rules are enforced there rather than left to judgement:
+
+* A passphrase slot can never be the last one removed. Hardware is additive, so
+  a dead motherboard or a lost token must not be a lost vault — the button says
+  "Required" rather than silently failing.
+* The screen states what a TPM PIN actually rests on: the chip's lockout, not
+  the PIN's length, and that lockout is device-wide.
+
+Enrolment runs on a worker thread. A TPM seal takes the better part of a second
+and a security key takes as long as it takes someone to touch it, so the vault
+is moved into the worker and the screen says *"Waiting for you to touch your
+security key…"* rather than freezing or claiming to be locked.
+
+Hardware support is behind cargo features (`tpm`, `fido`, both on by default),
+because `tss-esapi` needs libtss2 and `ctap-hid-fido2` needs hidapi. Without
+them the GUI still builds and says the factor is unavailable in this build.
+
+Verified against the real AMD fTPM, through the same code path the GUI calls:
+
+```
+slots before:  Passphrase        argon2id m=65536KiB t=3 p=4
+slots after:   Passphrase        argon2id m=65536KiB t=3 p=4
+               TPM 2.0 (PIN)     TPM 2.0 + PIN
+
+correct PIN, no passphrase -> OPENED via TPM: 2 slots
+wrong PIN                  -> refused (one DA strike, 0x2 -> 0x3)
+passphrase                 -> still opens it
+```
+
 ## Security keys (FIDO2)
 
 `passman-fido` enrols a slot whose key comes from a token's `hmac-secret`

@@ -268,7 +268,7 @@ impl SlotOpener for RawKeyOpener {
     }
 }
 
-pub(crate) fn base64_encode(bytes: &[u8]) -> String {
+pub fn base64_encode(bytes: &[u8]) -> String {
     use base64ct::{Base64, Encoding};
     Base64::encode_string(bytes)
 }

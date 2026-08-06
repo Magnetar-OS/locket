@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::config::{self, Settings};
 use crate::daemon::{self, DaemonEvent};
 use crate::editor::{Editor, EditorMessage, Outcome};
+use crate::security::{self, Security};
 
 /// Sidebar entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub enum Category {
     All,
     Favorites,
     Kind(ItemKind),
+    /// Unlock factors: passphrase, TPM PIN, security key.
+    Security,
 }
 
 impl Category {
@@ -38,6 +41,7 @@ impl Category {
         match self {
             Category::All => "All Items".to_owned(),
             Category::Favorites => "Favorites".to_owned(),
+            Category::Security => "Security".to_owned(),
             Category::Kind(k) => format!("{}s", k.label()),
         }
     }
@@ -46,6 +50,7 @@ impl Category {
         match self {
             Category::All => "view-grid-symbolic",
             Category::Favorites => "starred-symbolic",
+            Category::Security => "security-high-symbolic",
             Category::Kind(k) => k.icon_name(),
         }
     }
@@ -54,6 +59,7 @@ impl Category {
         match self {
             Category::All => true,
             Category::Favorites => item.favorite,
+            Category::Security => false,
             Category::Kind(k) => item.kind == k,
         }
     }
@@ -88,6 +94,11 @@ pub enum Message {
     // -- daemon --
     Daemon(DaemonEvent),
     DaemonUnlocked(bool),
+    // -- unlock factors --
+    Security(security::Message),
+    /// Enrolment finished; the vault comes back in the shared slot because it
+    /// was moved into a blocking worker to keep the UI responsive.
+    SecurityEnrolled(Arc<Mutex<Option<Vault>>>, Option<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +143,7 @@ pub struct App {
 
     /// Set when the daemon asked for an unlock on an application's behalf, so
     /// the unlock screen can say why it appeared.
+    security: Security,
     unlock_requested_by_app: bool,
     /// Whether a passmand is reachable at all.
     daemon_present: bool,
@@ -492,6 +504,7 @@ impl cosmic::Application for App {
             Category::Kind(ItemKind::Card),
             Category::Kind(ItemKind::WifiNetwork),
             Category::Kind(ItemKind::Application),
+            Category::Security,
         ] {
             nav.insert()
                 .text(category.label())
@@ -523,6 +536,7 @@ impl cosmic::Application for App {
             toasts: widget::Toasts::new(Message::CloseToast),
             editor: None,
             pending_delete: None,
+            security: Security::default(),
             unlock_requested_by_app: false,
             daemon_present: false,
         };
@@ -792,6 +806,86 @@ impl cosmic::Application for App {
                 }
             }
 
+            Message::Security(msg) => match msg {
+                security::Message::PinChanged(v) => {
+                    self.security.pin = v;
+                    self.security.error = None;
+                }
+                security::Message::Dismiss => {
+                    self.security.error = None;
+                    self.security.notice = None;
+                }
+                security::Message::Remove(id) => {
+                    let Some(vault) = self.vault.as_mut() else {
+                        return Task::none();
+                    };
+                    match vault.remove_slot(id) {
+                        Ok(()) => self.security.notice = Some("Factor removed.".into()),
+                        Err(e) => self.security.error = Some(e.to_string()),
+                    }
+                }
+                security::Message::Enroll(factor) => {
+                    if self.security.busy.is_some() {
+                        return Task::none();
+                    }
+                    // Enrolment blocks — the TPM for the better part of a
+                    // second, a security key until somebody touches it. Move
+                    // the vault into a worker so the window keeps painting.
+                    let Some(vault) = self.vault.take() else {
+                        return Task::none();
+                    };
+                    let pin = std::mem::take(&mut self.security.pin);
+                    self.security.busy = Some(factor);
+                    self.security.error = None;
+                    self.security.notice = None;
+
+                    return cosmic::task::future(async move {
+                        let outcome = tokio::task::spawn_blocking(move || {
+                            let mut vault = vault;
+                            let result = match factor {
+                                security::Factor::TpmPin => {
+                                    security::enroll_tpm(&mut vault, &pin)
+                                }
+                                security::Factor::SecurityKey => {
+                                    security::enroll_fido(&mut vault, &pin)
+                                }
+                            };
+                            (vault, result)
+                        })
+                        .await;
+
+                        match outcome {
+                            Ok((vault, result)) => Message::SecurityEnrolled(
+                                Arc::new(Mutex::new(Some(vault))),
+                                result.err(),
+                            ),
+                            // The vault is gone with the panicked worker; say
+                            // so rather than pretending it is merely locked.
+                            Err(e) => Message::SecurityEnrolled(
+                                Arc::new(Mutex::new(None)),
+                                Some(format!("enrolment task failed: {e}")),
+                            ),
+                        }
+                    });
+                }
+            },
+
+            Message::SecurityEnrolled(slot, error) => {
+                self.security.busy = None;
+                self.vault = slot.lock().ok().and_then(|mut g| g.take());
+                match error {
+                    Some(e) => self.security.error = Some(e),
+                    None => {
+                        self.security.notice =
+                            Some("Factor added. Your passphrase still works.".into())
+                    }
+                }
+                if self.vault.is_none() {
+                    // Failing safe: without a vault there is nothing to show.
+                    self.screen = Screen::Locked;
+                }
+            }
+
             Message::RequestDelete(id) => self.pending_delete = Some(id),
             Message::CancelDelete => self.pending_delete = None,
 
@@ -824,6 +918,10 @@ impl cosmic::Application for App {
             Screen::Locked | Screen::Unlocking => self.unlock_view(),
             Screen::Browsing => match &self.editor {
                 Some(editor) => editor.view().map(Message::Editor),
+                None if self.category() == Category::Security => self
+                    .security
+                    .view(self.vault.as_ref())
+                    .map(Message::Security),
                 None => self.browse_view(),
             },
         };
