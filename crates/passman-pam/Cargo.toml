@@ -1,0 +1,18 @@
+[package]
+name = "passman-pam"
+description = "PAM module that unlocks the passman vault at login"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "pam_passman"
+crate-type = ["cdylib"]
+
+[dependencies]
+passman-ipc = { path = "../passman-ipc" }
+pam-bindings = "0.3"
+libc = "0.2"
+zeroize.workspace = true

@@ -4761,6 +4761,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e6eb142958d64335fb0e345c5b9ead2ecd6fc438c307e9d7d3c4fd428dbaf12"
 
 [[package]]
+name = "pam-bindings"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ca8ded51d7b55e02c84ee36e024ea9843d800da0ed371e07e6733092bd073e"
+dependencies = [
+ "libc",
+ "zeroize",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4918,6 +4928,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "passman-ipc"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "passman-pam"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pam-bindings",
+ "passman-ipc",
+ "zeroize",
+]
+
+[[package]]
 name = "passman-secret"
 version = "0.1.0"
 dependencies = [
@@ -4930,6 +4957,7 @@ dependencies = [
  "hmac 0.12.1",
  "num-bigint 0.5.1",
  "passman-core",
+ "passman-ipc",
  "serde",
  "sha2 0.10.9",
  "tempfile",

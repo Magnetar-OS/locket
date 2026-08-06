@@ -37,6 +37,15 @@ struct Args {
     #[arg(long)]
     init: bool,
 
+    /// Start with the vault locked and wait to be unlocked.
+    ///
+    /// The point of a login-time daemon: it comes up before anybody has typed
+    /// anything, then `pam_passman.so` (or the frontend) unlocks it. Without
+    /// this the daemon would demand a passphrase at startup, which is exactly
+    /// the prompt PAM exists to avoid.
+    #[arg(long, conflicts_with = "passphrase_env")]
+    locked: bool,
+
     /// Read the passphrase from this environment variable instead of the
     /// terminal. For tests and headless startup only — an environment variable
     /// is visible to anything that can read /proc/<pid>/environ.
@@ -48,6 +57,11 @@ struct Args {
     /// .portal file to be installed; see res/passman.portal.
     #[arg(long)]
     portal: bool,
+
+    /// Listen on the unlock socket so `pam_passman.so` can unlock the vault
+    /// at login. Defaults to $XDG_RUNTIME_DIR/passman/unlock.sock
+    #[arg(long)]
+    unlock_socket: bool,
 
     /// Serve an SSH agent from the vault's SSH keys.
     #[arg(long)]
@@ -80,36 +94,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Vault::default_path()?,
     };
 
-    let passphrase = match &args.passphrase_env {
-        Some(var) => {
-            std::env::var(var).map_err(|_| format!("environment variable `{var}` is not set"))?
+    let vault = if args.locked {
+        if !vault_path.exists() {
+            return Err(format!("no vault at {}", vault_path.display()).into());
         }
-        None => rpassword::prompt_password(format!("Passphrase for {}: ", vault_path.display()))?,
-    };
-
-    let vault = if vault_path.exists() {
-        tracing::info!(path = %vault_path.display(), "opening vault");
-        Vault::open(&vault_path, &passphrase)?
-    } else if args.init {
-        tracing::info!(path = %vault_path.display(), "creating vault");
-        Vault::create(&vault_path, &passphrase, KdfParams::default())?
+        tracing::info!(path = %vault_path.display(), "starting locked; waiting to be unlocked");
+        None
     } else {
-        return Err(format!(
-            "no vault at {} (pass --init to create one)",
-            vault_path.display()
-        )
-        .into());
+        let passphrase = match &args.passphrase_env {
+            Some(var) => std::env::var(var)
+                .map_err(|_| format!("environment variable `{var}` is not set"))?,
+            None => {
+                rpassword::prompt_password(format!("Passphrase for {}: ", vault_path.display()))?
+            }
+        };
+
+        let vault = if vault_path.exists() {
+            tracing::info!(path = %vault_path.display(), "opening vault");
+            Vault::open(&vault_path, &passphrase)?
+        } else if args.init {
+            tracing::info!(path = %vault_path.display(), "creating vault");
+            Vault::create(&vault_path, &passphrase, KdfParams::default())?
+        } else {
+            return Err(format!(
+                "no vault at {} (pass --init to create one)",
+                vault_path.display()
+            )
+            .into());
+        };
+
+        tracing::info!(
+            collections = vault.data().collections.len(),
+            items = vault.data().item_count(),
+            "vault unlocked"
+        );
+        Some(vault)
     };
 
-    tracing::info!(
-        collections = vault.data().collections.len(),
-        items = vault.data().item_count(),
-        "vault unlocked"
-    );
-
-    // Load SSH identities before the vault moves into the shared state.
+    // Load SSH identities before the vault moves into the shared state. A
+    // daemon that starts locked has no keys to offer yet; they appear when it
+    // is unlocked.
     let ssh_agent = args.ssh_agent.then(|| {
-        let agent = passman_agent::Agent::load_from_vault(&vault);
+        let agent = vault
+            .as_ref()
+            .map(passman_agent::Agent::load_from_vault)
+            .unwrap_or_default();
         tracing::info!(keys = agent.len(), "loaded SSH identities");
         Arc::new(Mutex::new(agent))
     });
@@ -118,7 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bus_name: bus_name.clone(),
         autosave: true,
     });
-    state.vault = Some(vault);
+    state.vault = vault;
     let state = Arc::new(Mutex::new(state));
 
     if let Some(agent) = ssh_agent {
@@ -154,6 +183,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.clone(),
         prompt_rx,
     ));
+
+    if args.unlock_socket {
+        let socket = passman_secret::unlock_socket::default_path()
+            .ok_or("XDG_RUNTIME_DIR is unset; cannot place the unlock socket")?;
+        let listener = passman_secret::unlock_socket::bind(&socket)?;
+        tracing::info!(socket = %socket.display(), "listening for PAM unlock requests");
+        tokio::spawn(passman_secret::unlock_socket::serve(
+            listener,
+            state.clone(),
+            vault_path.clone(),
+            connection.clone(),
+        ));
+    }
 
     if args.portal {
         connection

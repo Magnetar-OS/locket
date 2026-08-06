@@ -14,6 +14,7 @@ pub mod manager;
 pub mod portal;
 pub mod service;
 pub mod session;
+pub mod unlock_socket;
 
 pub use error::{Error, Result};
 pub use service::{SecretService, ServiceConfig};

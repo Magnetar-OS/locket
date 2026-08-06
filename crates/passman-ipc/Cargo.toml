@@ -1,0 +1,13 @@
+[package]
+name = "passman-ipc"
+description = "Minimal unlock-socket protocol shared by passmand and the PAM module"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately dependency-light: this is linked into a PAM module that loads
+# on every login, so it must not drag in an async runtime or a D-Bus stack.
+[dependencies]
+zeroize.workspace = true

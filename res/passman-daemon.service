@@ -1,0 +1,33 @@
+[Unit]
+Description=passman secrets daemon
+Documentation=https://github.com/idominikos/passman
+# The unlock socket lives in %t (/run/user/<uid>), so the runtime dir must
+# exist first. pam_systemd is what creates it.
+After=dbus.socket
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Starts locked on purpose: nobody has typed anything yet at login time.
+# pam_passman.so unlocks it, or the frontend does.
+ExecStart=/usr/bin/passmand --locked --unlock-socket --ssh-agent
+Restart=on-failure
+RestartSec=2
+
+# The vault is the whole point; give the process as little else as possible.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-write
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# Keep the vault out of a core dump.
+LimitCORE=0
+
+[Install]
+WantedBy=graphical-session.target

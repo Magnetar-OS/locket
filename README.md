@@ -38,6 +38,8 @@ crates/
   passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
   passman-fido     FIDO2 hmac-secret key slots (ctap-hid-fido2)
   passman-import   pass, KeePass/.kdbx and browser CSV importers
+  passman-ipc      the unlock-socket protocol (no deps; linked into PAM)
+  passman-pam      pam_passman.so — unlocks the vault at login
 ```
 
 The daemon holds the only copy of the data-encryption key. The GUI, the CLI and
@@ -152,9 +154,9 @@ Next:
 1. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
    KeePassXC, Bitwarden.
 3. **COSMIC applet** — panel indicator with lock state and quick copy.
-4. **PAM module** — unlock at login and authorise `sudo`, on top of the TPM
-   slot below.
-5. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+4. **PKCS#11** — for consumers of gnome-keyring's certificate store.
+5. **PAM for `sudo`** — a *different* module from the session one below, and
+   still gated on the reasoning in the TPM section.
 
 ## Migrating off gnome-keyring
 
@@ -240,6 +242,41 @@ Also verified across two real processes on a live COSMIC session: `passmand`
 logs *"asked the frontend to unlock"*, the GUI logs *"daemon asked for an
 unlock"*, and the unlock screen appears reading "An application asked for a
 secret from your vault."
+
+## Unlocking at login
+
+`pam_passman.so` is the `pam_gnome_keyring` equivalent: when your login
+password is also your vault passphrase, logging in unlocks the vault and every
+`libsecret` application finds its secrets without a second prompt. See
+[res/pam-install.md](res/pam-install.md).
+
+It is a **session** module and nothing more. `sm_authenticate` returns
+`PAM_IGNORE`, so it takes no part in the authentication decision — it only
+observes a token PAM already accepted. Every failure path returns success: a
+password manager that stops you logging in is worse than one that does not
+auto-unlock. There is deliberately no `sudo` entry; authorising privilege
+escalation is a different module with a much higher bar.
+
+The passphrase reaches the daemon over a socket in `/run/user/<uid>/passman/`,
+a directory the kernel already restricts to that user (0700), with the socket
+itself 0600. The path is derived from the uid rather than `$XDG_RUNTIME_DIR`,
+because a PAM module runs as root in a process whose environment belongs to
+nobody. `passman-ipc` carries this protocol and has no dependencies beyond
+`zeroize` — it is linked into a module that loads on every login, so pulling in
+an async runtime or a D-Bus client there would be irresponsible.
+
+`passmand --locked` starts without a passphrase and waits, which is what the
+login case needs: at boot nobody has typed anything yet.
+
+Verified end to end with `pamtester` against a throwaway user, on a stack that
+touched no system PAM config:
+
+* daemon starts locked → correct login password → daemon logs *"vault unlocked
+  over the unlock socket"* and the module logs *"vault unlocked for the
+  session"*;
+* wrong login password → `pam_unix` rejects it, vault untouched;
+* correct login password but a *different* vault passphrase → **the session
+  still opens**, the vault stays locked, and the module says so once.
 
 ## Security keys (FIDO2)
 

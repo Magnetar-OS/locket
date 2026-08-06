@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 passman-core.workspace = true
+passman-ipc = { path = "../passman-ipc" }
 zbus.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
