@@ -46,6 +46,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
 // Injected into the page. Deliberately only ever called from an explicit user
 // action in the popup — never automatically on page load, which is how
 // autofill turns into a credential-harvesting bug on a hostile page.
+//
+// Runs in the default ISOLATED world, not MAIN. The isolated world shares the
+// DOM, which is all this needs, while denying the page any view of this code
+// or the value being written. Assigning through the prototype's value setter
+// is what makes frameworks that patch inputs (React and friends) observe the
+// change, and it works from the isolated world.
 function fillForm(username, password) {
   const pw = document.querySelector('input[type="password"]:not([disabled])');
   if (!pw) return;

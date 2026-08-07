@@ -17,7 +17,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Both browsers refuse messages larger than this.
+/// Cap on a single message, in either direction.
+///
+/// The browser's limits are asymmetric: 1 MB from host to browser, 64 MiB from
+/// browser to host. One cap of 1 MiB satisfies the binding direction and is
+/// far more than a credential lookup needs, so an oversized request is refused
+/// rather than allocated for.
 pub const MAX_MESSAGE_LEN: usize = 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
