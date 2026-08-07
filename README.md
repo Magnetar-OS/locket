@@ -41,6 +41,8 @@ crates/
   passman-import   pass, KeePass/.kdbx and browser CSV importers
   passman-ipc      the unlock-socket protocol (no deps; linked into PAM)
   passman-pam      pam_passman.so — unlocks the vault at login
+  passman-nmh      native messaging host for the browser extension
+extension/         the browser extension itself (Chrome/Firefox, MV3)
 ```
 
 The daemon holds the only copy of the data-encryption key. The GUI, the CLI and
@@ -331,6 +333,37 @@ touched no system PAM config:
 * wrong login password → `pam_unix` rejects it, vault untouched;
 * correct login password but a *different* vault passphrase → **the session
   still opens**, the vault stays locked, and the module says so once.
+
+## Browser autofill
+
+```sh
+# load extension/ unpacked, then pass the id chrome://extensions shows you
+scripts/passman-setup --browser <extension-id>
+```
+
+The design assumption is that **a browser extension is not trusted** — it runs
+alongside every page you visit and is one supply-chain compromise away from
+hostile. So the host never exposes the vault wholesale:
+
+* `search` returns metadata only — labels and usernames, never a password —
+  and only for entries matching the origin the caller names.
+* `get` returns exactly one secret, for an id the extension had to learn from a
+  matching `search`.
+* Nothing unlocks the vault. A locked vault answers `locked` and stops; the
+  passphrase is typed into passman's own window, never into a web page.
+* Filling happens only on an explicit click in the popup, never automatically
+  on page load — automatic autofill is how a password manager becomes a
+  credential-harvesting bug on a hostile page.
+
+Origin matching is on suffix boundaries, so `mail.example.com` matches an entry
+saved for `example.com`, while `notexample.com` and `example.com.evil.test` do
+not, and a credential saved for a subdomain never leaks up to the parent.
+Getting that wrong is how a manager hands passwords to a lookalike domain, so
+it is tested directly.
+
+Verified against the live daemon: `status` reports the daemon and lock state,
+and while locked both `search` and `get` return `locked` without leaking
+anything.
 
 ## Panel applet
 

@@ -31,6 +31,7 @@ VAULT="${PASSMAN_VAULT:-$HOME/.local/share/passman/default.vault}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY=0
 DO_PAM=0
+EXT_ID=""
 ACTION=install
 
 say()  { printf '\033[1;34m::\033[0m %s\n' "$*"; }
@@ -47,6 +48,9 @@ passman-setup — install passman as the system secret store
 
   --pam           also install pam_passman.so and add it to the login stack
                   (needs root; unlocks the vault at login)
+  --browser ID    install the native messaging host for a browser extension.
+                  ID is the unpacked extension's id from chrome://extensions
+                  (Firefox uses the id baked into the manifest and ignores it)
   --uninstall     remove everything and hand the Secret Service back to
                   gnome-keyring
   --status        report what is currently installed and who owns what
@@ -61,6 +65,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --pam) DO_PAM=1 ;;
+        --browser) shift; EXT_ID="${1:-}"; [ -n "$EXT_ID" ] || die "--browser needs an extension id" ;;
         --uninstall) ACTION=uninstall ;;
         --status) ACTION=status ;;
         --dry-run) DRY=1 ;;
@@ -165,6 +170,30 @@ install_files() {
     run install -m 644 "$REPO/res/io.github.idominikos.Passman.desktop" "$DESKTOP_DIR/"
     run install -m 644 "$REPO/res/io.github.idominikos.PassmanApplet.desktop" "$DESKTOP_DIR/"
     run install -m 644 "$REPO/res/passman.portal" "$PORTAL_DIR/passman.portal"
+
+    if [ -n "$EXT_ID" ]; then
+        say "Installing the native messaging host"
+        run env -C "$REPO" cargo build --release -p passman-nmh || die "host build failed"
+        run install -m 755 "$REPO/target/release/passman-native-host" "$BIN_DIR/passman-native-host"
+        # Each browser reads its own directory; the same manifest satisfies all
+        # of them because Chrome ignores allowed_extensions and Firefox ignores
+        # allowed_origins.
+        for d in "$HOME/.config/google-chrome/NativeMessagingHosts" \
+                 "$HOME/.config/chromium/NativeMessagingHosts" \
+                 "$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts" \
+                 "$HOME/.mozilla/native-messaging-hosts"; do
+            if [ "$DRY" = 1 ]; then
+                printf '   would write %s/io.github.idominikos.passman.json\n' "$d"
+                continue
+            fi
+            mkdir -p "$d"
+            sed -e "s|@HOST_PATH@|$BIN_DIR/passman-native-host|" \
+                -e "s|@EXTENSION_ID@|$EXT_ID|" \
+                "$REPO/res/native-messaging-host.json.in" \
+                > "$d/io.github.idominikos.passman.json"
+        done
+        ok "native messaging host installed"
+    fi
 
     say "Installing the systemd user unit"
     run mkdir -p "$SYSTEMD_DIR"

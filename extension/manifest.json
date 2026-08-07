@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "passman",
+  "version": "0.1.0",
+  "description": "Fill credentials from your passman vault",
+  "permissions": [
+    "nativeMessaging",
+    "activeTab",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "passman"
+  },
+  "icons": {
+    "128": "icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "passman@idominikos.github.io",
+      "strict_min_version": "115.0"
+    }
+  }
+}

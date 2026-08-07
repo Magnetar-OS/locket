@@ -13,6 +13,7 @@ members = [
     "crates/passman-import",
     "crates/passman-ipc",
     "crates/passman-pam",
+    "crates/passman-nmh",
 ]
 
 [workspace.package]
