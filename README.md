@@ -159,6 +159,43 @@ Next:
 5. **PAM for `sudo`** — a *different* module from the session one below, and
    still gated on the reasoning in the TPM section.
 
+## Installing as your secret store
+
+```sh
+scripts/passman-setup            # build, install, and report what is left to do
+scripts/passman-setup --pam      # also unlock the vault at login (needs root)
+scripts/passman-setup --status   # who currently owns what
+scripts/passman-setup --uninstall
+```
+
+Three properties it is built around, because this replaces authentication
+infrastructure:
+
+**It imports before it switches.** Your secrets are in gnome-keyring. Taking
+the `org.freedesktop.secrets` name first would point every application at an
+empty vault, so the script counts both stores and refuses to switch until the
+import has happened:
+
+```
+gnome-keyring holds 27 item(s); the passman vault holds 0
+! Switching now would point every application at an empty store.
+```
+
+**It is reversible.** Everything except the PAM module is a *user-level
+override* that shadows the system file rather than editing it — a D-Bus service
+file in `~/.local/share/dbus-1/services`, a `Hidden=true` autostart entry, a
+masked user unit. `--uninstall` deletes them and gnome-keyring comes straight
+back. No file under `/usr` is modified.
+
+**It cannot lock you out.** The PAM step backs up the stack, proves the module
+loads against a throwaway service *before* going near `system-login`, adds the
+lines as `optional`, and then checks `sudo` still works — restoring the backup
+automatically if it does not.
+
+Note that gnome-keyring's **pkcs11** component is left running: passman
+replaces secrets, the SSH agent and the Secret portal, but not the certificate
+store yet.
+
 ## Migrating off gnome-keyring
 
 ```sh

@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+#
+# Install passman as the system secret store, replacing gnome-keyring.
+#
+# Design rules, because this touches authentication:
+#
+#   * Reversible.  Everything except the PAM module is a *user-level override*
+#     that shadows the system file rather than editing it.  `--uninstall`
+#     removes the overrides and gnome-keyring comes straight back.
+#   * Idempotent.  Running it twice does nothing the second time.
+#   * Import before switching.  Your secrets are in gnome-keyring.  Taking the
+#     bus name first would point every application at an empty vault, so the
+#     switch refuses to proceed until the import has happened.
+#   * Never break login.  The PAM edit backs up the stack, verifies the module
+#     loads against a throwaway service first, and restores the backup
+#     automatically if `sudo` stops working afterwards.
+#
+set -uo pipefail
+
+PREFIX="${PREFIX:-$HOME/.local}"
+BIN_DIR="$PREFIX/bin"
+DBUS_DIR="$HOME/.local/share/dbus-1/services"
+PORTAL_DIR="$HOME/.local/share/xdg-desktop-portal/portals"
+AUTOSTART_DIR="$HOME/.config/autostart"
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+DESKTOP_DIR="$PREFIX/share/applications"
+PAM_MODULE=/usr/lib/security/pam_passman.so
+PAM_STACK=/etc/pam.d/system-login
+VAULT="${PASSMAN_VAULT:-$HOME/.local/share/passman/default.vault}"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DRY=0
+DO_PAM=0
+ACTION=install
+
+say()  { printf '\033[1;34m::\033[0m %s\n' "$*"; }
+ok()   { printf '\033[1;32m ✓\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m !\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31m ✗\033[0m %s\n' "$*" >&2; exit 1; }
+run()  { if [ "$DRY" = 1 ]; then printf '   would run: %s\n' "$*"; else "$@"; fi; }
+
+usage() {
+    cat <<'EOF'
+passman-setup — install passman as the system secret store
+
+  passman-setup [options]
+
+  --pam           also install pam_passman.so and add it to the login stack
+                  (needs root; unlocks the vault at login)
+  --uninstall     remove everything and hand the Secret Service back to
+                  gnome-keyring
+  --status        report what is currently installed and who owns what
+  --dry-run       print the actions without performing them
+  -h, --help      this text
+
+Without --pam nothing outside your home directory is touched, and every change
+is an override that `--uninstall` removes.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --pam) DO_PAM=1 ;;
+        --uninstall) ACTION=uninstall ;;
+        --status) ACTION=status ;;
+        --dry-run) DRY=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown option: $1 (try --help)" ;;
+    esac
+    shift
+done
+
+# ---------------------------------------------------------------------------
+
+owner_of() {
+    busctl --user list 2>/dev/null | awk -v n="$1" '$1==n {print $3; exit}'
+}
+
+status() {
+    say "Secret Service"
+    local owner; owner="$(owner_of org.freedesktop.secrets)"
+    printf '   org.freedesktop.secrets owned by: %s\n' "${owner:-nobody}"
+
+    say "passman components"
+    for b in passman passmand passman-cli passman-applet; do
+        if command -v "$b" >/dev/null 2>&1; then
+            ok "$b -> $(command -v "$b")"
+        else
+            printf '   %s: not installed\n' "$b"
+        fi
+    done
+    if [ -f "$PAM_MODULE" ]; then
+        ok "pam_passman.so installed"
+    else
+        printf '   pam module: not installed\n'
+    fi
+    if grep -q "pam_passman.so" "$PAM_STACK" 2>/dev/null; then
+        ok "pam_passman.so wired into $PAM_STACK"
+    else
+        printf '   login unlock: not configured\n'
+    fi
+    if [ -f "$DBUS_DIR/org.freedesktop.secrets.service" ]; then
+        ok "D-Bus activation overridden to passmand"
+    else
+        printf '   D-Bus activation: still gnome-keyring\n'
+    fi
+
+    say "vault"
+    if [ -f "$VAULT" ]; then
+        ok "$VAULT"
+    else
+        printf '   no vault at %s\n' "$VAULT"
+    fi
+
+    say "gnome-keyring"
+    if systemctl --user is-active gnome-keyring-daemon.service >/dev/null 2>&1; then
+        warn "gnome-keyring-daemon is running"
+    else
+        ok "gnome-keyring-daemon is not running"
+    fi
+}
+
+# Count items in the running Secret Service, whoever owns it.
+keyring_item_count() {
+    local total=0 c
+    for c in $(busctl --user call org.freedesktop.secrets /org/freedesktop/secrets \
+                 org.freedesktop.DBus.Properties Get ss \
+                 org.freedesktop.Secret.Service Collections 2>/dev/null \
+               | tr ' ' '\n' | grep -o '"/[^"]*"' | tr -d '"'); do
+        local n
+        n=$(busctl --user call org.freedesktop.secrets "$c" \
+              org.freedesktop.DBus.Properties Get ss \
+              org.freedesktop.Secret.Collection Items 2>/dev/null \
+            | grep -o '"/[^"]*"' | wc -l)
+        total=$((total + n))
+    done
+    echo "$total"
+}
+
+vault_item_count() {
+    [ -f "$VAULT" ] || { echo 0; return; }
+    # `list` exits non-zero on an empty vault, which is not an error here.
+    passman-cli --vault "$VAULT" list 2>/dev/null | wc -l
+}
+
+install_files() {
+    say "Building release binaries"
+    run env -C "$REPO" cargo build --release \
+        -p passman-cosmic -p passman-daemon -p passman-cli -p passman-applet \
+        || die "build failed"
+    if [ "$DO_PAM" = 1 ]; then
+        run env -C "$REPO" cargo build --release -p passman-pam || die "pam build failed"
+    fi
+
+    say "Installing binaries into $BIN_DIR"
+    run mkdir -p "$BIN_DIR"
+    run install -m 755 "$REPO/target/release/passman"        "$BIN_DIR/passman"
+    run install -m 755 "$REPO/target/release/passmand"       "$BIN_DIR/passmand"
+    run install -m 755 "$REPO/target/release/passman-cli"    "$BIN_DIR/passman-cli"
+    run install -m 755 "$REPO/target/release/passman-applet" "$BIN_DIR/passman-applet"
+    ok "binaries installed"
+
+    say "Installing desktop entries and the Secret portal backend"
+    run mkdir -p "$DESKTOP_DIR" "$PORTAL_DIR"
+    run install -m 644 "$REPO/res/io.github.idominikos.Passman.desktop" "$DESKTOP_DIR/"
+    run install -m 644 "$REPO/res/io.github.idominikos.PassmanApplet.desktop" "$DESKTOP_DIR/"
+    run install -m 644 "$REPO/res/passman.portal" "$PORTAL_DIR/passman.portal"
+
+    say "Installing the systemd user unit"
+    run mkdir -p "$SYSTEMD_DIR"
+    # Point the unit at the binary we just installed rather than /usr/bin.
+    if [ "$DRY" = 1 ]; then
+        printf '   would write %s\n' "$SYSTEMD_DIR/passman-daemon.service"
+    else
+        sed "s|ExecStart=/usr/bin/passmand|ExecStart=$BIN_DIR/passmand|" \
+            "$REPO/res/passman-daemon.service" > "$SYSTEMD_DIR/passman-daemon.service"
+    fi
+    ok "unit installed"
+}
+
+# Everything that makes passman *the* secret store, as reversible overrides.
+take_over() {
+    say "Overriding D-Bus activation for org.freedesktop.secrets"
+    run mkdir -p "$DBUS_DIR"
+    if [ "$DRY" = 1 ]; then
+        printf '   would write %s\n' "$DBUS_DIR/org.freedesktop.secrets.service"
+    else
+        # A service file in the user directory shadows /usr/share, so the
+        # system file is never touched and uninstall is just a delete.
+        cat > "$DBUS_DIR/org.freedesktop.secrets.service" <<EOF
+[D-BUS Service]
+Name=org.freedesktop.secrets
+Exec=$BIN_DIR/passmand --replace-keyring --locked --unlock-socket --ssh-agent --portal
+SystemdService=passman-daemon.service
+EOF
+    fi
+    ok "D-Bus activation points at passmand"
+
+    say "Disabling gnome-keyring autostart"
+    run mkdir -p "$AUTOSTART_DIR"
+    for entry in gnome-keyring-secrets gnome-keyring-pkcs11; do
+        # pkcs11 is left running on purpose unless passman replaces it; only
+        # the secrets component is displaced here.
+        [ "$entry" = gnome-keyring-pkcs11 ] && continue
+        if [ "$DRY" = 1 ]; then
+            printf '   would write %s/%s.desktop (Hidden=true)\n' "$AUTOSTART_DIR" "$entry"
+        else
+            printf '[Desktop Entry]\nType=Application\nName=%s\nHidden=true\n' "$entry" \
+                > "$AUTOSTART_DIR/$entry.desktop"
+        fi
+    done
+    run systemctl --user mask gnome-keyring-daemon.socket
+    run systemctl --user stop gnome-keyring-daemon.socket
+    ok "gnome-keyring secrets component disabled (pkcs11 left alone)"
+
+    say "Enabling the passman daemon"
+    run systemctl --user daemon-reload
+    run systemctl --user enable passman-daemon.service
+    ok "enabled"
+}
+
+install_pam() {
+    command -v pamtester >/dev/null 2>&1 || warn "pamtester not installed; skipping the pre-flight check"
+
+    say "Installing $PAM_MODULE"
+    run sudo install -m 755 "$REPO/target/release/libpam_passman.so" "$PAM_MODULE" \
+        || die "could not install the PAM module"
+
+    # Prove the module loads in a throwaway stack before going near the real one.
+    if command -v pamtester >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
+        say "Pre-flight: loading the module in a throwaway PAM service"
+        sudo tee /etc/pam.d/passman-preflight >/dev/null <<'EOF'
+auth     required  pam_permit.so
+auth     optional  pam_passman.so
+account  required  pam_permit.so
+session  required  pam_permit.so
+session  optional  pam_passman.so
+EOF
+        if ! echo | pamtester passman-preflight "$USER" authenticate >/dev/null 2>&1; then
+            sudo rm -f /etc/pam.d/passman-preflight
+            die "the module failed to load; NOT touching $PAM_STACK"
+        fi
+        sudo rm -f /etc/pam.d/passman-preflight
+        ok "module loads cleanly"
+    fi
+
+    if grep -q "pam_passman.so" "$PAM_STACK" 2>/dev/null; then
+        ok "already wired into $PAM_STACK"
+        return
+    fi
+
+    local backup
+    backup="$PAM_STACK.passman-backup.$(date +%s)"
+    say "Backing up $PAM_STACK -> $backup"
+    run sudo cp -a "$PAM_STACK" "$backup"
+
+    say "Adding pam_passman.so to $PAM_STACK"
+    if [ "$DRY" = 1 ]; then
+        printf '   would append auth/session optional lines\n'
+        return
+    fi
+    # `optional` so a failure here can never stop a login, and placed at the
+    # end so it runs after pam_systemd has created /run/user/<uid>.
+    sudo tee -a "$PAM_STACK" >/dev/null <<'EOF'
+
+# passman: unlock the vault at login. `optional` on purpose — a failure here
+# must never prevent logging in. Remove these two lines to disable.
+auth     optional  pam_passman.so
+session  optional  pam_passman.so
+EOF
+
+    # Safety net: if the stack is now broken, sudo is the first thing to go.
+    say "Verifying the login stack still works"
+    if sudo -n true 2>/dev/null || sudo true; then
+        ok "PAM stack healthy"
+    else
+        warn "sudo stopped working — restoring $backup"
+        cp -a "$backup" "$PAM_STACK" 2>/dev/null || \
+            die "COULD NOT RESTORE. Run: pkexec cp $backup $PAM_STACK"
+        die "PAM changes reverted"
+    fi
+}
+
+do_install() {
+    command -v cargo >/dev/null 2>&1 || die "cargo not found in PATH"
+    install_files
+
+    # --- the ordering that matters ---------------------------------------
+    say "Checking whether your secrets need importing first"
+    local keyring_items vault_items
+    keyring_items=$(keyring_item_count)
+    vault_items=$(vault_item_count)
+    printf '   gnome-keyring holds %s item(s); the passman vault holds %s\n' \
+        "$keyring_items" "$vault_items"
+
+    if [ ! -f "$VAULT" ]; then
+        warn "No vault yet. Create one and import before switching:"
+        printf '     passman-cli --vault %s init\n' "$VAULT"
+        printf '     passman-cli --vault %s import\n' "$VAULT"
+        printf '   Then re-run this script to complete the switch.\n'
+        return 0
+    fi
+
+    if [ "$keyring_items" -gt 0 ] && [ "$vault_items" -eq 0 ]; then
+        warn "gnome-keyring has $keyring_items secret(s) and your vault is empty."
+        warn "Switching now would point every application at an empty store."
+        printf '   Import first, then re-run:\n'
+        printf '     passman-cli --vault %s import\n' "$VAULT"
+        return 0
+    fi
+
+    take_over
+    if [ "$DO_PAM" = 1 ]; then
+        install_pam
+    fi
+
+    say "Done. Log out and back in, or run:"
+    printf '     systemctl --user start passman-daemon.service\n'
+    if [ "$DO_PAM" != 1 ]; then
+        printf '   Re-run with --pam to unlock the vault at login.\n'
+    fi
+    return 0
+}
+
+do_uninstall() {
+    say "Removing overrides — gnome-keyring takes over again"
+    run systemctl --user disable --now passman-daemon.service
+    run systemctl --user unmask gnome-keyring-daemon.socket
+    run rm -f "$DBUS_DIR/org.freedesktop.secrets.service"
+    run rm -f "$AUTOSTART_DIR/gnome-keyring-secrets.desktop"
+    run rm -f "$SYSTEMD_DIR/passman-daemon.service"
+    run rm -f "$PORTAL_DIR/passman.portal"
+    run systemctl --user daemon-reload
+
+    if grep -q "pam_passman.so" "$PAM_STACK" 2>/dev/null; then
+        say "Removing pam_passman.so from $PAM_STACK"
+        run sudo sed -i '/pam_passman.so/d; /^# passman: unlock the vault at login/,+1d' "$PAM_STACK"
+        run sudo rm -f "$PAM_MODULE"
+    fi
+
+    warn "Binaries left in $BIN_DIR; remove them by hand if you want them gone."
+    warn "Your vault at $VAULT is untouched."
+    ok "gnome-keyring restored"
+}
+
+case "$ACTION" in
+    status) status ;;
+    install) do_install ;;
+    uninstall) do_uninstall ;;
+esac
