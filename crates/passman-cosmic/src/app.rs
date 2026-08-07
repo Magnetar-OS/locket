@@ -21,10 +21,15 @@ use passman_core::{
 };
 use uuid::Uuid;
 
+use std::sync::LazyLock;
+
 use crate::config::{self, Settings};
 use crate::daemon::{self, DaemonEvent};
 use crate::editor::{Editor, EditorMessage, Outcome};
 use crate::security::{self, Security};
+
+/// Id of the search box, so a shortcut can focus it.
+static SEARCH_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("passman-search"));
 
 /// Sidebar entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +101,8 @@ pub enum Message {
     DaemonUnlocked(bool),
     // -- unlock factors --
     Security(security::Message),
+    /// Move focus to the search box.
+    FocusSearch,
     /// Enrolment finished; the vault comes back in the shared slot because it
     /// was moved into a blocking worker to keep the UI responsive.
     SecurityEnrolled(Arc<Mutex<Option<Vault>>>, Option<String>),
@@ -270,27 +277,71 @@ impl App {
         let spacing = cosmic::theme::spacing();
         let items = self.visible_items();
 
-        let search = widget::search_input("Search secrets", &self.search)
+        let category = self.category();
+        // Say what is being searched. "Search secrets" on a filtered category
+        // implies it searches everything, which it does not.
+        let search = widget::search_input(format!("Search {}", category.label()), &self.search)
+            .id(SEARCH_ID.clone())
             .on_input(Message::SearchChanged)
             .on_clear(Message::SearchChanged(String::new()));
 
         let list: Element<'_, Message> = if items.is_empty() {
-            widget::container(
-                widget::column::with_capacity(2)
-                    .spacing(spacing.space_xs)
-                    .align_x(Alignment::Center)
-                    .push(widget::icon::from_name("system-search-symbolic").size(48))
-                    .push(widget::text::body(if self.search.is_empty() {
-                        "Nothing here yet."
-                    } else {
-                        "No secrets match your search."
-                    })),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center)
-            .into()
+            // An empty state should say which emptiness this is, and offer the
+            // action that resolves it. "Nothing here yet" next to a full vault
+            // — because a category filter is on — is actively misleading.
+            let searching = !self.search.is_empty();
+            let total = self
+                .vault
+                .as_ref()
+                .map(|v| v.data().item_count())
+                .unwrap_or(0);
+
+            let (icon, headline, detail) = if searching {
+                (
+                    "system-search-symbolic",
+                    format!("No match for “{}”", self.search),
+                    match category {
+                        Category::All => "Nothing in the vault matches.".to_owned(),
+                        other => format!("Nothing in {} matches. Try All Items.", other.label()),
+                    },
+                )
+            } else if total == 0 {
+                (
+                    "dialog-password-symbolic",
+                    "Your vault is empty".to_owned(),
+                    "Add something, or import from another password manager.".to_owned(),
+                )
+            } else {
+                (
+                    category.icon_name(),
+                    format!("No {} yet", category.label().to_lowercase()),
+                    format!("The vault holds {total} item(s) in other categories."),
+                )
+            };
+
+            let mut empty = widget::column::with_capacity(4)
+                .spacing(spacing.space_xs)
+                .align_x(Alignment::Center)
+                .push(widget::icon::from_name(icon).size(48))
+                .push(widget::text::title4(headline))
+                .push(widget::text::body(detail).center());
+
+            if searching {
+                empty = empty.push(
+                    widget::button::standard("Clear search")
+                        .on_press(Message::SearchChanged(String::new())),
+                );
+            } else if category != Category::Security {
+                empty = empty
+                    .push(widget::button::suggested("New item").on_press(Message::NewItem));
+            }
+
+            widget::container(empty)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .into()
         } else {
             let mut column = widget::list_column();
             for item in items {
@@ -817,6 +868,10 @@ impl cosmic::Application for App {
                 }
             }
 
+            Message::FocusSearch => {
+                return widget::text_input::focus(SEARCH_ID.clone());
+            }
+
             Message::Security(msg) => match msg {
                 security::Message::PinChanged(v) => {
                     self.security.pin = v;
@@ -1015,15 +1070,47 @@ impl cosmic::Application for App {
     fn subscription(&self) -> Subscription<Self::Message> {
         let daemon = daemon::subscription().map(Message::Daemon);
 
+        // Only bind shortcuts while browsing: they would fight the passphrase
+        // field on the unlock screen, and the editor owns its own typing.
+        let shortcuts = if self.screen == Screen::Browsing && self.editor.is_none() {
+            // `listen_raw` with an Ignored check, the way libcosmic's own
+            // keyboard_nav does it: a shortcut must not fire when a widget has
+            // already consumed the key, or Ctrl+F would steal focus from a
+            // text field mid-word.
+            cosmic::iced::event::listen_raw(|event, status, _| {
+                if status != cosmic::iced::event::Status::Ignored {
+                    return None;
+                }
+                let cosmic::iced::Event::Keyboard(
+                    cosmic::iced::keyboard::Event::KeyPressed { key, modifiers, .. },
+                ) = event
+                else {
+                    return None;
+                };
+                if !modifiers.control() {
+                    return None;
+                }
+                match key.as_ref() {
+                    cosmic::iced::keyboard::Key::Character("n") => Some(Message::NewItem),
+                    cosmic::iced::keyboard::Key::Character("l") => Some(Message::Lock),
+                    cosmic::iced::keyboard::Key::Character("f") => Some(Message::FocusSearch),
+                    _ => None,
+                }
+            })
+        } else {
+            Subscription::none()
+        };
+
         if self.screen == Screen::Browsing && self.selected_item().is_some_and(has_totp) {
             // Only tick while a live one-time code is on screen.
             Subscription::batch([
                 daemon,
+                shortcuts,
                 cosmic::iced::time::every(std::time::Duration::from_secs(1))
                     .map(|_| Message::Tick),
             ])
         } else {
-            daemon
+            Subscription::batch([daemon, shortcuts])
         }
     }
 }
