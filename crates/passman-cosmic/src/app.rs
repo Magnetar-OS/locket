@@ -545,9 +545,14 @@ impl cosmic::Application for App {
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
-        // The sidebar is meaningless — and a small information leak about how
-        // many categories hold data — while locked.
-        (self.screen == Screen::Browsing).then_some(&self.nav)
+        // Hidden while locked: the sidebar is meaningless then, and it leaks a
+        // little about which categories hold data.
+        //
+        // Hidden while editing too, because the editor owns the content area.
+        // Leaving it visible gave you controls that silently did nothing when
+        // clicked, which is worse than not offering them: the window now
+        // commits to the form until you save or cancel.
+        (self.screen == Screen::Browsing && self.editor.is_none()).then_some(&self.nav)
     }
 
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<Self::Message> {
@@ -555,7 +560,7 @@ impl cosmic::Application for App {
         self.selected = None;
         self.revealed.clear();
         self.core.window.show_context = false;
-        Task::none()
+        self.update_title()
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
@@ -729,12 +734,14 @@ impl cosmic::Application for App {
                 };
                 self.editor = Some(Editor::new(kind));
                 self.core.window.show_context = false;
+                return self.update_title();
             }
 
             Message::EditSelected => {
                 if let Some(item) = self.selected_item() {
                     self.editor = Some(Editor::from_item(item));
                     self.core.window.show_context = false;
+                    return self.update_title();
                 }
             }
 
@@ -744,7 +751,10 @@ impl cosmic::Application for App {
                 };
                 match editor.update(msg) {
                     Outcome::Continue => {}
-                    Outcome::Cancel => self.editor = None,
+                    Outcome::Cancel => {
+                        self.editor = None;
+                        return self.update_title();
+                    }
                     Outcome::Save { id, item } => {
                         let item = *item;
                         let label = item.label.clone();
@@ -772,7 +782,8 @@ impl cosmic::Application for App {
                         }
                         self.editor = None;
                         self.selected = Some(new_id);
-                        return self.toast(format!("Saved {label}"));
+                        let title = self.update_title();
+                        return Task::batch([title, self.toast(format!("Saved {label}"))]);
                     }
                 }
             }
@@ -942,7 +953,9 @@ impl cosmic::Application for App {
             return Vec::new();
         }
         let mut actions = Vec::new();
-        if self.editor.is_none() {
+        // Security manages unlock factors, not items — offering "New item"
+        // there would be a button that lands you somewhere unrelated.
+        if self.editor.is_none() && self.category() != Category::Security {
             actions.push(
                 widget::button::suggested("New item")
                     .on_press(Message::NewItem)
@@ -984,6 +997,21 @@ impl cosmic::Application for App {
         )
     }
 
+    /// Escape backs out of the innermost thing, in the order they stack.
+    fn on_escape(&mut self) -> Task<Self::Message> {
+        if self.pending_delete.is_some() {
+            self.pending_delete = None;
+        } else if self.editor.is_some() {
+            // Same path as Cancel, so there is one way to abandon an edit.
+            self.editor = None;
+        } else if self.core.window.show_context {
+            self.core.window.show_context = false;
+            self.selected = None;
+            self.revealed.clear();
+        }
+        Task::none()
+    }
+
     fn subscription(&self) -> Subscription<Self::Message> {
         let daemon = daemon::subscription().map(Message::Daemon);
 
@@ -1006,9 +1034,16 @@ fn has_totp(item: &Item) -> bool {
 
 impl App {
     fn update_title(&mut self) -> Task<Message> {
+        // With the sidebar hidden during an edit, the title bar is the only
+        // thing left saying where you are.
         let title = match self.screen {
-            Screen::Browsing => "passman".to_owned(),
-            _ => "passman — Locked".to_owned(),
+            Screen::Browsing => match &self.editor {
+                Some(e) if e.is_new() => "New item — passman".to_owned(),
+                Some(_) => "Editing — passman".to_owned(),
+                None => format!("{} — passman", self.category().label()),
+            },
+            Screen::Unlocking => "Unlocking… — passman".to_owned(),
+            Screen::Locked => "Locked — passman".to_owned(),
         };
         self.set_header_title(title.clone());
         match self.core.main_window_id() {
