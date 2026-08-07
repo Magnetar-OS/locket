@@ -174,6 +174,10 @@ install_files() {
     else
         sed "s|ExecStart=/usr/bin/passmand|ExecStart=$BIN_DIR/passmand|" \
             "$REPO/res/passman-daemon.service" > "$SYSTEMD_DIR/passman-daemon.service"
+        # D-Bus delegates activation to the unit, so the unit — not the
+        # .service file — must claim the Secret Service name.
+        grep -q -- "--replace-keyring" "$SYSTEMD_DIR/passman-daemon.service" \
+            || die "the unit does not claim org.freedesktop.secrets; refusing to install a no-op"
     fi
     ok "unit installed"
 }
@@ -211,7 +215,28 @@ EOF
     done
     run systemctl --user mask gnome-keyring-daemon.socket
     run systemctl --user stop gnome-keyring-daemon.socket
+    # The XDG autostart entry is also generated into a systemd unit; the
+    # Hidden=true override above only takes effect at the next login, so stop
+    # the generated unit now too.
+    run systemctl --user stop 'app-gnome\x2dkeyring\x2dsecrets@autostart.service'
     ok "gnome-keyring secrets component disabled (pkcs11 left alone)"
+
+    # Two steps that are easy to miss and make the whole switch a no-op:
+    #
+    #   1. The session bus caches .service files at startup. Without a reload
+    #      it keeps activating gnome-keyring from /usr/share even though our
+    #      override exists in ~/.local/share.
+    #   2. A gnome-keyring already holding the name is not displaced by any of
+    #      the above — it has to be stopped, or it simply keeps serving.
+    say "Reloading the session bus and releasing the name"
+    run busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus ReloadConfig
+    if [ "$DRY" != 1 ] && pgrep -x gnome-keyring-d >/dev/null 2>&1; then
+        warn "stopping the running gnome-keyring-daemon so the name is free"
+        pkill -x gnome-keyring-d || true
+        sleep 1
+    fi
+    ok "name released"
 
     say "Enabling the passman daemon"
     run systemctl --user daemon-reload

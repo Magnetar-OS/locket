@@ -192,6 +192,22 @@ loads against a throwaway service *before* going near `system-login`, adds the
 lines as `optional`, and then checks `sudo` still works — restoring the backup
 automatically if it does not.
 
+Two things the switch gets wrong if you do it by hand, both of which make it a
+silent no-op:
+
+* **The session bus caches `.service` files at startup.** Writing an override
+  into `~/.local/share/dbus-1/services` does nothing until `ReloadConfig`, so
+  the bus keeps activating gnome-keyring from `/usr/share`.
+* **D-Bus delegates activation to systemd** when the service file carries
+  `SystemdService=`, which means the *unit's* `ExecStart` is what runs and the
+  `Exec=` line is ignored. The unit must therefore pass `--replace-keyring`, or
+  the daemon comes up on `org.passman.secrets` and **nothing** owns
+  `org.freedesktop.secrets`. The installer refuses to write a unit missing that
+  flag.
+
+A gnome-keyring already holding the name is also not displaced by any of this —
+it has to be stopped.
+
 Note that gnome-keyring's **pkcs11** component is left running: passman
 replaces secrets, the SSH agent and the Secret portal, but not the certificate
 store yet.

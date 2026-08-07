@@ -10,7 +10,13 @@ PartOf=graphical-session.target
 Type=simple
 # Starts locked on purpose: nobody has typed anything yet at login time.
 # pam_passman.so unlocks it, or the frontend does.
-ExecStart=/usr/bin/passmand --locked --unlock-socket --ssh-agent
+#
+# --replace-keyring is load-bearing here. D-Bus activation for
+# org.freedesktop.secrets delegates to this unit via SystemdService=, so the
+# Exec= line in the .service file is never used — these flags are the only
+# thing that claims the Secret Service name. Without it the daemon starts on
+# org.passman.secrets and nothing owns org.freedesktop.secrets at all.
+ExecStart=/usr/bin/passmand --replace-keyring --locked --unlock-socket --ssh-agent --portal
 Restart=on-failure
 RestartSec=2
 
