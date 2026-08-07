@@ -373,6 +373,14 @@ prefers.
 scripts/passman-setup --browser <extension-id>
 ```
 
+Chrome and Firefox get separate manifests — see
+[extension/README.md](extension/README.md). MDN suggests declaring both
+`background.service_worker` and `background.scripts` in one file for
+cross-browser use, but Chrome 151 warns on that
+(`'background.scripts' requires manifest version of 2 or lower`) and flags the
+extension, so they are kept apart. Firefox needs the split regardless:
+`background.service_worker` is still unimplemented there.
+
 The design assumption is that **a browser extension is not trusted** — it runs
 alongside every page you visit and is one supply-chain compromise away from
 hostile. So the host never exposes the vault wholesale:
