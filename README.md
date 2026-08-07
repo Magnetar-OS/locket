@@ -210,9 +210,8 @@ silent no-op:
 A gnome-keyring already holding the name is also not displaced by any of this —
 it has to be stopped.
 
-Note that gnome-keyring's **pkcs11** component is left running: passman
-replaces secrets, the SSH agent and the Secret portal, but not the certificate
-store yet.
+The installer leaves gnome-keyring's **pkcs11** component alone. See below for
+why replacing it is probably unnecessary.
 
 ## Migrating off gnome-keyring
 
@@ -333,6 +332,39 @@ touched no system PAM config:
 * wrong login password → `pam_unix` rejects it, vault untouched;
 * correct login password but a *different* vault passphrase → **the session
   still opens**, the vault stays locked, and the module says so once.
+
+## Why there is no PKCS#11 module
+
+The plan was to replace gnome-keyring's PKCS#11 provider, on the assumption it
+was the last thing keeping the package alive. Checking rather than assuming
+showed otherwise. gnome-keyring's own registration says:
+
+```
+# This module is obsolete and only exposed to specific programs that
+# rely on it through gcr's certificate pinning API.
+enable-in: geary, midori
+```
+
+It is enabled for exactly two programs, upstream calls it obsolete, and on the
+machine this was developed against:
+
+* neither `geary` nor `midori` is installed;
+* `p11-kit-trust` provides the certificate trust store at priority 1, not
+  gnome-keyring;
+* `p11tool --list-tokens` lists p11-kit's two trust tokens and the TPM — **no
+  gnome-keyring token at all**;
+* browsers keep client certificates in their own NSS databases
+  (`~/.pki/nssdb`, `cert9.db`), never in gnome-keyring;
+* nothing outside its own `.module` file references it.
+
+So a passman PKCS#11 provider would be a module nothing loads. Writing one
+would be a large C ABI surface — around 68 function pointers — serving no
+caller, and the honest engineering answer is not to write it.
+
+It becomes worth revisiting if you install one of those two programs, or want
+to expose vault certificates to a PKCS#11 consumer such as an EAP-TLS VPN
+client. SSH is already covered by the agent, which is the path SSH actually
+prefers.
 
 ## Browser autofill
 
