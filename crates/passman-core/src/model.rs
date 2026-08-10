@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use zeroize::Zeroizing;
+
 use crate::secret::SecretString;
 
 /// Seconds since the Unix epoch.
@@ -212,6 +214,18 @@ impl Field {
 }
 
 /// Well-known field names, so the GUI, the CLI and the importers agree.
+/// Attribute names passman itself owns.
+pub mod attr {
+    /// How the primary secret is encoded, when it is not plain text.
+    ///
+    /// Namespaced so it cannot collide with an application's own attributes,
+    /// which are otherwise passed through verbatim as the search index.
+    pub const SECRET_ENCODING: &str = "passman:secret-encoding";
+}
+
+/// The only value [`attr::SECRET_ENCODING`] ever takes.
+const BASE64: &str = "base64";
+
 pub mod field_names {
     pub const USERNAME: &str = "username";
     pub const PASSWORD: &str = "password";
@@ -342,6 +356,47 @@ impl Item {
             || self.fields.iter().any(|f| {
                 hay(&f.name) || (!f.kind.is_sensitive() && hay(f.value.expose()))
             })
+    }
+
+    /// The primary secret as the bytes an application stored.
+    ///
+    /// A Secret Service secret is a byte array, not a string: portal keys,
+    /// wrapped tokens and DEKs are all binary. passman keeps secrets as
+    /// `String` because almost every one of them is text, so a secret that is
+    /// not valid UTF-8 is base64-encoded on the way in and marked with
+    /// [`attr::SECRET_ENCODING`]. This is the accessor that undoes that.
+    ///
+    /// Reading `secret.expose().as_bytes()` directly is what silently
+    /// destroyed every binary secret passman was handed: the lossy conversion
+    /// replaces each invalid byte with U+FFFD, which is neither reversible nor
+    /// detectable by the application getting it back.
+    pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
+        if self.attributes.get(attr::SECRET_ENCODING).map(String::as_str) == Some(BASE64) {
+            use base64ct::Encoding as _;
+            if let Ok(raw) = base64ct::Base64::decode_vec(self.secret.expose()) {
+                return Zeroizing::new(raw);
+            }
+        }
+        Zeroizing::new(self.secret.expose().as_bytes().to_vec())
+    }
+
+    /// Store bytes as the primary secret, losslessly.
+    ///
+    /// Text is stored as text so that `secret-tool` and the vault file stay
+    /// readable; anything else is base64-encoded and marked.
+    pub fn set_secret_bytes(&mut self, bytes: &[u8]) {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => {
+                self.secret = text.to_owned().into();
+                self.attributes.remove(attr::SECRET_ENCODING);
+            }
+            Err(_) => {
+                use base64ct::Encoding as _;
+                self.secret = base64ct::Base64::encode_string(bytes).into();
+                self.attributes
+                    .insert(attr::SECRET_ENCODING.to_owned(), BASE64.to_owned());
+            }
+        }
     }
 
     pub fn touch(&mut self) {
@@ -477,6 +532,57 @@ impl VaultData {
 
 #[cfg(test)]
 mod tests {
+
+    /// The regression that mattered: a Secret Service secret is a byte array,
+    /// and reading it back as a string destroyed every binary one. Portal
+    /// keys, wrapped tokens and DEKs are all binary.
+    #[test]
+    fn a_binary_secret_survives_a_round_trip() {
+        // 64 random-looking bytes, the shape of an XDG portal application key.
+        let raw: Vec<u8> = (0u16..64).map(|i| (i.wrapping_mul(7) ^ 0xA5) as u8).collect();
+        assert!(
+            std::str::from_utf8(&raw).is_err(),
+            "this fixture has to be invalid UTF-8 to test anything"
+        );
+
+        let mut item = Item::new(ItemKind::Application, "Application key for com.example.App");
+        item.set_secret_bytes(&raw);
+
+        assert_eq!(
+            item.secret_bytes().as_slice(),
+            raw.as_slice(),
+            "binary secret came back changed"
+        );
+        assert_eq!(
+            item.attributes.get(attr::SECRET_ENCODING).map(String::as_str),
+            Some("base64"),
+            "a non-UTF-8 secret must be marked, or the decode is a guess"
+        );
+    }
+
+    #[test]
+    fn a_text_secret_is_still_stored_as_text() {
+        let mut item = Item::new(ItemKind::Login, "GitHub");
+        item.set_secret_bytes(b"hunter2");
+
+        assert_eq!(item.secret.expose(), "hunter2", "text was needlessly encoded");
+        assert!(!item.attributes.contains_key(attr::SECRET_ENCODING));
+        assert_eq!(item.secret_bytes().as_slice(), b"hunter2");
+    }
+
+    #[test]
+    fn switching_from_binary_back_to_text_clears_the_marker() {
+        let mut item = Item::new(ItemKind::Login, "x");
+        item.set_secret_bytes(&[0xff, 0xfe]);
+        assert!(item.attributes.contains_key(attr::SECRET_ENCODING));
+
+        item.set_secret_bytes(b"now text");
+        assert!(
+            !item.attributes.contains_key(attr::SECRET_ENCODING),
+            "a stale marker would make the next read try to base64-decode plain text"
+        );
+        assert_eq!(item.secret_bytes().as_slice(), b"now text");
+    }
     use super::*;
 
     #[test]

@@ -507,7 +507,7 @@ impl SecretService {
                 continue;
             };
             let (parameters, value) = sess
-                .encode(item.secret.expose().as_bytes())
+                .encode(&item.secret_bytes())
                 .map_err(fdo::Error::from)?;
             out.insert(
                 path,
@@ -678,7 +678,9 @@ impl CollectionIface {
                     .decode(&secret.parameters, &secret.value)
                     .map_err(fdo::Error::from)?
             };
-            let plaintext = String::from_utf8_lossy(&plaintext).into_owned();
+            // Kept as bytes: a Secret Service secret is a byte array, and a
+            // lossy conversion here destroys every binary one.
+            let plaintext = plaintext.to_vec();
 
             let vault = state.vault_mut().map_err(fdo::Error::from)?;
             let collection = vault
@@ -700,7 +702,7 @@ impl CollectionIface {
             let id = match existing {
                 Some(pos) => {
                     let item = &mut collection.items[pos];
-                    item.secret = plaintext.into();
+                    item.set_secret_bytes(&plaintext);
                     item.label = label;
                     item.content_type = secret.content_type.clone();
                     item.touch();
@@ -709,7 +711,7 @@ impl CollectionIface {
                 None => {
                     let mut item = Item::new(infer_kind(&attributes), label);
                     item.attributes = attributes;
-                    item.secret = plaintext.into();
+                    item.set_secret_bytes(&plaintext);
                     item.content_type = secret.content_type.clone();
                     if let Some(s) = schema {
                         item.attributes.entry("xdg:schema".into()).or_insert(s);
@@ -864,7 +866,7 @@ impl ItemIface {
             .ok_or_else(|| fdo::Error::UnknownObject("no such item".into()))?;
 
         let (parameters, value) = sess
-            .encode(item.secret.expose().as_bytes())
+            .encode(&item.secret_bytes())
             .map_err(fdo::Error::from)?;
         Ok((SecretStruct {
             session,
@@ -889,13 +891,13 @@ impl ItemIface {
                 .decode(&secret.parameters, &secret.value)
                 .map_err(fdo::Error::from)?
         };
-        let plaintext = String::from_utf8_lossy(&plaintext).into_owned();
+        let plaintext = plaintext.to_vec();
 
         let vault = state.vault_mut().map_err(fdo::Error::from)?;
         let item = vault
             .item_mut(self.id)
             .ok_or_else(|| fdo::Error::UnknownObject("no such item".into()))?;
-        item.secret = plaintext.into();
+        item.set_secret_bytes(&plaintext);
         item.content_type = secret.content_type;
         item.touch();
         state.persist();

@@ -94,19 +94,55 @@ impl std::fmt::Display for ImportSummary {
 ///
 /// Kept separate from the D-Bus plumbing so the mapping rules are testable
 /// without a bus.
+/// A label worth putting in a list.
+///
+/// Foreign labels are built by whoever wrote them and can arrive incomplete —
+/// gnome-keyring's portal writes `Application key for <app id>`, and an
+/// application that registered with no id leaves a dangling "for " that sorts
+/// to the top of every list and names nothing. Rather than special-case that
+/// one producer, trim the label and, if what is left is empty or trails off,
+/// name the item from the attribute that identifies it.
+fn tidy_label(label: &str, attributes: &std::collections::BTreeMap<String, String>) -> String {
+    let trimmed = label.trim();
+    let dangling = trimmed
+        .rsplit(' ')
+        .next()
+        .is_some_and(|w| matches!(w, "for" | "of" | "to" | ":" | "-"));
+
+    if !trimmed.is_empty() && !dangling {
+        return trimmed.to_owned();
+    }
+
+    // Whatever the source used to identify this entry, in the order a person
+    // would recognise it.
+    let identifier = ["app_id", "application", "service", "server", "url", "username"]
+        .iter()
+        .find_map(|k| attributes.get(*k))
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty());
+
+    match (trimmed.is_empty(), identifier) {
+        (_, Some(id)) if dangling => format!("{trimmed} {id}"),
+        (true, Some(id)) => id.to_owned(),
+        (false, None) if dangling => format!("{trimmed} (unnamed)"),
+        (true, None) => "Untitled".to_owned(),
+        _ => trimmed.to_owned(),
+    }
+}
+
 pub fn map_item(
     label: String,
     attributes: HashMap<String, String>,
     schema: Option<String>,
-    secret: String,
+    secret: &[u8],
     content_type: String,
 ) -> Item {
     let attributes: std::collections::BTreeMap<String, String> = attributes.into_iter().collect();
     let kind = infer_kind(&attributes, schema.as_deref());
 
-    let mut item = Item::new(kind, if label.is_empty() { "Untitled" } else { &label });
+    let mut item = Item::new(kind, tidy_label(&label, &attributes));
     item.attributes = attributes;
-    item.secret = secret.into();
+    item.set_secret_bytes(secret);
     item.content_type = content_type;
     if let Some(schema) = schema {
         item.attributes.entry("xdg:schema".into()).or_insert(schema);
@@ -266,7 +302,7 @@ pub async fn import_from(
                 label,
                 attributes,
                 schema,
-                String::from_utf8_lossy(&secret.value).into_owned(),
+                &secret.value,
                 secret.content_type,
             );
 
@@ -300,7 +336,7 @@ mod tests {
             "GitHub".into(),
             attrs(&[("service", "github.com"), ("username", "ada")]),
             Some("org.freedesktop.Secret.Generic".into()),
-            "hunter2".into(),
+            b"hunter2",
             "text/plain".into(),
         );
         assert_eq!(item.kind, ItemKind::Login);
@@ -316,7 +352,7 @@ mod tests {
             "Note".into(),
             attrs(&[]),
             Some("org.freedesktop.Secret.Note".into()),
-            "body".into(),
+            b"body",
             "text/plain".into(),
         );
         assert_eq!(note.kind, ItemKind::Note);
@@ -325,7 +361,7 @@ mod tests {
             "Home".into(),
             attrs(&[]),
             Some("org.gnome.NetworkManager.Connection".into()),
-            "pw".into(),
+            b"pw",
             "text/plain".into(),
         );
         assert_eq!(wifi.kind, ItemKind::WifiNetwork);
@@ -334,7 +370,7 @@ mod tests {
             "Thing".into(),
             attrs(&[("app", "x")]),
             None,
-            "s".into(),
+            b"s",
             "text/plain".into(),
         );
         assert_eq!(anon.kind, ItemKind::Application);
@@ -346,7 +382,7 @@ mod tests {
             "Server".into(),
             attrs(&[("server", "imap.example.org"), ("user", "ada")]),
             None,
-            "pw".into(),
+            b"pw",
             "text/plain".into(),
         );
         assert_eq!(item.field_value(field_names::URL), Some("imap.example.org"));
@@ -355,7 +391,7 @@ mod tests {
 
     #[test]
     fn an_empty_label_does_not_produce_a_nameless_item() {
-        let item = map_item(String::new(), attrs(&[]), None, "s".into(), "text/plain".into());
+        let item = map_item(String::new(), attrs(&[]), None, b"s", "text/plain".into());
         assert_eq!(item.label, "Untitled");
     }
 
@@ -369,7 +405,7 @@ mod tests {
             "GitHub".into(),
             attrs(&[("service", "github.com"), ("username", "ada")]),
             None,
-            "hunter2".into(),
+            b"hunter2",
             "text/plain".into(),
         );
         let same_attrs = existing.attributes.clone();
