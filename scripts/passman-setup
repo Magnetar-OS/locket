@@ -212,6 +212,23 @@ vault_item_count() {
 #
 # Without both, Flatpak apps asking for a secret D-Bus-activate gnome-keyring,
 # which then fights passman over org.freedesktop.secrets.
+# Stop a unit only if it is loaded.
+#
+# `systemctl stop` on a unit that was never loaded prints a failure that reads
+# like something went wrong, immediately before we print a tick. Nothing did:
+# a gnome-keyring that is not running is the state we are trying to reach.
+stop_if_loaded() {
+    if [ "$DRY" = 1 ]; then
+        printf '   would stop %s if loaded\n' "$1"
+        return 0
+    fi
+    # `is-active` succeeds only for a unit that is actually running, which is
+    # the only case where stopping it does anything.
+    if systemctl --user is-active "$1" >/dev/null 2>&1; then
+        run systemctl --user stop "$1"
+    fi
+}
+
 install_secret_portal() {
     say "Routing the Secret portal to passman"
 
@@ -356,11 +373,11 @@ EOF
         fi
     done
     run systemctl --user mask gnome-keyring-daemon.socket
-    run systemctl --user stop gnome-keyring-daemon.socket
+    stop_if_loaded gnome-keyring-daemon.socket
     # The XDG autostart entry is also generated into a systemd unit; the
     # Hidden=true override above only takes effect at the next login, so stop
     # the generated unit now too.
-    run systemctl --user stop 'app-gnome\x2dkeyring\x2dsecrets@autostart.service'
+    stop_if_loaded 'app-gnome\x2dkeyring\x2dsecrets@autostart.service'
     ok "gnome-keyring secrets component disabled (pkcs11 left alone)"
 
     # Two steps that are easy to miss and make the whole switch a no-op:
