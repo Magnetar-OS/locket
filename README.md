@@ -131,7 +131,10 @@ composition properties, and the DH session against a simulated libsecret peer.
 End-to-end against real `libsecret` on a private bus: store, lookup, search
 (single and multi-attribute, narrowing and contradictory), replace-on-store
 without duplicates, delete, unicode secrets, both session algorithms, and
-`ReadAlias`. The vault file was checked for plaintext leakage after each.
+`ReadAlias`. The vault file was checked for plaintext leakage after each,
+including a 64-byte non-UTF-8 secret stored through `CreateItem` and read
+back byte-identical through `GetSecret` — the case that a lossy string
+conversion used to destroy silently.
 
 End-to-end through `xdg-desktop-portal` with a real sandboxed application
 (Authenticator, a Flatpak that encrypts its database with a portal-derived
