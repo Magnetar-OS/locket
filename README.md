@@ -333,6 +333,138 @@ touched no system PAM config:
 * correct login password but a *different* vault passphrase → **the session
   still opens**, the vault stays locked, and the module says so once.
 
+## Importing what you already have
+
+Every importer is available from the GUI's **Import** button and from the CLI.
+None of them modify or delete the source — a migration you cannot reverse is
+not a migration, it is a gamble.
+
+| Source | GUI | CLI |
+|---|---|---|
+| Browser / manager `.csv` | Browser or password manager export | `passman-cli import-csv FILE` |
+| Project `.env` files | Project .env files | `passman-cli import-env DIR` |
+| SSH private keys | SSH private keys | `passman-cli import-ssh` |
+| Cloud CLI credentials | Cloud CLI credentials | `passman-cli import-cloud` |
+| Authenticator export | Authenticator export (TOTP) | `passman-cli import-totp FILE` |
+| `pass` store | pass (password-store) | `passman-cli import-pass` |
+| KeePass `.kdbx` | KeePass database | `passman-cli import-keepass FILE` |
+| Running keyring | Running keyring | `passman-cli import` |
+
+### Project `.env` files
+
+Walks a tree of projects, skipping `node_modules`, build output and
+`.env.example`-style templates. `--group-by` decides the shape: one item per
+file (the default, preserving "these belong together"), one per inferred
+service (`STRIPE_*` in one item, `AWS_*` in another), or one per variable —
+which puts the value in the Secret Service secret itself, so
+`secret-tool lookup env:key STRIPE_SECRET_KEY` returns it directly.
+
+`--dry-run` reads the files but never the vault, so it needs no passphrase:
+
+```console
+$ passman-cli import-env ~/GitHub --dry-run
+...
+191 file(s), 2512 variable(s), 991 credential(s) under /home/you/GitHub
+```
+
+Variables are classified rather than blanket-encrypted: `PORT=3000` stays a
+plain field while `STRIPE_SECRET_KEY` is masked. The classifier errs towards
+"secret" — a needlessly-masked field costs a click, a missed one leaves a live
+credential in plaintext metadata.
+
+### SSH private keys
+
+Copies the keys from `~/.ssh` into `ItemKind::SshKey` items, which is the
+shape passman's own SSH agent already reads. Keys are found by their PEM
+banner rather than the `id_*` naming convention, so `deploy-key-prod` is not
+missed. The private key goes in the `private-key` field and the item's secret
+is reserved for the key's *passphrase*, which is what an encrypted key needs
+to be usable.
+
+Your key files stay exactly where they are; OpenSSH keeps reading them.
+Confirm `ssh-add -l` lists them through passman's agent before removing
+anything.
+
+### Cloud CLI credentials
+
+`aws`, `gcloud`, `az`, `gh`, `docker` and `npm` all cache long-lived
+credentials in your home directory with no encryption. Between them they are
+usually the most valuable unprotected material on a developer's machine, and
+unlike `.env` files they are not project-scoped — they authorise everything.
+
+```console
+$ passman-cli import-cloud --dry-run
+Google Cloud CLI     /home/you/.config/gcloud/credentials.db
+GitHub CLI           /home/you/.config/gh/hosts.yml
+```
+
+gcloud's store is a SQLite database, read through the `sqlite3` binary rather
+than a linked library — the same choice the `pass` importer makes in shelling
+out to `gpg`. It keeps a C dependency out of the build for one file, and if
+`sqlite3` is missing that store is reported as skipped instead of silently
+contributing nothing. Only the refresh token is kept; access tokens expire
+within the hour and are not worth storing.
+
+Importing does not make the originals safe. Rotate them, or remove them once
+the tools read from passman.
+
+### Authenticator exports
+
+Accepts a list of `otpauth://` URIs, or a plain-text Aegis or andOTP export;
+the format is sniffed from the content, since both are `.json`. Encrypted
+Aegis and andOTP backups are refused with an explanation rather than
+half-read. Every seed is parsed as a real TOTP before it is stored, so an
+import that reports success cannot have written a code that will never
+generate.
+
+Google Authenticator and Authy are not supported because they do not export
+the seed in any readable form.
+
+## Flatpak apps and the Secret portal
+
+A sandboxed application cannot reach `org.freedesktop.secrets` directly. It
+asks `org.freedesktop.portal.Secret` for a per-application key instead, and
+xdg-desktop-portal forwards that to whichever *backend* the desktop prefers.
+passman implements that backend (`passmand --portal`), but being implemented
+is not enough — two separate things have to line up, and neither does by
+default:
+
+1. **The `.portal` file has to be somewhere xdg-desktop-portal looks.** It
+   scans `XDG_DATA_DIRS` only, which does not include `~/.local/share`. A
+   backend installed under your home directory is never seen, with no error
+   anywhere. It has to go in `/usr/share/xdg-desktop-portal/portals/`, which
+   is the one part of the install that needs root.
+
+2. **The desktop's `portals.conf` has to name it.** COSMIC ships
+
+   ```ini
+   [preferred]
+   org.freedesktop.impl.portal.Secret=oo7-portal;gnome-keyring;
+   ```
+
+   and a backend that is merely present but unlisted is never chosen. Worse,
+   the fallback is a D-Bus-activatable gnome-keyring, so a Flatpak app asking
+   for a secret will *start* the daemon passman just replaced, and the two then
+   contend for `org.freedesktop.secrets`.
+
+`passman-setup` does both: it installs the `.portal` file system-wide and
+writes a user-level `portals.conf` preferring passman. Because these files are
+not merged across directories — the first one found wins outright — the user
+copy is derived from the desktop's own file so the rest of its preferences
+survive:
+
+```console
+$ passman-setup            # includes the portal step; will ask for sudo
+$ passman-setup --status
+:: Flatpak apps (Secret portal)
+ ✓ portal backend installed
+ ✓ Secret portal routed to passman (via ~/.config/xdg-desktop-portal/cosmic-portals.conf)
+```
+
+If the portal step is skipped, everything else still works — only Flatpak
+applications are affected. `--status` says so explicitly rather than leaving
+you to find out when an app silently fails to remember a password.
+
 ## Why there is no PKCS#11 module
 
 The plan was to replace gnome-keyring's PKCS#11 provider, on the assumption it
