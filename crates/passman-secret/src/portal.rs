@@ -138,8 +138,22 @@ impl SecretPortal {
             return Ok((2, HashMap::new()));
         }
 
+        // Prompt rather than refuse, the same as every libsecret path. An
+        // application told "no" here does not come back later and ask again:
+        // it starts up concluding it has no keyring, which for something like
+        // Authenticator means its existing database is simply unreadable.
+        if crate::service::ServiceState::ensure_unlocked(&self.state)
+            .await
+            .is_err()
+        {
+            tracing::info!("portal secret for `{app_id}` refused: still locked");
+            return Ok((2, HashMap::new()));
+        }
+
         let secret = {
             let mut guard = self.state.lock().await;
+            // Unreachable in practice after the check above, but the lock is
+            // released in between, so this stays rather than becoming a unwrap.
             let Some(vault) = guard.vault.as_mut() else {
                 tracing::info!("portal secret requested for `{app_id}` while locked");
                 return Ok((2, HashMap::new()));
