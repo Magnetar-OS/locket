@@ -56,9 +56,7 @@ impl Settings {
         }
     }
 
-    /// The write half. Unused until there is a preferences UI; kept so the
-    /// round trip is defined in one place rather than invented later.
-    #[allow(dead_code)]
+    /// The write half, driven by the preferences screen.
     pub fn store(&self, config: &Config) {
         set(config, key::AUTO_LOCK_SECONDS, self.auto_lock_seconds);
         set(

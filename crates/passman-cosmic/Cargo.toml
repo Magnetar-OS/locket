@@ -24,6 +24,7 @@ passman-core.workspace = true
 passman-tpm = { path = "../passman-tpm", optional = true }
 passman-fido = { path = "../passman-fido", optional = true }
 passman-secret.workspace = true
+passman-import.workspace = true
 zbus.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
@@ -31,6 +32,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 uuid.workspace = true
+dirs.workspace = true
 
 [dependencies.libcosmic]
 git = "https://github.com/pop-os/libcosmic"

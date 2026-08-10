@@ -4,6 +4,8 @@ mod app;
 mod config;
 mod daemon;
 mod editor;
+mod import;
+mod preferences;
 mod security;
 
 use cosmic::app::Settings;

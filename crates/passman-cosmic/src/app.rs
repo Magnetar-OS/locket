@@ -25,11 +25,21 @@ use std::sync::LazyLock;
 
 use crate::config::{self, Settings};
 use crate::daemon::{self, DaemonEvent};
+use crate::import;
+use crate::preferences::{self, Status};
 use crate::editor::{Editor, EditorMessage, Outcome};
 use crate::security::{self, Security};
 
 /// Id of the search box, so a shortcut can focus it.
 static SEARCH_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("passman-search"));
+/// The unlock screen's passphrase field.
+///
+/// Focused whenever that screen appears. Without it the window opens with
+/// nothing focused: there is no focus ring to show where typing would land,
+/// and the placeholder reads like a label that refuses to clear because the
+/// user has not actually typed into anything yet.
+static PASSPHRASE_ID: LazyLock<widget::Id> =
+    LazyLock::new(|| widget::Id::new("passman-passphrase"));
 
 /// Sidebar entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +49,8 @@ pub enum Category {
     Kind(ItemKind),
     /// Unlock factors: passphrase, TPM PIN, security key.
     Security,
+    /// Preferences, and whether the desktop integration is actually working.
+    Settings,
 }
 
 impl Category {
@@ -47,6 +59,7 @@ impl Category {
             Category::All => "All Items".to_owned(),
             Category::Favorites => "Favorites".to_owned(),
             Category::Security => "Security".to_owned(),
+            Category::Settings => "Settings".to_owned(),
             Category::Kind(k) => format!("{}s", k.label()),
         }
     }
@@ -56,6 +69,7 @@ impl Category {
             Category::All => "view-grid-symbolic",
             Category::Favorites => "starred-symbolic",
             Category::Security => "security-high-symbolic",
+            Category::Settings => "preferences-system-symbolic",
             Category::Kind(k) => k.icon_name(),
         }
     }
@@ -64,7 +78,8 @@ impl Category {
         match self {
             Category::All => true,
             Category::Favorites => item.favorite,
-            Category::Security => false,
+            // Neither screen lists items, so nothing matches them.
+            Category::Security | Category::Settings => false,
             Category::Kind(k) => item.kind == k,
         }
     }
@@ -103,6 +118,19 @@ pub enum Message {
     Security(security::Message),
     /// Move focus to the search box.
     FocusSearch,
+    FocusPassphrase,
+    /// The idle timer fired; lock if nothing has happened for long enough.
+    IdleCheck,
+    /// The window lost focus. Re-conceals revealed secrets when configured to.
+    WindowUnfocused,
+    Preferences(preferences::Message),
+    OpenImport,
+    Import(import::Message),
+    /// The vault comes back with the import's result; it was moved out for
+    /// the duration so the work could run off the UI thread.
+    ImportFinished(Arc<Mutex<Option<Vault>>>, import::Outcome),
+    PassphraseFocus(bool),
+    ConfirmFocus(bool),
     /// Enrolment finished; the vault comes back in the shared slot because it
     /// was moved into a blocking worker to keep the UI responsive.
     SecurityEnrolled(Arc<Mutex<Option<Vault>>>, Option<String>),
@@ -130,6 +158,9 @@ pub struct App {
     passphrase: String,
     confirm: String,
     show_passphrase: bool,
+    /// Whether each unlock field holds focus, so its placeholder can clear.
+    passphrase_focused: bool,
+    confirm_focused: bool,
     error: Option<String>,
 
     search: String,
@@ -145,6 +176,13 @@ pub struct App {
 
     /// `Some` while the item editor is open.
     editor: Option<Editor>,
+    /// The import screen, shown in place of the item list while open.
+    import: Option<import::Import>,
+    /// When the user last interacted, for auto-lock. Reset by any message
+    /// that represents a deliberate action rather than a background tick.
+    last_activity: std::time::Instant,
+    /// Observed integration state, refreshed when the screen is opened.
+    status: Option<Status>,
     /// Item awaiting a delete confirmation.
     pending_delete: Option<Uuid>,
 
@@ -222,12 +260,20 @@ impl App {
             .push(widget::text::title2(heading))
             .push(widget::text::body(blurb).center())
             .push(
+                // The placeholder clears the moment the field takes focus
+                // rather than waiting for the first keystroke. On a masked
+                // field you cannot tell typed text from a placeholder by
+                // looking, so a word still sitting there after you have
+                // clicked in reads as content the field will not let go of.
                 widget::text_input::secure_input(
-                    "Passphrase",
+                    if self.passphrase_focused { "" } else { "Passphrase" },
                     &self.passphrase,
                     Some(Message::ToggleShowPassphrase),
                     !self.show_passphrase,
                 )
+                .id(PASSPHRASE_ID.clone())
+                .on_focus(Message::PassphraseFocus(true))
+                .on_unfocus(Message::PassphraseFocus(false))
                 .on_input(Message::PassphraseChanged)
                 .on_submit(|_| Message::UnlockSubmit),
             );
@@ -235,11 +281,17 @@ impl App {
         if creating {
             form = form.push(
                 widget::text_input::secure_input(
-                    "Confirm passphrase",
+                    if self.confirm_focused {
+                        ""
+                    } else {
+                        "Confirm passphrase"
+                    },
                     &self.confirm,
                     Some(Message::ToggleShowPassphrase),
                     !self.show_passphrase,
                 )
+                .on_focus(Message::ConfirmFocus(true))
+                .on_unfocus(Message::ConfirmFocus(false))
                 .on_input(Message::ConfirmChanged)
                 .on_submit(|_| Message::UnlockSubmit),
             );
@@ -556,6 +608,7 @@ impl cosmic::Application for App {
             Category::Kind(ItemKind::WifiNetwork),
             Category::Kind(ItemKind::Application),
             Category::Security,
+            Category::Settings,
         ] {
             nav.insert()
                 .text(category.label())
@@ -578,6 +631,8 @@ impl cosmic::Application for App {
             passphrase: String::new(),
             confirm: String::new(),
             show_passphrase: false,
+            passphrase_focused: false,
+            confirm_focused: false,
             error: None,
             search: String::new(),
             selected: None,
@@ -586,13 +641,31 @@ impl cosmic::Application for App {
             config,
             toasts: widget::Toasts::new(Message::CloseToast),
             editor: None,
+            import: None,
+            last_activity: std::time::Instant::now(),
+            status: None,
             pending_delete: None,
             security: Security::default(),
             unlock_requested_by_app: false,
             daemon_present: false,
         };
 
-        (app, Task::none())
+        // Focus the passphrase field, but not before the window exists.
+        //
+        // A widget operation is applied against the *current* widget tree, and
+        // at `init` there is none — returning `text_input::focus(..)` here, or
+        // even bouncing it through one message, lands too early and is
+        // silently dropped. Both were tried; neither produced a focus ring.
+        // Waiting a beat lets the first frame render, after which the
+        // operation finds the field. Verified against the accent ring the
+        // COSMIC theme draws on a focused input.
+        (
+            app,
+            cosmic::task::future(async {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                Message::FocusPassphrase
+            }),
+        )
     }
 
     fn nav_model(&self) -> Option<&nav_bar::Model> {
@@ -603,7 +676,8 @@ impl cosmic::Application for App {
         // Leaving it visible gave you controls that silently did nothing when
         // clicked, which is worse than not offering them: the window now
         // commits to the form until you save or cancel.
-        (self.screen == Screen::Browsing && self.editor.is_none()).then_some(&self.nav)
+        (self.screen == Screen::Browsing && self.editor.is_none() && self.import.is_none())
+            .then_some(&self.nav)
     }
 
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<Self::Message> {
@@ -611,10 +685,28 @@ impl cosmic::Application for App {
         self.selected = None;
         self.revealed.clear();
         self.core.window.show_context = false;
+
+        // Read the integration state each time the screen is opened rather
+        // than caching it for the session: the whole point is to notice when
+        // something else has taken the bus name or the portal away.
+        if self.category() == Category::Settings {
+            self.status = None;
+            return Task::batch([self.update_title(), Self::refresh_status()]);
+        }
         self.update_title()
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
+        // Anything that is not the clock ticking counts as the user being
+        // here. Without this the idle timer would fire mid-session, because
+        // `Tick` and `IdleCheck` arrive every second regardless.
+        if !matches!(
+            message,
+            Message::Tick | Message::IdleCheck | Message::Daemon(_) | Message::CloseToast(_)
+        ) {
+            self.last_activity = std::time::Instant::now();
+        }
+
         match message {
             Message::PassphraseChanged(v) => {
                 self.passphrase = v;
@@ -691,6 +783,8 @@ impl cosmic::Application for App {
                     None => {
                         self.screen = Screen::Locked;
                         self.error = error.or_else(|| Some("Could not open the vault.".into()));
+                        self.passphrase_focused = true;
+                        return widget::text_input::focus(PASSPHRASE_ID.clone());
                     }
                 }
             }
@@ -704,9 +798,11 @@ impl cosmic::Application for App {
                 self.search.clear();
                 self.core.window.show_context = false;
                 self.unlock_requested_by_app = false;
+                self.passphrase_focused = true;
                 let title = self.update_title();
                 return Task::batch([
                     title,
+                    widget::text_input::focus(PASSPHRASE_ID.clone()),
                     cosmic::task::future(async {
                         daemon::lock().await;
                         Message::DaemonUnlocked(false)
@@ -872,6 +968,118 @@ impl cosmic::Application for App {
                 return widget::text_input::focus(SEARCH_ID.clone());
             }
 
+            Message::Preferences(msg) => {
+                let mut changed = true;
+                match msg {
+                    preferences::Message::AutoLockSelected(i) => {
+                        match preferences::AUTO_LOCK.get(i) {
+                            Some(v) => self.settings.auto_lock_seconds = *v,
+                            None => changed = false,
+                        }
+                    }
+                    preferences::Message::ClipboardSelected(i) => {
+                        match preferences::CLIPBOARD.get(i) {
+                            Some(v) => self.settings.clipboard_clear_seconds = *v,
+                            None => changed = false,
+                        }
+                    }
+                    preferences::Message::ConcealToggled(v) => self.settings.conceal_on_blur = v,
+                    preferences::Message::Loaded(status) => {
+                        self.status = Some(status);
+                        changed = false;
+                    }
+                    preferences::Message::Refresh => {
+                        self.status = None;
+                        return Task::batch([Self::refresh_status()]);
+                    }
+                }
+                if changed && let Some(config) = self.config.as_ref() {
+                    // Written straight through: a preferences screen with a
+                    // Save button is a preferences screen you forget to save.
+                    self.settings.store(config);
+                }
+            }
+
+            Message::IdleCheck => {
+                let limit = self.settings.auto_lock_seconds;
+                // Zero disables it; a locked vault has nothing left to lock.
+                if limit > 0
+                    && self.screen == Screen::Browsing
+                    && self.last_activity.elapsed().as_secs() >= limit
+                {
+                    return self.update(Message::Lock);
+                }
+            }
+
+            Message::WindowUnfocused => {
+                if self.settings.conceal_on_blur {
+                    // Only the on-screen reveal is undone; nothing is locked,
+                    // because alt-tabbing away is not a request to re-type a
+                    // passphrase.
+                    self.revealed.clear();
+                }
+            }
+
+            Message::OpenImport => {
+                self.import = Some(import::Import::default());
+                self.selected = None;
+                self.core.window.show_context = false;
+                return self.update_title();
+            }
+
+            Message::Import(msg) => return self.update_import(msg),
+
+            Message::ImportFinished(slot, outcome) => {
+                // The vault always comes home, whether or not the import
+                // worked; losing it here would strand an unlocked session.
+                if let Some(vault) = slot.lock().ok().and_then(|mut g| g.take()) {
+                    self.vault = Some(vault);
+                } else {
+                    // Only reachable if the worker died mid-import. The file
+                    // on disk is untouched, so re-unlocking recovers.
+                    self.screen = Screen::Locked;
+                    self.import = None;
+                    self.error = Some("The import task failed; unlock again.".into());
+                    return self.update_title();
+                }
+
+                match outcome {
+                    Ok(summary) => {
+                        self.import = None;
+                        let text = format!("Imported {summary}");
+                        return Task::batch([self.update_title(), self.toast(text)]);
+                    }
+                    Err(e) => {
+                        if let Some(form) = self.import.as_mut() {
+                            form.busy = false;
+                            form.error = Some(e);
+                        }
+                    }
+                }
+            }
+
+            Message::FocusPassphrase => {
+                // Focusing through the widget operation does not run the
+                // click path, so `on_focus` never fires; say so ourselves.
+                self.passphrase_focused = true;
+                self.confirm_focused = false;
+                return widget::text_input::focus(PASSPHRASE_ID.clone());
+            }
+
+            Message::PassphraseFocus(focused) => {
+                self.passphrase_focused = focused;
+                if focused {
+                    self.confirm_focused = false;
+                }
+            }
+
+            Message::ConfirmFocus(focused) => {
+                self.confirm_focused = focused;
+                if focused {
+                    self.passphrase_focused = false;
+                }
+            }
+
             Message::Security(msg) => match msg {
                 security::Message::PinChanged(v) => {
                     self.security.pin = v;
@@ -983,11 +1191,21 @@ impl cosmic::Application for App {
         let content = match self.screen {
             Screen::Locked | Screen::Unlocking => self.unlock_view(),
             Screen::Browsing => match &self.editor {
+                _ if self.import.is_some() => self
+                    .import
+                    .as_ref()
+                    .expect("just checked")
+                    .view()
+                    .map(Message::Import),
                 Some(editor) => editor.view().map(Message::Editor),
                 None if self.category() == Category::Security => self
                     .security
                     .view(self.vault.as_ref())
                     .map(Message::Security),
+                None if self.category() == Category::Settings => {
+                    preferences::view(&self.settings, self.status.as_ref())
+                        .map(Message::Preferences)
+                }
                 None => self.browse_view(),
             },
         };
@@ -1010,10 +1228,17 @@ impl cosmic::Application for App {
         let mut actions = Vec::new();
         // Security manages unlock factors, not items — offering "New item"
         // there would be a button that lands you somewhere unrelated.
-        if self.editor.is_none() && self.category() != Category::Security {
+        if self.editor.is_none() && self.import.is_none() {
+            if !matches!(self.category(), Category::Security | Category::Settings) {
+                actions.push(
+                    widget::button::suggested("New item")
+                        .on_press(Message::NewItem)
+                        .into(),
+                );
+            }
             actions.push(
-                widget::button::suggested("New item")
-                    .on_press(Message::NewItem)
+                widget::button::standard("Import")
+                    .on_press(Message::OpenImport)
                     .into(),
             );
         }
@@ -1056,6 +1281,11 @@ impl cosmic::Application for App {
     fn on_escape(&mut self) -> Task<Self::Message> {
         if self.pending_delete.is_some() {
             self.pending_delete = None;
+        } else if self.import.as_ref().is_some_and(|i| !i.busy) {
+            // Not while it is running: the vault is out of the app's hands
+            // until the task returns it, and there would be nothing to go
+            // back to.
+            self.import = None;
         } else if self.editor.is_some() {
             // Same path as Cancel, so there is one way to abandon an edit.
             self.editor = None;
@@ -1101,17 +1331,36 @@ impl cosmic::Application for App {
             Subscription::none()
         };
 
+        let mut subs = vec![daemon, shortcuts];
+
         if self.screen == Screen::Browsing && self.selected_item().is_some_and(has_totp) {
             // Only tick while a live one-time code is on screen.
-            Subscription::batch([
-                daemon,
-                shortcuts,
+            subs.push(
                 cosmic::iced::time::every(std::time::Duration::from_secs(1))
                     .map(|_| Message::Tick),
-            ])
-        } else {
-            Subscription::batch([daemon, shortcuts])
+            );
         }
+
+        // Auto-lock. Polled once a second rather than scheduled for the exact
+        // deadline, because the deadline moves every time you touch anything.
+        if self.screen == Screen::Browsing && self.settings.auto_lock_seconds > 0 {
+            subs.push(
+                cosmic::iced::time::every(std::time::Duration::from_secs(1))
+                    .map(|_| Message::IdleCheck),
+            );
+        }
+
+        if self.screen == Screen::Browsing && self.settings.conceal_on_blur {
+            subs.push(cosmic::iced::event::listen_with(|event, _, _| {
+                matches!(
+                    event,
+                    cosmic::iced::Event::Window(cosmic::iced::window::Event::Unfocused)
+                )
+                .then_some(Message::WindowUnfocused)
+            }));
+        }
+
+        Subscription::batch(subs)
     }
 }
 
@@ -1120,6 +1369,125 @@ fn has_totp(item: &Item) -> bool {
 }
 
 impl App {
+    /// Drive the import screen.
+    ///
+    /// The vault is moved *out* of the app for the duration of a run rather
+    /// than borrowed: importing a password-store shells out to gpg once per
+    /// entry, and doing that on the UI thread would freeze the window for as
+    /// long as it takes. `ImportFinished` puts it back.
+    fn refresh_status() -> Task<Message> {
+        cosmic::task::future(async {
+            Message::Preferences(preferences::Message::Loaded(Status::gather().await))
+        })
+    }
+
+    fn update_import(&mut self, msg: import::Message) -> Task<Message> {
+        let Some(form) = self.import.as_mut() else {
+            return Task::none();
+        };
+
+        match msg {
+            import::Message::SourceSelected(i) => form.select_source(i),
+            import::Message::CollectionChanged(v) => form.collection = v,
+            import::Message::GroupingSelected(i) => {
+                if let Some(g) = import::GROUPINGS.get(i) {
+                    form.grouping = *g;
+                }
+            }
+            import::Message::DatabasePasswordChanged(v) => form.database_password = v,
+            import::Message::ToggleShowDatabasePassword => {
+                form.show_database_password = !form.show_database_password;
+            }
+            import::Message::Picked(path) => {
+                if path.is_some() {
+                    form.path = path;
+                    form.error = None;
+                }
+            }
+            import::Message::Cancel => {
+                if !form.busy {
+                    self.import = None;
+                    return self.update_title();
+                }
+            }
+
+            import::Message::Browse => {
+                use cosmic::dialog::file_chooser::{FileFilter, open::Dialog};
+                let picker = form.picker();
+                return cosmic::task::future(async move {
+                    let chosen = match picker {
+                        import::Picker::Folder { title } => {
+                            Dialog::new().title(title).open_folder().await.ok()
+                        }
+                        import::Picker::File { title, filter } => {
+                            let mut dialog = Dialog::new().title(title);
+                            if let Some((label, ext)) = filter {
+                                // Glob rather than MIME: a .kdbx has no
+                                // registered type on most systems, and a .csv
+                                // is reported inconsistently.
+                                dialog = dialog.filter(
+                                    FileFilter::new(label).glob(&format!("*.{ext}")),
+                                );
+                            }
+                            dialog.open_file().await.ok()
+                        }
+                    };
+                    // A cancelled dialog is not an error; it just leaves the
+                    // previous choice, if any, alone.
+                    Message::Import(import::Message::Picked(
+                        chosen.and_then(|r| r.url().to_file_path().ok()),
+                    ))
+                });
+            }
+
+            import::Message::Run => {
+                if !form.is_runnable() {
+                    return Task::none();
+                }
+                let Some(vault) = self.vault.take() else {
+                    form.error = Some("The vault is locked.".into());
+                    return Task::none();
+                };
+                let job = import::Job::from(form);
+                form.busy = true;
+                form.error = None;
+
+                return cosmic::task::future(async move {
+                    if job.is_async() {
+                        let mut vault = vault;
+                        let outcome = import::run_keyring(&mut vault, &job).await;
+                        return Message::ImportFinished(
+                            Arc::new(Mutex::new(Some(vault))),
+                            outcome,
+                        );
+                    }
+                    // Back onto a blocking thread: gpg, Argon2 and a few
+                    // thousand file reads have no business on the executor's
+                    // core threads.
+                    match tokio::task::spawn_blocking(move || {
+                        let mut vault = vault;
+                        let outcome = import::run_blocking(&mut vault, &job);
+                        (vault, outcome)
+                    })
+                    .await
+                    {
+                        Ok((vault, outcome)) => {
+                            Message::ImportFinished(Arc::new(Mutex::new(Some(vault))), outcome)
+                        }
+                        // The vault died with the worker. `ImportFinished`
+                        // treats an empty slot as "re-unlock"; the file on
+                        // disk is untouched.
+                        Err(e) => Message::ImportFinished(
+                            Arc::new(Mutex::new(None)),
+                            Err(format!("the import task failed: {e}")),
+                        ),
+                    }
+                });
+            }
+        }
+        Task::none()
+    }
+
     fn update_title(&mut self) -> Task<Message> {
         // With the sidebar hidden during an edit, the title bar is the only
         // thing left saying where you are.
