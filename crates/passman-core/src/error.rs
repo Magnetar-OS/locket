@@ -10,7 +10,16 @@ pub enum Error {
     #[error("vault format version {found} is newer than this build supports (max {supported})")]
     UnsupportedVersion { found: u16, supported: u16 },
 
-    #[error("incorrect passphrase, or the vault has been tampered with")]
+    /// No key slot accepted the supplied factor. Almost always a typo.
+    ///
+    /// Kept distinct from [`Error::Unauthenticated`] so a failure to unwrap
+    /// the key reads differently from a failure to authenticate the body:
+    /// conflating the two turned a format-compatibility bug into an
+    /// indistinguishable "or the vault has been tampered with".
+    #[error("incorrect passphrase")]
+    WrongPassphrase,
+
+    #[error("the vault could not be authenticated; it may have been tampered with")]
     Unauthenticated,
 
     #[error("the vault is locked")]

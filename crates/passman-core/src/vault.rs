@@ -38,7 +38,7 @@ use crate::{
 };
 
 pub const MAGIC: &str = "passman-vault";
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 
 /// A base64-encoded (nonce, ciphertext) pair.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +69,30 @@ impl SealedBlob {
     }
 }
 
+/// A collection, as visible *without* unlocking the vault.
+///
+/// This is the one thing passman keeps in the clear, and it is a deliberate
+/// concession to the Secret Service protocol rather than an oversight.
+///
+/// A locked service must still be able to answer "which collections exist?" —
+/// `ReadAlias`, the `Collections` property and the `Unlock` method are all
+/// meaningless otherwise. Answering "none" instead does not read as *locked*
+/// to a client, it reads as *there is no keyring here*, which is how
+/// `libsecret` applications end up reporting that no keyring is installed.
+///
+/// So collection ids, labels and aliases are plaintext. Item labels,
+/// usernames, attributes and secrets all stay inside the sealed body. This is
+/// the same line gnome-keyring draws — keyring names are in the clear there
+/// too — and the index is covered by the body's AEAD, so it cannot be edited
+/// without invalidating the vault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionIndex {
+    pub id: Uuid,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
 /// Format 1's inline KDF descriptor. Retained only to read old files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KdfDescriptor {
@@ -87,6 +111,10 @@ pub struct VaultFile {
     /// Format 2 and later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<Slot>,
+
+    /// Format 3 and later: which collections exist, readable while locked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<CollectionIndex>,
 
     /// Format 1 only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,7 +152,12 @@ impl VaultFile {
                 serde_json::to_vec(&(&self.magic, self.format, &self.kdf, &self.wrapped_key))
                     .unwrap_or_default()
             }
-            _ => serde_json::to_vec(&(&self.magic, self.format, &self.slots)).unwrap_or_default(),
+            2 => serde_json::to_vec(&(&self.magic, self.format, &self.slots)).unwrap_or_default(),
+            // Format 3 binds the plaintext collection index into the body's
+            // AEAD, so relabelling a collection on disk breaks authentication
+            // rather than silently succeeding.
+            _ => serde_json::to_vec(&(&self.magic, self.format, &self.slots, &self.collections))
+                .unwrap_or_default(),
         }
     }
 
@@ -169,6 +202,15 @@ impl Vault {
         path.is_file()
     }
 
+    /// Read the collection index without unlocking anything.
+    ///
+    /// This is what lets a locked daemon answer `ReadAlias` and `Collections`
+    /// honestly — "these exist, and they are locked" — instead of claiming no
+    /// keyring is present.
+    pub fn read_index(path: &Path) -> Result<Vec<CollectionIndex>> {
+        Ok(Self::read_file(path)?.collections)
+    }
+
     /// Create a brand-new vault with a single passphrase slot.
     pub fn create(path: impl Into<PathBuf>, passphrase: &str, params: KdfParams) -> Result<Self> {
         let path = path.into();
@@ -180,6 +222,7 @@ impl Vault {
             magic: MAGIC.to_owned(),
             format: FORMAT_VERSION,
             slots: vec![slot],
+            collections: Vec::new(),
             kdf: None,
             wrapped_key: None,
             body: SealedBlob {
@@ -296,7 +339,7 @@ impl Vault {
 
     /// Try every slot this opener recognises.
     ///
-    /// Reports [`Error::Unauthenticated`] whether the factor was wrong or no
+    /// Reports [`Error::WrongPassphrase`] whether the factor was wrong or no
     /// slot matched at all: distinguishing them would tell an attacker which
     /// factors a vault is enrolled with.
     fn unwrap_with(file: &VaultFile, opener: &dyn SlotOpener) -> Result<SymKey> {
@@ -304,11 +347,23 @@ impl Vault {
             let Some(kek) = opener.kek_for(&slot.factor)? else {
                 continue;
             };
-            if let Ok(dek) = slot.unwrap_dek(&kek, &file.magic, file.format) {
-                return Ok(dek);
+            // A slot's AAD binds the format version that was current when the
+            // slot was *sealed*, which is not necessarily the file's format
+            // today: raising FORMAT_VERSION rewrites the header on the next
+            // save, but re-wrapping a slot needs the passphrase, which `save`
+            // does not have. So try the current version and then older ones.
+            //
+            // This is what stops a format bump from locking every existing
+            // vault out of its own key — which is exactly what happened when
+            // format 3 landed. Only the AEAD open repeats here; the expensive
+            // part, deriving the KEK, has already been done once above.
+            for format in (1..=file.format).rev() {
+                if let Ok(dek) = slot.unwrap_dek(&kek, &file.magic, format) {
+                    return Ok(dek);
+                }
             }
         }
-        Err(Error::Unauthenticated)
+        Err(Error::WrongPassphrase)
     }
 
     fn unwrap_legacy(file: &VaultFile, passphrase: &str) -> Result<SymKey> {
@@ -438,6 +493,21 @@ impl Vault {
     /// so a crash mid-write can never leave a truncated vault. The temp file is
     /// created 0600 before any ciphertext reaches it.
     pub fn save(&mut self) -> Result<()> {
+        // Regenerate the plaintext index from the real data every time, so it
+        // cannot drift from what the body actually contains.
+        self.file.collections = self
+            .data
+            .collections
+            .iter()
+            .map(|c| CollectionIndex {
+                id: c.id,
+                label: c.label.clone(),
+                alias: c.alias.clone(),
+            })
+            .collect();
+        // An older file gains the index the first time it is written.
+        self.file.format = FORMAT_VERSION;
+
         let plaintext = serde_json::to_vec(&self.data)?;
         let (body_nonce, body_ct) = self.dek.seal(&plaintext, &self.file.body_aad())?;
         self.file.body = SealedBlob::new(body_nonce, body_ct);
@@ -549,7 +619,7 @@ mod tests {
         Vault::create(&path, "right", KdfParams::insecure_fast()).unwrap();
         assert!(matches!(
             Vault::open(&path, "wrong"),
-            Err(Error::Unauthenticated)
+            Err(Error::WrongPassphrase)
         ));
     }
 
@@ -575,7 +645,7 @@ mod tests {
         v.change_passphrase("new", params).unwrap();
         drop(v);
 
-        assert!(matches!(Vault::open(&path, "old"), Err(Error::Unauthenticated)));
+        assert!(matches!(Vault::open(&path, "old"), Err(Error::WrongPassphrase)));
         let v2 = Vault::open(&path, "new").unwrap();
         assert_eq!(v2.item(id).unwrap().secret.expose(), "body");
         assert_eq!(v2.slots().len(), 1, "passphrase change left a stale slot");
@@ -644,7 +714,7 @@ mod tests {
                     key: SymKey::random().unwrap(),
                 }
             ),
-            Err(Error::Unauthenticated)
+            Err(Error::WrongPassphrase)
         ));
     }
 
@@ -678,7 +748,7 @@ mod tests {
                     key: device_key
                 }
             ),
-            Err(Error::Unauthenticated)
+            Err(Error::WrongPassphrase)
         ));
     }
 
@@ -700,7 +770,9 @@ mod tests {
         file.slots[0].label = "Tampered".into();
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
 
-        assert!(matches!(Vault::open(&path, "pw"), Err(Error::Unauthenticated)));
+        // Surfaces as a rejected factor: a slot whose AAD no longer matches is
+        // indistinguishable from one the supplied passphrase never fitted.
+        assert!(matches!(Vault::open(&path, "pw"), Err(Error::WrongPassphrase)));
     }
 
     #[test]
@@ -724,6 +796,47 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn collections_are_listable_without_unlocking() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        v.add_collection(Collection::new("Work").with_alias("work"));
+        v.add_item_default(Item::new(ItemKind::Login, "Secret Label").with_secret("s"));
+        v.save().unwrap();
+        drop(v);
+
+        // No passphrase involved: this is what a locked daemon can answer.
+        let index = Vault::read_index(&path).unwrap();
+        let labels: Vec<&str> = index.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"Login"), "default collection missing from the index");
+        assert!(labels.contains(&"Work"));
+        assert_eq!(
+            index.iter().find(|c| c.alias.as_deref() == Some("default")).map(|c| &c.label),
+            Some(&"Login".to_owned()),
+            "the default alias must be resolvable while locked"
+        );
+
+        // Item-level data must NOT be in the clear, only collection names.
+        let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        assert!(raw.contains("Work"), "collection labels are deliberately plaintext");
+        assert!(
+            !raw.contains("Secret Label"),
+            "an item label leaked into the plaintext index"
+        );
+    }
+
+    #[test]
+    fn tampering_with_the_collection_index_invalidates_the_body() {
+        let (_d, path) = tmp();
+        Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+
+        let mut file: VaultFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file.collections[0].label = "Renamed".into();
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+
+        assert!(matches!(Vault::open(&path, "pw"), Err(Error::Unauthenticated)));
+    }
+
     #[cfg(unix)]
     #[test]
     fn vault_file_is_not_world_readable() {
@@ -734,7 +847,79 @@ mod tests {
         assert_eq!(mode & 0o077, 0, "vault is readable by group or other");
     }
 
-    /// Format 1 files must keep opening, and become format 2 on save.
+    /// Raising FORMAT_VERSION must not lock an existing vault out of its key.
+    ///
+    /// The exact format 2 -> 3 regression: `save` rewrites the header with the
+    /// new version, but re-wrapping a key slot needs the passphrase, which
+    /// `save` does not have. The slot therefore keeps the *old* version in its
+    /// AAD, and unwrapping it against the file's current version fails — on a
+    /// vault that is perfectly intact, reported as "incorrect passphrase, or
+    /// the vault has been tampered with".
+    #[test]
+    fn a_format_bump_does_not_invalidate_existing_key_slots() {
+        let (_d, path) = tmp();
+        let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        vault.add_collection(crate::model::Collection::new("Login"));
+
+        // Put the slot back the way an older build sealed it — AAD bound to
+        // format 2 — and only then save, so the body is sealed over these
+        // slots at the current format. That is the on-disk shape a real
+        // upgraded vault has: new header and body, old slot.
+        let dek = Vault::unwrap_with(&vault.file, &crate::slots::PassphraseOpener::new("pw"))
+            .unwrap();
+        vault.file.slots = vec![
+            crate::slots::Slot::new_passphrase(
+                "Passphrase",
+                "pw",
+                KdfParams::insecure_fast(),
+                &dek,
+                MAGIC,
+                2,
+            )
+            .unwrap(),
+        ];
+        vault.save().unwrap();
+
+        let on_disk = Vault::read_file(&path).unwrap();
+        assert!(
+            on_disk.format > 2,
+            "this test needs a format newer than the slot was sealed with"
+        );
+
+        let reopened = Vault::open(&path, "pw")
+            .expect("a format bump locked the passphrase slot out of its own key");
+        assert!(
+            reopened
+                .data()
+                .collections
+                .iter()
+                .any(|c| c.label == "Login"),
+            "the vault opened but lost its contents"
+        );
+    }
+
+    /// Format 2's AAD must never change: it is the only thing standing between
+    /// an existing on-disk vault and an authentication failure. Adding the
+    /// collection index in format 3 was safe precisely because it went into a
+    /// new branch rather than the existing one.
+    #[test]
+    fn the_format_2_body_aad_is_frozen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+
+        let mut file = vault.file.clone();
+        file.format = 2;
+        let expected =
+            serde_json::to_vec(&(&file.magic, 2u16, &file.slots)).unwrap();
+        assert_eq!(
+            file.body_aad(),
+            expected,
+            "format 2's AAD changed; every existing vault would fail to open"
+        );
+    }
+
+    /// Format 1 files must keep opening, and be upgraded on save.
     #[test]
     fn format_1_vaults_are_read_and_upgraded() {
         let (_d, path) = tmp();
@@ -749,6 +934,7 @@ mod tests {
             magic: MAGIC.to_owned(),
             format: 1,
             slots: Vec::new(),
+            collections: Vec::new(),
             kdf: Some(KdfDescriptor {
                 algorithm: "argon2id".to_owned(),
                 params,
@@ -795,7 +981,7 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let top = json.as_object().unwrap();
-        assert_eq!(top["format"], 2);
+        assert_eq!(top["format"], FORMAT_VERSION);
         assert!(!top.contains_key("kdf"), "legacy kdf was kept");
         assert!(
             !top.contains_key("wrapped_key"),
