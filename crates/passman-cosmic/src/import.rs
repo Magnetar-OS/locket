@@ -439,7 +439,7 @@ pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
 pub async fn run_keyring(vault: &mut Vault, job: &Job) -> Outcome {
     let into = (!job.collection.trim().is_empty()).then(|| job.collection.trim());
     let summary =
-        passman_secret::import::import_from(vault, passman_secret::WELL_KNOWN_NAME, into)
+        passman_secret::import::import_from(vault, passman_secret::WELL_KNOWN_NAME, into, false)
             .await
             .map_err(|e| e.to_string())?;
     vault.save().map_err(|e| e.to_string())?;
@@ -447,7 +447,7 @@ pub async fn run_keyring(vault: &mut Vault, job: &Job) -> Outcome {
     // passman-import without a cycle, so the two summaries are separate types.
     Ok(ImportSummary {
         collections: summary.collections,
-        imported: summary.imported,
+        imported: summary.imported + summary.replaced,
         skipped_duplicate: summary.skipped_duplicate,
         skipped_unreadable: summary.skipped_unreadable,
     })

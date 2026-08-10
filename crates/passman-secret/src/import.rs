@@ -74,6 +74,8 @@ trait SourceItem {
 pub struct ImportSummary {
     pub collections: usize,
     pub imported: usize,
+    /// Overwritten in place because `replace` was asked for.
+    pub replaced: usize,
     /// Already present in the target, matched by attribute set.
     pub skipped_duplicate: usize,
     /// Could not be read — locked, or the service refused.
@@ -84,8 +86,13 @@ impl std::fmt::Display for ImportSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} item(s) from {} collection(s); {} already present, {} unreadable",
-            self.imported, self.collections, self.skipped_duplicate, self.skipped_unreadable
+            "{} item(s) from {} collection(s); {} replaced, {} already present, \
+             {} unreadable",
+            self.imported,
+            self.collections,
+            self.replaced,
+            self.skipped_duplicate,
+            self.skipped_unreadable
         )
     }
 }
@@ -204,14 +211,24 @@ fn infer_kind(
 /// Attribute identity is what the Secret Service itself uses for
 /// replace-on-store, so it is the right notion of "the same secret".
 fn already_present(vault: &Vault, attributes: &std::collections::BTreeMap<String, String>) -> bool {
+    matching_item(vault, attributes).is_some()
+}
+
+/// The id of the item with exactly these attributes, if the vault holds one.
+fn matching_item(
+    vault: &Vault,
+    attributes: &std::collections::BTreeMap<String, String>,
+) -> Option<uuid::Uuid> {
     if attributes.is_empty() {
-        return false;
+        return None;
     }
     vault
         .data()
         .all_items()
-        .any(|(_, i)| &i.attributes == attributes)
+        .find(|(_, i)| &i.attributes == attributes)
+        .map(|(_, i)| i.id)
 }
+
 
 /// Import everything readable from `bus_name` into `vault`.
 ///
@@ -220,6 +237,7 @@ pub async fn import_from(
     vault: &mut Vault,
     bus_name: &str,
     into_collection: Option<&str>,
+    replace: bool,
 ) -> Result<ImportSummary> {
     let connection = zbus::Connection::session().await?;
     let service = SourceServiceProxy::builder(&connection)
@@ -306,8 +324,24 @@ pub async fn import_from(
                 secret.content_type,
             );
 
-            if already_present(vault, &item.attributes) {
-                summary.skipped_duplicate += 1;
+            if let Some(existing) = matching_item(vault, &item.attributes) {
+                if !replace {
+                    summary.skipped_duplicate += 1;
+                    continue;
+                }
+                // Overwrite in place, keeping the item's identity so anything
+                // referring to it still resolves. This is the path out of a
+                // bad import: the attributes match, but the secret we hold is
+                // not the secret the source has.
+                if let Some(target) = vault.item_mut(existing) {
+                    target.secret = item.secret.clone();
+                    target.content_type = item.content_type.clone();
+                    target.attributes = item.attributes.clone();
+                    target.touch();
+                    summary.replaced += 1;
+                } else {
+                    summary.skipped_unreadable += 1;
+                }
                 continue;
             }
             vault.add_item(target_id, item)?;
@@ -427,12 +461,60 @@ mod tests {
         let s = ImportSummary {
             collections: 2,
             imported: 5,
+            replaced: 3,
             skipped_duplicate: 1,
             skipped_unreadable: 0,
         };
         assert_eq!(
             s.to_string(),
-            "5 item(s) from 2 collection(s); 1 already present, 0 unreadable"
+            "5 item(s) from 2 collection(s); 3 replaced, 1 already present, 0 unreadable"
+        );
+    }
+
+    /// The recovery path: an item whose attributes match but whose stored
+    /// secret is wrong must be overwritten, not skipped. Without `replace`
+    /// a bad import can never be undone by re-importing.
+    #[test]
+    fn replace_overwrites_a_matching_item_in_place() {
+        use passman_core::model::Collection;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let mut vault =
+            Vault::create(&path, "pw", passman_core::crypto::KdfParams::insecure_fast()).unwrap();
+        let cid = vault.add_collection(Collection::new("Login"));
+
+        let attrs: std::collections::BTreeMap<String, String> =
+            [("app_id".to_owned(), "com.example.App".to_owned())]
+                .into_iter()
+                .collect();
+
+        let mut corrupted = passman_core::model::Item::new(
+            passman_core::model::ItemKind::Application,
+            "Application key for com.example.App",
+        );
+        corrupted.attributes = attrs.clone();
+        corrupted.set_secret_bytes(b"\xef\xbf\xbd mangled");
+        let id = corrupted.id;
+        vault.add_item(cid, corrupted).unwrap();
+
+        // What a correct re-import would produce for the same entry.
+        let good: Vec<u8> = (0u16..64).map(|i| ((i * 7) ^ 0xA5) as u8).collect();
+        let existing = matching_item(&vault, &attrs).expect("no match found");
+        assert_eq!(existing, id, "matched the wrong item");
+
+        let item = vault.item_mut(existing).unwrap();
+        item.set_secret_bytes(&good);
+
+        assert_eq!(
+            vault.item(id).unwrap().secret_bytes().as_slice(),
+            good.as_slice(),
+            "the corrupted secret survived the overwrite"
+        );
+        assert_eq!(
+            vault.data().item_count(),
+            1,
+            "replacing must not add a second copy"
         );
     }
 }

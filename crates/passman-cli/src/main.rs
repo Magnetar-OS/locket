@@ -79,6 +79,12 @@ enum Command {
         /// Report what would be imported without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Overwrite items the vault already holds instead of skipping them.
+        ///
+        /// The way out of a bad import: the attributes match, but the secret
+        /// in the vault is not the secret the source has.
+        #[arg(long)]
+        replace: bool,
     },
     /// Import a `pass` (password-store) tree.
     ImportPass {
@@ -349,12 +355,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Import { from, into, dry_run } => {
+        Command::Import {
+            from,
+            into,
+            dry_run,
+            replace,
+        } => {
             let mut vault = Vault::open(&path, &passphrase)?;
             let before = vault.data().item_count();
 
             let summary = tokio::runtime::Runtime::new()?.block_on(
-                passman_secret::import::import_from(&mut vault, &from, into.as_deref()),
+                passman_secret::import::import_from(&mut vault, &from, into.as_deref(), replace),
             )?;
 
             if dry_run {
