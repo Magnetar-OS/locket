@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use passman_core::{
     Vault,
     model::{Item, ItemKind, now},
+    vault::CollectionIndex,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, oneshot};
@@ -76,6 +77,13 @@ pub struct ServiceState {
     /// `None` while locked. All item access goes through this, so locking is
     /// simply dropping the vault (and with it the DEK).
     pub vault: Option<Vault>,
+    /// Which collections exist, readable while locked.
+    ///
+    /// A locked service still has to answer `ReadAlias` and `Collections`.
+    /// Returning nothing there does not read as "locked" to a client — it
+    /// reads as "no keyring is installed", which is exactly what libsecret
+    /// applications then report to the user.
+    pub index: Vec<CollectionIndex>,
     pub sessions: SessionStore,
     pub config: ServiceConfig,
     pub prompts: Option<tokio::sync::mpsc::Sender<PromptRequest>>,
@@ -86,6 +94,7 @@ impl ServiceState {
     pub fn new(config: ServiceConfig) -> Self {
         Self {
             vault: None,
+            index: Vec::new(),
             sessions: SessionStore::new(),
             config,
             prompts: None,
@@ -95,6 +104,24 @@ impl ServiceState {
 
     pub fn is_locked(&self) -> bool {
         self.vault.is_none()
+    }
+
+    /// The collection list, from the vault when open and from the plaintext
+    /// index when not.
+    pub fn collection_index(&self) -> Vec<CollectionIndex> {
+        match self.vault.as_ref() {
+            Some(v) => v
+                .data()
+                .collections
+                .iter()
+                .map(|c| CollectionIndex {
+                    id: c.id,
+                    label: c.label.clone(),
+                    alias: c.alias.clone(),
+                })
+                .collect(),
+            None => self.index.clone(),
+        }
     }
 
     fn vault(&self) -> Result<&Vault> {
@@ -139,6 +166,29 @@ impl ServiceState {
             return false;
         }
         wait.await.unwrap_or(false)
+    }
+
+    /// Unlock on demand, the way macOS Keychain does.
+    ///
+    /// Every method that actually touches secret data funnels through here.
+    /// The alternative — answering "locked" or, worse, "no such item" — is
+    /// what makes clients misbehave: Chromium and Electron's `safeStorage`
+    /// treat a failed lookup as "no key yet" and generate a *new* one, which
+    /// silently orphans everything they had already encrypted. Prompting is
+    /// both friendlier and safer.
+    ///
+    /// Property reads deliberately do not call this: D-Bus property traffic is
+    /// constant and background, and a passphrase dialog raised by a property
+    /// get would be unattributable to any user action.
+    pub async fn ensure_unlocked(state: &SharedState) -> Result<()> {
+        if !state.lock().await.is_locked() {
+            return Ok(());
+        }
+        if Self::request_unlock(state).await {
+            Ok(())
+        } else {
+            Err(Error::Locked)
+        }
     }
 
     fn next_prompt_path(&self) -> Result<OwnedObjectPath> {
@@ -361,12 +411,9 @@ impl SecretService {
         // The consequence is that returning "no matches" here would be a lie
         // that clients believe: libsecret would report the secret as missing
         // rather than prompting. So ask for an unlock and wait.
-        if self.state.lock().await.is_locked() {
-            let unlocked = ServiceState::request_unlock(&self.state).await;
-            if !unlocked {
-                return Err(fdo::Error::from(Error::Locked));
-            }
-        }
+        ServiceState::ensure_unlocked(&self.state)
+            .await
+            .map_err(fdo::Error::from)?;
 
         let state = self.state.lock().await;
         let vault = state.vault().map_err(fdo::Error::from)?;
@@ -443,6 +490,10 @@ impl SecretService {
         items: Vec<OwnedObjectPath>,
         session: OwnedObjectPath,
     ) -> fdo::Result<HashMap<OwnedObjectPath, SecretStruct>> {
+        ServiceState::ensure_unlocked(&self.state)
+            .await
+            .map_err(fdo::Error::from)?;
+
         let state = self.state.lock().await;
         let vault = state.vault().map_err(fdo::Error::from)?;
         let sess = state.sessions.get(&session).map_err(fdo::Error::from)?;
@@ -472,13 +523,14 @@ impl SecretService {
     }
 
     async fn read_alias(&self, name: String) -> fdo::Result<OwnedObjectPath> {
+        // Answered from the plaintext index when locked. Returning `/` here
+        // tells a client the collection does not exist, which is a very
+        // different claim from "it exists and is locked".
         let state = self.state.lock().await;
-        let Ok(vault) = state.vault() else {
-            return Ok(null_path());
-        };
-        Ok(vault
-            .data()
-            .collection_by_alias(&name)
+        Ok(state
+            .collection_index()
+            .iter()
+            .find(|c| c.alias.as_deref() == Some(name.as_str()))
             .map(|c| collection_path(c.id))
             .unwrap_or_else(null_path))
     }
@@ -502,17 +554,13 @@ impl SecretService {
 
     #[zbus(property)]
     async fn collections(&self) -> Vec<OwnedObjectPath> {
+        // Listed while locked too, for the same reason as ReadAlias.
         let state = self.state.lock().await;
         state
-            .vault()
-            .map(|v| {
-                v.data()
-                    .collections
-                    .iter()
-                    .map(|c| collection_path(c.id))
-                    .collect()
-            })
-            .unwrap_or_default()
+            .collection_index()
+            .iter()
+            .map(|c| collection_path(c.id))
+            .collect()
     }
 
     #[zbus(signal)]
@@ -578,13 +626,17 @@ impl CollectionIface {
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
-    ) -> fdo::Result<Vec<OwnedObjectPath>> {
+    ) -> Result<Vec<OwnedObjectPath>, crate::error::SecretError> {
+        ServiceState::ensure_unlocked(&self.state).await?;
+
         let state = self.state.lock().await;
-        let vault = state.vault().map_err(fdo::Error::from)?;
-        let collection = vault
-            .data()
-            .collection(self.id)
-            .ok_or_else(|| fdo::Error::UnknownObject("no such collection".into()))?;
+        // If the user declined or the prompt timed out, this is a real
+        // IsLocked error *name*, so libsecret knows to unlock and retry rather
+        // than treating it as a hard failure or an absent secret.
+        let vault = state.vault().map_err(crate::error::SecretError::from)?;
+        let collection = vault.data().collection(self.id).ok_or_else(|| {
+            crate::error::SecretError::NoSuchObject("no such collection".into())
+        })?;
 
         let query: std::collections::BTreeMap<String, String> = attributes.into_iter().collect();
         Ok(collection
@@ -604,6 +656,12 @@ impl CollectionIface {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
+        // Writes prompt too. An application that is told "locked" when it tries
+        // to save typically discards the secret it was holding.
+        ServiceState::ensure_unlocked(&self.state)
+            .await
+            .map_err(fdo::Error::from)?;
+
         let label = take_string(&properties, prop::ITEM_LABEL).unwrap_or_default();
         let attributes = take_attributes(&properties, prop::ITEM_ATTRIBUTES);
         let schema = take_string(&properties, prop::ITEM_TYPE);
@@ -698,11 +756,13 @@ impl CollectionIface {
 
     #[zbus(property)]
     async fn label(&self) -> String {
+        // Available while locked: the label is in the plaintext index, and a
+        // nameless collection in an unlock prompt helps nobody.
         let state = self.state.lock().await;
         state
-            .vault()
-            .ok()
-            .and_then(|v| v.data().collection(self.id))
+            .collection_index()
+            .iter()
+            .find(|c| c.id == self.id)
             .map(|c| c.label.clone())
             .unwrap_or_default()
     }
@@ -792,6 +852,10 @@ impl ItemIface {
     /// The spec wants one argument of type `(oayays)`, i.e. body `((oayays))`,
     /// and libsecret checks. Wrapping in a 1-tuple restores the nesting.
     async fn get_secret(&self, session: OwnedObjectPath) -> fdo::Result<(SecretStruct,)> {
+        ServiceState::ensure_unlocked(&self.state)
+            .await
+            .map_err(fdo::Error::from)?;
+
         let state = self.state.lock().await;
         let vault = state.vault().map_err(fdo::Error::from)?;
         let sess = state.sessions.get(&session).map_err(fdo::Error::from)?;
@@ -811,6 +875,10 @@ impl ItemIface {
     }
 
     async fn set_secret(&self, secret: SecretStruct) -> fdo::Result<()> {
+        ServiceState::ensure_unlocked(&self.state)
+            .await
+            .map_err(fdo::Error::from)?;
+
         let mut state = self.state.lock().await;
         let plaintext = {
             let session = state
@@ -1046,49 +1114,54 @@ pub async fn register_objects(server: &ObjectServer, state: &SharedState) -> Res
 }
 
 pub async fn register_vault_objects(server: &ObjectServer, state: &SharedState) -> Result<()> {
-    let tree: Vec<(Uuid, Option<String>, Vec<Uuid>)> = {
+    // Collections are published whether or not the vault is open, from the
+    // plaintext index. A client must be able to find the collection in order
+    // to ask for it to be unlocked at all.
+    let (index, items): (Vec<CollectionIndex>, Vec<(Uuid, Vec<Uuid>)>) = {
         let guard = state.lock().await;
-        let Ok(vault) = guard.vault() else {
-            return Ok(());
-        };
-        vault
-            .data()
-            .collections
-            .iter()
-            .map(|c| {
-                (
-                    c.id,
-                    c.alias.clone(),
-                    c.items.iter().map(|i| i.id).collect(),
-                )
+        let index = guard.collection_index();
+        let items = guard
+            .vault()
+            .map(|v| {
+                v.data()
+                    .collections
+                    .iter()
+                    .map(|c| (c.id, c.items.iter().map(|i| i.id).collect()))
+                    .collect()
             })
-            .collect()
+            .unwrap_or_default();
+        (index, items)
     };
 
-    for (collection_id, alias, items) in tree {
+    for collection in index {
         server
             .at(
-                collection_path(collection_id),
+                collection_path(collection.id),
                 CollectionIface {
                     state: state.clone(),
-                    id: collection_id,
+                    id: collection.id,
                 },
             )
             .await?;
 
         // Also publish under /aliases/<alias>, which is where libsecret looks.
-        if let Some(path) = alias.as_deref().and_then(alias_path) {
+        if let Some(path) = collection.alias.as_deref().and_then(alias_path) {
             server
                 .at(
                     path,
                     CollectionIface {
                         state: state.clone(),
-                        id: collection_id,
+                        id: collection.id,
                     },
                 )
                 .await?;
         }
-        for item_id in items {
+    }
+
+    // Items only exist once the vault is open; while locked there is nothing
+    // to enumerate, which is what `Locked` on the collection communicates.
+    for (collection_id, item_ids) in items {
+        for item_id in item_ids {
             server
                 .at(
                     item_path(collection_id, item_id),

@@ -148,6 +148,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         autosave: true,
     });
     state.vault = vault;
+    // Read the plaintext collection index so a locked daemon can still answer
+    // ReadAlias and Collections. Without it clients conclude no keyring exists.
+    match Vault::read_index(&vault_path) {
+        Ok(index) => {
+            tracing::info!(collections = index.len(), "loaded collection index");
+            state.index = index;
+        }
+        Err(e) => tracing::warn!("could not read the collection index: {e}"),
+    }
     let state = Arc::new(Mutex::new(state));
 
     if let Some(agent) = ssh_agent {

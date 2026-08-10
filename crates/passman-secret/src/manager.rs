@@ -77,6 +77,24 @@ impl Manager {
 
         {
             let mut state = self.state.lock().await;
+            // Upgrade an older file now that it is open, so the next locked
+            // start has a collection index to answer ReadAlias from.
+            let mut vault = vault;
+            if vault.format() < passman_core::vault::FORMAT_VERSION
+                && let Err(e) = vault.save()
+            {
+                tracing::warn!("could not upgrade the vault format: {e}");
+            }
+            state.index = vault
+                .data()
+                .collections
+                .iter()
+                .map(|c| passman_core::vault::CollectionIndex {
+                    id: c.id,
+                    label: c.label.clone(),
+                    alias: c.alias.clone(),
+                })
+                .collect();
             state.vault = Some(vault);
         }
         register_vault_objects(server, &self.state)
@@ -164,12 +182,43 @@ pub async fn serve_prompts(
         }
         tracing::info!("asked the frontend to unlock");
 
+        // A signal only helps if something is listening. Give a running
+        // frontend a moment to react, then start one — otherwise an
+        // application asking for a secret on a machine with no passman window
+        // open just waits for a prompt nobody can answer.
+        if !wait_until_unlocked(&state, std::time::Duration::from_secs(2)).await {
+            match spawn_frontend() {
+                Ok(path) => tracing::info!("no frontend responded; launched {path} to prompt"),
+                Err(e) => tracing::warn!("could not launch the frontend to prompt: {e}"),
+            }
+        }
+
         let unlocked = wait_until_unlocked(&state, PROMPT_TIMEOUT).await;
         if !unlocked {
             tracing::info!("unlock request timed out after {PROMPT_TIMEOUT:?}");
         }
         let _ = reply.send(unlocked);
     }
+}
+
+/// Start the GUI so somebody can answer the prompt.
+///
+/// Resolved next to this executable before falling back to `PATH`: the daemon
+/// runs as a systemd user unit, whose environment is not the login shell's, so
+/// a `PATH` lookup is not something an unlock path should depend on.
+fn spawn_frontend() -> std::io::Result<String> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("passman")))
+        .filter(|p| p.is_file());
+
+    let candidate = match &sibling {
+        Some(p) => p.as_os_str().to_owned(),
+        None => std::ffi::OsString::from("passman"),
+    };
+    std::process::Command::new(&candidate)
+        .spawn()
+        .map(|_| candidate.to_string_lossy().into_owned())
 }
 
 async fn wait_until_unlocked(state: &Arc<Mutex<ServiceState>>, timeout: std::time::Duration) -> bool {
