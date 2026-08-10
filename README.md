@@ -133,6 +133,15 @@ End-to-end against real `libsecret` on a private bus: store, lookup, search
 without duplicates, delete, unicode secrets, both session algorithms, and
 `ReadAlias`. The vault file was checked for plaintext leakage after each.
 
+End-to-end through `xdg-desktop-portal` with a real sandboxed application
+(Authenticator, a Flatpak that encrypts its database with a portal-derived
+key). The app requested its secret over `org.freedesktop.portal.Secret`, the
+portal routed it to passman's backend, and the app's own log confirms `oo7`
+took the sandboxed file-backend path and loaded its keyring. Restarting it
+decrypted the keyring written under the previous run's key, which is the
+property that matters: an app whose derived key moved would lose everything
+it had stored.
+
 ## Roadmap
 
 Implemented: vault + crypto, Secret Service (Service/Collection/Item/Session,
