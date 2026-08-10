@@ -65,6 +65,26 @@ is an override that `--uninstall` removes.
 EOF
 }
 
+# Refuse to run under sudo.
+#
+# Everything this script installs is per-user: binaries in ~/.local/bin, the
+# D-Bus service override, the systemd unit, the vault. Under `sudo` every one
+# of those paths resolves to /root, so an install would set passman up for a
+# user who will never log in, and `--status` would report that user's empty
+# home as though it were yours.
+#
+# The privileged steps — the PAM module and the Secret portal backend — call
+# `sudo` themselves, for exactly the two files that live outside your home.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    printf '\033[1;31m ✗\033[0m %s\n' \
+        "run this as $SUDO_USER, not with sudo." >&2
+    printf '   %s\n' \
+        "Everything here is per-user; under sudo it all resolves to /root." \
+        "It will ask for sudo itself for the PAM module and the Secret portal." >&2
+    printf '\n   %s\n' "$0 ${*:-}" >&2
+    exit 1
+fi
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --pam) DO_PAM=1 ;;
