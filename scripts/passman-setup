@@ -20,7 +20,10 @@ set -uo pipefail
 PREFIX="${PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
 DBUS_DIR="$HOME/.local/share/dbus-1/services"
-PORTAL_DIR="$HOME/.local/share/xdg-desktop-portal/portals"
+# xdg-desktop-portal only scans XDG_DATA_DIRS, which does not include
+# ~/.local/share, so a portal backend genuinely has to go system-wide.
+PORTAL_DIR="/usr/share/xdg-desktop-portal/portals"
+PORTAL_CONF_DIR="$HOME/.config/xdg-desktop-portal"
 AUTOSTART_DIR="$HOME/.config/autostart"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 DESKTOP_DIR="$PREFIX/share/applications"
@@ -110,6 +113,35 @@ status() {
         printf '   D-Bus activation: still gnome-keyring\n'
     fi
 
+    say "Flatpak apps (Secret portal)"
+    if [ -f "$PORTAL_DIR/passman.portal" ]; then
+        ok "portal backend installed"
+    else
+        printf '   portal backend: not installed in %s\n' "$PORTAL_DIR"
+    fi
+    # Being installed is not enough: the desktop's portals.conf has to name
+    # passman, or a backend that is merely present is never chosen.
+    local desktop conf preferred
+    desktop=$(printf '%s' "${XDG_CURRENT_DESKTOP:-}" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')
+    conf=""
+    for c in "$HOME/.config/xdg-desktop-portal/$desktop-portals.conf" \
+             "$HOME/.config/xdg-desktop-portal/portals.conf" \
+             "/usr/share/xdg-desktop-portal/$desktop-portals.conf" \
+             "/usr/share/xdg-desktop-portal/portals.conf"; do
+        [ -f "$c" ] && { conf="$c"; break; }
+    done
+    if [ -z "$conf" ]; then
+        printf '   no portals.conf found; the desktop default applies\n'
+    else
+        preferred=$(grep -m1 '^org\.freedesktop\.impl\.portal\.Secret=' "$conf" | cut -d= -f2-)
+        case "$preferred" in
+            passman*) ok "Secret portal routed to passman (via $conf)" ;;
+            "")       printf '   %s does not mention the Secret portal\n' "$conf" ;;
+            *)        warn "Secret portal prefers ${preferred%%;*} — Flatpak apps will not use passman"
+                      printf '   fix: re-run %s (needs sudo for this step)\n' "$0" ;;
+        esac
+    fi
+
     say "vault"
     if [ -f "$VAULT" ]; then
         ok "$VAULT"
@@ -148,6 +180,66 @@ vault_item_count() {
     passman-cli --vault "$VAULT" list 2>/dev/null | wc -l
 }
 
+# Route org.freedesktop.impl.portal.Secret to passman.
+#
+# Two separate things have to be true and neither is by default:
+#
+#   1. The .portal file must sit in a directory xdg-desktop-portal scans —
+#      XDG_DATA_DIRS only, so ~/.local/share is silently ignored.
+#   2. The desktop's portals.conf must *prefer* passman. COSMIC ships
+#      `org.freedesktop.impl.portal.Secret=oo7-portal;gnome-keyring;`, and a
+#      backend that is merely present but unlisted is never chosen.
+#
+# Without both, Flatpak apps asking for a secret D-Bus-activate gnome-keyring,
+# which then fights passman over org.freedesktop.secrets.
+install_secret_portal() {
+    say "Routing the Secret portal to passman"
+
+    if [ "$DRY" = 1 ]; then
+        say "would install $PORTAL_DIR/passman.portal (needs root)"
+    elif sudo install -m 644 -D "$REPO/res/passman.portal" "$PORTAL_DIR/passman.portal"; then
+        ok "portal backend installed"
+    else
+        warn "could not write $PORTAL_DIR — Flatpak apps will not use passman"
+        warn "re-run with sudo available, or install res/passman.portal by hand"
+        return 0
+    fi
+
+    # portals.conf is not merged across directories: the first file found wins
+    # outright. So derive the user copy from the system one rather than writing
+    # a bare Secret= line, which would drop the desktop's other preferences.
+    desktop=$(printf '%s' "${XDG_CURRENT_DESKTOP:-}" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')
+    if [ -n "$desktop" ]; then
+        conf="$PORTAL_CONF_DIR/$desktop-portals.conf"
+        src="/usr/share/xdg-desktop-portal/$desktop-portals.conf"
+    else
+        conf="$PORTAL_CONF_DIR/portals.conf"
+        src="/usr/share/xdg-desktop-portal/portals.conf"
+    fi
+
+    if [ "$DRY" = 1 ]; then
+        say "would write $conf preferring passman for the Secret interface"
+        return 0
+    fi
+
+    mkdir -p "$PORTAL_CONF_DIR"
+    {
+        echo "# written by passman-setup — delete this file to restore the defaults"
+        if [ -f "$src" ]; then
+            grep -v '^org\.freedesktop\.impl\.portal\.Secret=' "$src" \
+                | grep -v '^# written by passman-setup'
+        else
+            echo "[preferred]"
+        fi
+        echo "org.freedesktop.impl.portal.Secret=passman;"
+    } >"$conf"
+    ok "wrote $conf"
+
+    systemctl --user restart xdg-desktop-portal.service 2>/dev/null \
+        && ok "restarted xdg-desktop-portal" \
+        || warn "restart xdg-desktop-portal (or log out) for the change to apply"
+}
+
 install_files() {
     say "Building release binaries"
     run env -C "$REPO" cargo build --release \
@@ -165,11 +257,12 @@ install_files() {
     run install -m 755 "$REPO/target/release/passman-applet" "$BIN_DIR/passman-applet"
     ok "binaries installed"
 
-    say "Installing desktop entries and the Secret portal backend"
-    run mkdir -p "$DESKTOP_DIR" "$PORTAL_DIR"
+    say "Installing desktop entries"
+    run mkdir -p "$DESKTOP_DIR"
     run install -m 644 "$REPO/res/io.github.idominikos.Passman.desktop" "$DESKTOP_DIR/"
     run install -m 644 "$REPO/res/io.github.idominikos.PassmanApplet.desktop" "$DESKTOP_DIR/"
-    run install -m 644 "$REPO/res/passman.portal" "$PORTAL_DIR/passman.portal"
+
+    install_secret_portal
 
     if [ -n "$EXT_ID" ]; then
         say "Installing the native messaging host"
@@ -383,7 +476,12 @@ do_uninstall() {
     run rm -f "$DBUS_DIR/org.freedesktop.secrets.service"
     run rm -f "$AUTOSTART_DIR/gnome-keyring-secrets.desktop"
     run rm -f "$SYSTEMD_DIR/passman-daemon.service"
-    run rm -f "$PORTAL_DIR/passman.portal"
+    run sudo rm -f "$PORTAL_DIR/passman.portal"
+    # Older installs put it here, where xdg-desktop-portal never looked.
+    run rm -f "$HOME/.local/share/xdg-desktop-portal/portals/passman.portal"
+    for c in "$PORTAL_CONF_DIR"/*-portals.conf "$PORTAL_CONF_DIR/portals.conf"; do
+        [ -f "$c" ] && grep -q '^# written by passman-setup' "$c" && run rm -f "$c"
+    done
     run systemctl --user daemon-reload
 
     if grep -q "pam_passman.so" "$PAM_STACK" 2>/dev/null; then
