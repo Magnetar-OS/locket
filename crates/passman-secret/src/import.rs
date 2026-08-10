@@ -210,9 +210,6 @@ fn infer_kind(
 ///
 /// Attribute identity is what the Secret Service itself uses for
 /// replace-on-store, so it is the right notion of "the same secret".
-fn already_present(vault: &Vault, attributes: &std::collections::BTreeMap<String, String>) -> bool {
-    matching_item(vault, attributes).is_some()
-}
 
 /// The id of the item with exactly these attributes, if the vault holds one.
 fn matching_item(
@@ -445,15 +442,15 @@ mod tests {
         let same_attrs = existing.attributes.clone();
         vault.add_item_default(existing);
 
-        assert!(already_present(&vault, &same_attrs));
+        assert!(matching_item(&vault, &same_attrs).is_some());
 
         // A different username is a different secret.
         let mut other = same_attrs.clone();
         other.insert("username".into(), "grace".into());
-        assert!(!already_present(&vault, &other));
+        assert!(!matching_item(&vault, &other).is_some());
 
         // An attribute-less item can never be matched, so it is never skipped.
-        assert!(!already_present(&vault, &Default::default()));
+        assert!(!matching_item(&vault, &Default::default()).is_some());
     }
 
     #[test]
