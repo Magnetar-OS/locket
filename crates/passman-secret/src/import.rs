@@ -206,12 +206,10 @@ fn infer_kind(
     ItemKind::Application
 }
 
-/// Whether the vault already holds an item with exactly these attributes.
+/// The id of the item with exactly these attributes, if the vault holds one.
 ///
 /// Attribute identity is what the Secret Service itself uses for
 /// replace-on-store, so it is the right notion of "the same secret".
-
-/// The id of the item with exactly these attributes, if the vault holds one.
 fn matching_item(
     vault: &Vault,
     attributes: &std::collections::BTreeMap<String, String>,

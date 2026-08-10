@@ -398,16 +398,34 @@ impl App {
             let mut column = widget::list_column();
             for item in items {
                 let selected = self.selected == Some(item.id);
+                // Compact drops the subtitle rather than shrinking the type:
+                // the second line is what costs the height, and smaller text
+                // would cost legibility for the same gain.
+                let compact = self.settings.compact_list;
+                let text: Element<'_, Message> = if compact {
+                    widget::row::with_capacity(2)
+                        .spacing(spacing.space_xs)
+                        .align_y(Alignment::Center)
+                        .push(widget::text::body(item.label.clone()))
+                        .push(widget::text::caption(item.subtitle().to_owned()))
+                        .width(Length::Fill)
+                        .into()
+                } else {
+                    widget::column::with_capacity(2)
+                        .push(widget::text::body(item.label.clone()))
+                        .push(widget::text::caption(item.subtitle().to_owned()))
+                        .width(Length::Fill)
+                        .into()
+                };
+
                 let row = widget::row::with_capacity(3)
-                    .spacing(spacing.space_s)
+                    .spacing(if compact { spacing.space_xs } else { spacing.space_s })
                     .align_y(Alignment::Center)
-                    .push(widget::icon::from_name(item.kind.icon_name()).size(24))
                     .push(
-                        widget::column::with_capacity(2)
-                            .push(widget::text::body(item.label.clone()))
-                            .push(widget::text::caption(item.subtitle().to_owned()))
-                            .width(Length::Fill),
+                        widget::icon::from_name(item.kind.icon_name())
+                            .size(if compact { 16 } else { 24 }),
                     )
+                    .push(text)
                     .push_maybe(item.favorite.then(|| {
                         widget::icon::from_name("starred-symbolic").size(16)
                     }));
@@ -539,15 +557,46 @@ impl App {
             // TOTP seeds are shown as a live code, not as the seed.
             if field.kind == FieldKind::Totp {
                 let code = Totp::parse(field.value.expose())
-                    .and_then(|t| t.code().map(|c| (c, t.seconds_remaining())));
+                    .and_then(|t| t.code().map(|c| (c, t.seconds_remaining(), t.period)));
                 match code {
-                    Ok((code, remaining)) => {
+                    Ok((code, remaining, period)) => {
                         column = column.push(self.field_row(
                             field.name.clone(),
-                            format!("One-time code ({remaining}s)"),
+                            "One-time code".to_owned(),
                             &code,
                             FieldKind::Text,
                         ));
+                        // A bar that drains, because "how long have I got" is
+                        // the question you actually have while typing a code
+                        // into a form, and a number alone makes you read it.
+                        let fraction = if period == 0 {
+                            0.0
+                        } else {
+                            remaining as f32 / period as f32
+                        };
+                        let bar = widget::determinate_linear(fraction).width(Length::Fill);
+
+                        // Under five seconds the code will roll mid-entry, so
+                        // the caption goes red: the bar alone reads as "some
+                        // left" right up until it is gone.
+                        let caption = widget::text::caption(if remaining == 1 {
+                            "expires in 1 second".to_owned()
+                        } else {
+                            format!("expires in {remaining} seconds")
+                        });
+                        let caption = if remaining <= 5 {
+                            caption.class(cosmic::theme::Text::Color(
+                                cosmic::theme::active().cosmic().destructive_color().into(),
+                            ))
+                        } else {
+                            caption
+                        };
+                        column = column.push(
+                            widget::column::with_capacity(2)
+                                .spacing(spacing.space_xxxs)
+                                .push(bar)
+                                .push(caption),
+                        );
                     }
                     Err(e) => {
                         column = column
@@ -984,6 +1033,9 @@ impl cosmic::Application for App {
                         }
                     }
                     preferences::Message::ConcealToggled(v) => self.settings.conceal_on_blur = v,
+                    preferences::Message::CompactListToggled(v) => {
+                        self.settings.compact_list = v;
+                    }
                     preferences::Message::Loaded(status) => {
                         self.status = Some(status);
                         changed = false;

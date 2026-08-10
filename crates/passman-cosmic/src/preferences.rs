@@ -22,6 +22,7 @@ pub enum Message {
     AutoLockSelected(usize),
     ClipboardSelected(usize),
     ConcealToggled(bool),
+    CompactListToggled(bool),
     Refresh,
     Loaded(Status),
 }
@@ -106,6 +107,17 @@ pub fn view<'a>(settings: &Settings, status: Option<&'a Status>) -> Element<'a, 
             widget::toggler(settings.conceal_on_blur).on_toggle(Message::ConcealToggled),
         ));
 
+    let appearance = widget::settings::section()
+        .title("Appearance")
+        .add(
+            widget::settings::item::builder("Compact list")
+                .description("Fit more items on screen by putting each one on a single line")
+                .control(
+                    widget::toggler(settings.compact_list)
+                        .on_toggle(Message::CompactListToggled),
+                ),
+        );
+
     let integration = match status {
         None => widget::settings::section()
             .title("Desktop integration")
@@ -178,11 +190,12 @@ pub fn view<'a>(settings: &Settings, status: Option<&'a Status>) -> Element<'a, 
         }
     };
 
-    widget::column::with_capacity(4)
+    widget::column::with_capacity(5)
         .spacing(spacing.space_m)
         .max_width(720.0)
         .push(widget::text::title3("Settings"))
         .push(prefs)
+        .push(appearance)
         .push(integration)
         .push(
             widget::button::standard("Re-check")
