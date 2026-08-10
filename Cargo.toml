@@ -26,6 +26,7 @@ repository = "https://github.com/idominikos/passman"
 [workspace.dependencies]
 passman-core = { path = "crates/passman-core" }
 passman-secret = { path = "crates/passman-secret" }
+passman-import = { path = "crates/passman-import" }
 passman-agent = { path = "crates/passman-agent" }
 
 # --- Async / IPC -----------------------------------------------------------

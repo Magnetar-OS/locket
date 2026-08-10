@@ -115,6 +115,60 @@ enum Command {
         #[arg(long)]
         into: Option<String>,
     },
+    /// Import `.env` files from a tree of projects.
+    ///
+    /// Walks the directory, skipping `node_modules`, `target`, `.git` and
+    /// friends, and ignoring `.env.example`-style templates. Source files are
+    /// never modified — the project still needs them until it reads its
+    /// configuration from passman instead.
+    ImportEnv {
+        /// Directory to scan, e.g. ~/GitHub
+        dir: PathBuf,
+        /// How to slice variables into items.
+        #[arg(long, value_enum, default_value_t = EnvGrouping::File)]
+        group_by: EnvGrouping,
+        /// List what would be imported without opening the vault.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import SSH private keys so the built-in agent can serve them.
+    ///
+    /// Your key files are copied, not moved: OpenSSH keeps reading them and
+    /// nothing breaks if you decide against this.
+    ImportSsh {
+        /// Directory to scan. Defaults to ~/.ssh
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import credentials the aws, gcloud, az, gh, docker and npm CLIs leave
+    /// unencrypted in your home directory.
+    ImportCloud {
+        /// Home directory to scan. Defaults to yours.
+        #[arg(long)]
+        home: Option<PathBuf>,
+        /// Binary used to read gcloud's SQLite store.
+        #[arg(long, default_value = "sqlite3")]
+        sqlite: String,
+        /// List what would be imported without opening the vault.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import TOTP seeds from an authenticator export.
+    ///
+    /// Accepts a list of `otpauth://` URIs, or a plain-text Aegis or andOTP
+    /// export. Encrypted backups are refused rather than half-read.
+    ImportTotp {
+        /// The export file.
+        file: PathBuf,
+        #[arg(long)]
+        into: Option<String>,
+    },
     /// Generate a password without storing it.
     Generate {
         #[arg(long, default_value_t = 20)]
@@ -137,6 +191,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pw = generator::password(&recipe)?;
         eprintln!("~{:.0} bits of entropy", recipe.entropy_bits());
         println!("{}", pw.expose());
+        return Ok(());
+    }
+
+    if let Command::ImportCloud {
+        home, dry_run: true, ..
+    } = &args.command
+    {
+        let home = match home.clone().or_else(passman_import::cloud::home) {
+            Some(h) => h,
+            None => return Err("cannot find your home directory".into()),
+        };
+        let found = passman_import::cloud::scan(&home);
+        if found.is_empty() {
+            println!("no known credential stores under {}", home.display());
+        }
+        for f in &found {
+            println!("{:<20} {}", f.store.label(), f.path.display());
+        }
+        return Ok(());
+    }
+
+    // Likewise a dry-run scan: it reads .env files but never the vault, so it
+    // is safe to point at a directory you are not sure about.
+    if let Command::ImportEnv {
+        dir, dry_run: true, ..
+    } = &args.command
+    {
+        let files = passman_import::dotenv::scan(dir)?;
+        let (mut vars, mut secrets) = (0usize, 0usize);
+        for f in &files {
+            let text = std::fs::read_to_string(&f.path).unwrap_or_default();
+            let parsed = passman_import::dotenv::parse(&text);
+            let s = parsed
+                .iter()
+                .filter(|v| passman_import::dotenv::is_secret(&v.key, &v.value))
+                .count();
+            vars += parsed.len();
+            secrets += s;
+            println!("{:<56} {:>3} vars, {:>3} secret", f.relative.display(), parsed.len(), s);
+        }
+        println!(
+            "\n{} file(s), {vars} variable(s), {secrets} credential(s) under {}",
+            files.len(),
+            dir.display()
+        );
         return Ok(());
     }
 
@@ -322,6 +421,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
 
+        Command::ImportEnv {
+            dir, group_by, into, ..
+        } => {
+            let grouping = group_by.into();
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary =
+                passman_import::dotenv::import_dir(&mut vault, &dir, grouping, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", dir.display());
+            eprintln!(
+                "\nThe .env files are untouched. Delete them only once the projects read \
+                 their configuration from passman."
+            );
+        }
+
+        Command::ImportSsh { dir, into } => {
+            let dir = match dir.or_else(passman_import::ssh::default_dir) {
+                Some(d) => d,
+                None => return Err("no ~/.ssh; pass --dir".into()),
+            };
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary = passman_import::ssh::import_dir(&mut vault, &dir, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", dir.display());
+            eprintln!(
+                "\nYour key files are untouched. Point SSH_AUTH_SOCK at passman's agent \
+                 and confirm `ssh-add -l` lists them before removing anything."
+            );
+        }
+
+        Command::ImportCloud {
+            home,
+            sqlite,
+            into,
+            ..
+        } => {
+            let home = match home.or_else(passman_import::cloud::home) {
+                Some(h) => h,
+                None => return Err("cannot find your home directory".into()),
+            };
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary =
+                passman_import::cloud::import_home(&mut vault, &home, &sqlite, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", home.display());
+            eprintln!(
+                "\nThe source files still hold the same credentials in the clear. \
+                 Rotate them, or remove them once the tools are reading from passman."
+            );
+        }
+
+        Command::ImportTotp { file, into } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary = passman_import::totp::import_file(&mut vault, &file, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", file.display());
+            eprintln!("\nNow delete {} — it is a plaintext copy of every seed it held.", file.display());
+        }
+
         Command::Add {
             label,
             username,
@@ -359,4 +517,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// CLI spelling of [`passman_import::dotenv::Grouping`].
+///
+/// A separate type so the importer's API does not have to depend on clap.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum EnvGrouping {
+    /// One item per .env file, every variable a field.
+    File,
+    /// One item per vendor within a file, inferred from the key prefix.
+    Service,
+    /// One item per variable.
+    Variable,
+}
+
+impl From<EnvGrouping> for passman_import::dotenv::Grouping {
+    fn from(g: EnvGrouping) -> Self {
+        match g {
+            EnvGrouping::File => Self::PerFile,
+            EnvGrouping::Service => Self::PerService,
+            EnvGrouping::Variable => Self::PerVariable,
+        }
+    }
 }

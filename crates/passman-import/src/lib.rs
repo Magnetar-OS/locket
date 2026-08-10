@@ -20,9 +20,13 @@ use std::path::PathBuf;
 use passman_core::{Vault, model::Collection};
 use uuid::Uuid;
 
+pub mod cloud;
 pub mod csv;
+pub mod dotenv;
 pub mod keepass;
 pub mod pass;
+pub mod ssh;
+pub mod totp;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
