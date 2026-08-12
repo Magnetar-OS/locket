@@ -1,6 +1,6 @@
 [package]
 name = "passman-import"
-description = "Importers for pass (password-store) and KeePass databases"
+description = "Importers for browser CSV exports, .env trees, SSH keys, cloud CLI credentials, authenticator exports, pass and KeePass"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

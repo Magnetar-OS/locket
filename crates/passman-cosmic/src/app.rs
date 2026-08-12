@@ -168,9 +168,9 @@ pub struct App {
     revealed: HashSet<String>,
 
     settings: Settings,
-    /// Retained for the write path; nothing mutates settings until there is a
-    /// preferences UI, so this is read-only for now.
-    #[allow(dead_code)]
+    /// The backing store the preferences screen writes through. `None` when
+    /// `cosmic-config` is unavailable, which leaves settings usable for the
+    /// session but not persisted.
     config: Option<cosmic_config::Config>,
     toasts: widget::Toasts<Message>,
 

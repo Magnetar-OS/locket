@@ -130,7 +130,7 @@ pub enum FieldKind {
     Text,
     /// Masked until revealed; cleared from the clipboard after a timeout.
     Secret,
-    /// Rendered as a link.
+    /// A web address, shown in the clear.
     Url,
     /// An `otpauth://` seed; the UI renders a live code.
     Totp,

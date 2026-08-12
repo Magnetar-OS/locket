@@ -1,6 +1,6 @@
 //! The on-disk vault file: envelope format, open/create, atomic save.
 //!
-//! # File layout (format 2)
+//! # File layout (format 3)
 //!
 //! JSON with base64 fields — inspectable on purpose, so a recovery tool never
 //! has to reverse a binary format.
@@ -8,9 +8,10 @@
 //! ```json
 //! {
 //!   "magic": "passman-vault",
-//!   "format": 2,
+//!   "format": 3,
 //!   "slots": [ { "id": "...", "label": "Passphrase", "factor": {...},
 //!                "wrapped_key": { "nonce": "b64", "ciphertext": "b64" } } ],
+//!   "collections": [ { "id": "...", "label": "Login", "alias": "default" } ],
 //!   "body": { "nonce": "b64", "ciphertext": "b64" }
 //! }
 //! ```
@@ -20,8 +21,13 @@
 //! so enrolling a TPM or a security key *adds* a way in rather than replacing
 //! the passphrase.
 //!
-//! Format 1 — a single inline `kdf` + `wrapped_key` — is still readable and is
-//! converted to a one-slot format 2 file the next time the vault is saved.
+//! `collections` is the only plaintext part, and it holds collection ids,
+//! labels and aliases — nothing about any item. See [`CollectionIndex`] for
+//! why a locked Secret Service has to be able to answer that.
+//!
+//! Older files are read and upgraded in place on the next save: format 1 — a
+//! single inline `kdf` + `wrapped_key` — becomes a one-slot format 2 file, and
+//! format 2 gains the collection index.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

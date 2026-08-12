@@ -5,9 +5,18 @@ Passwords + Keychain Access are on macOS, and to replace `gnome-keyring` as the
 system's secret store rather than sit beside it.
 
 Status: **early, but real.** The vault, the cryptography, the freedesktop
-Secret Service, the Secret portal and the SSH agent are implemented and
-verified against actual `libsecret` and OpenSSH clients. The GUI browses and
-reveals; it does not yet edit. See [Roadmap](#roadmap).
+Secret Service, the Secret portal, the SSH agent and the PAM module are
+implemented and verified against the real clients — `libsecret`, a sandboxed
+Flatpak through `xdg-desktop-portal`, OpenSSH, `pamtester` — rather than
+against mocks. The GUI is a working password manager: it creates, edits and
+deletes items, generates passwords, shows live TOTP codes, imports from eight
+sources and enrols TPM and FIDO2 unlock factors. A browser extension and its
+native messaging host exist and answer the live daemon.
+
+What it is not yet: packaged for any distribution, run by anyone but its
+author, or exercised on a FIDO2 token. It has been used as the only secret
+store on one COSMIC machine, which is a much smaller claim than "ready".
+See [Roadmap](#roadmap).
 
 ## Why replace gnome-keyring rather than wrap it
 
@@ -25,6 +34,47 @@ nothing in COSMIC does:
 Wrapping it would mean inheriting its storage format and its lock semantics.
 passman implements the same D-Bus contracts on top of a modern vault instead.
 
+## The application
+
+`passman` is the window you actually use: a COSMIC nav bar of categories, a
+search-filtered list, and the selected item in a context drawer. The vault
+models twelve kinds of item — logins, notes, cards, identities, SSH and GPG
+keys, API tokens, OAuth registrations, certificates, environment bundles, Wi-Fi
+passphrases, and *application* secrets, which is where anything a `libsecret`
+client stored lands so foreign secrets stay first-class rather than untyped
+blobs.
+
+Every item has a primary secret — the one the Secret Service hands out — plus
+any number of extra fields, each with a kind: text, secret, URL, TOTP seed,
+note, email, phone, date, private key, public key. The kind is what decides
+whether a value is masked, excluded from search, or turned into a live code, so
+the editor lets you set it per field rather than guessing from the name.
+
+- **TOTP** fields render the current code with a bar that drains over the
+  period, and the caption turns into a warning under five seconds. The
+  question while typing a code into a form is "have I got long enough", and a
+  number you have to read and subtract from is a poor way to answer it.
+- **Copying** clears the clipboard afterwards — 30 seconds by default,
+  configurable, or never.
+- **Auto-lock** after 15 minutes idle by default. Revealed secrets also
+  re-conceal when the window loses focus, which is a display change and not a
+  lock: it costs nothing and covers the screenshot-and-screen-share case.
+- **Deleting** asks first, and says that the item is gone for any application
+  reading it over the Secret Service too.
+- `Ctrl+N` new item, `Ctrl+F` search, `Ctrl+L` lock. Shortcuts are only
+  claimed when no text field has already consumed the key.
+- The **Settings** page is a status panel as much as a preferences screen: who
+  owns `org.freedesktop.secrets` right now, whether the portal backend is
+  installed *and* routed, whether the PAM line is in the login stack, whether
+  gnome-keyring is running against you. Every one of those can be undone by a
+  desktop upgrade without announcing itself, and the failure mode is
+  applications quietly not finding their secrets.
+
+A running daemon is the normal case but not a requirement: with no `passmand`
+on the bus the GUI opens the vault file directly. The Settings panel is where
+you find out which of the two you are in, since it reports the actual owner of
+`org.freedesktop.secrets` rather than assuming.
+
 ## Architecture
 
 ```
@@ -38,16 +88,23 @@ crates/
   passman-applet   COSMIC panel indicator
   passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
   passman-fido     FIDO2 hmac-secret key slots (ctap-hid-fido2)
-  passman-import   pass, KeePass/.kdbx and browser CSV importers
+  passman-import   importers: browser CSV, .env trees, SSH keys, cloud CLIs, TOTP exports, pass, KeePass
   passman-ipc      the unlock-socket protocol (no deps; linked into PAM)
   passman-pam      pam_passman.so — unlocks the vault at login
   passman-nmh      native messaging host for the browser extension
 extension/         the browser extension itself (Chrome/Firefox, MV3)
+res/               desktop entry, systemd unit, .portal file, PAM notes
+scripts/           passman-setup (install/uninstall/status) and the keyring re-import
 ```
 
-The daemon holds the only copy of the data-encryption key. The GUI, the CLI and
-every `libsecret` client are clients of it, so the vault is unlocked once per
-session rather than once per application.
+While `passmand` is running it holds the only unlocked copy of the
+data-encryption key, and the GUI, the browser host and every `libsecret` client
+go through it — so the vault is unlocked once per session rather than once per
+application.
+
+`passman-cli` is the exception, on purpose: it opens the vault file itself and
+never talks to the daemon, so it still works when the daemon will not start.
+The GUI does the same as a fallback when no daemon is on the bus.
 
 ### Key slots
 
@@ -75,6 +132,20 @@ never has to reverse a binary format.
   without a counter, which matters when a vault is synced between machines.
 - The header is fed to both AEADs as associated data, so downgrading the KDF
   cost fails authentication instead of silently weakening the file.
+
+One thing is deliberately *outside* the sealed body: a plaintext index of
+which collections exist — id, label and alias, nothing else. A locked Secret
+Service still has to answer `ReadAlias` and the `Collections` property, and
+answering "none" does not read as *locked* to `libsecret`, it reads as *there
+is no keyring installed here*. Item labels, usernames, attributes and secrets
+all stay inside the body. gnome-keyring draws the same line — keyring names are
+in the clear there too — and the index is covered by the body's AEAD, so
+relabelling a collection on disk invalidates the vault rather than silently
+succeeding.
+
+Older files are read and upgraded in place: format 1 (a single inline KDF
+descriptor) becomes a one-slot format 2 file, and format 2 gains the collection
+index, the next time the vault is saved.
 
 ### Secret Service transport
 
@@ -124,9 +195,18 @@ to take over from gnome-keyring.
 ## Verified
 
 `cargo test` covers the crypto (tamper, downgrade, wrong-key, key-wrapping),
-the vault (round-trip, passphrase change, no-plaintext-on-disk, 0600 perms),
-RFC 6238 TOTP vectors for SHA-1/256/512, the password generator's bias and
-composition properties, and the DH session against a simulated libsecret peer.
+the vault (round-trip, passphrase change, format upgrade, no-plaintext-on-disk,
+0600 perms, a tampered collection index failing authentication), key slots and
+the rule that the last one cannot be removed, RFC 6238 TOTP vectors for
+SHA-1/256/512, the password generator's bias and composition properties, the DH
+session against a simulated libsecret peer, the SSH agent's wire format, the
+unlock socket, the portal's key derivation, every importer's parsing and
+classification, the browser host's origin matching, and the GUI's editor and
+import state machines. All of that runs without hardware. The TPM and FIDO2
+round trips are `#[ignore]`d behind environment variables because they need a
+chip and a touch — the TPM ones have been run against a real AMD fTPM and
+`swtpm` (see [On authorising `sudo`](#on-authorising-sudo)); the FIDO2 ones
+have not been run at all.
 
 End-to-end against real `libsecret` on a private bus: store, lookup, search
 (single and multi-attribute, narrowing and contradictory), replace-on-store
@@ -147,9 +227,12 @@ it had stored.
 
 ## Roadmap
 
-Implemented: vault + crypto, Secret Service (Service/Collection/Item/Session,
-Prompt objects), the Secret portal backend, an SSH agent, the daemon, the CLI,
-and a GUI that browses/searches/reveals/copies with clipboard auto-clear.
+Implemented: the vault and its cryptography, key slots (passphrase, TPM 2.0,
+FIDO2), the Secret Service (Service/Collection/Item/Session and Prompt
+objects), `org.passman.Manager1` for lock state, the Secret portal backend, the
+SSH agent, the daemon, the CLI, eight importers, the PAM module, the browser
+extension and its native messaging host, the panel applet, the installer, and a
+GUI that creates, edits, deletes, generates, imports and enrols factors.
 
 **SSH agent** (`passmand --ssh-agent`) serves vault items of kind `SshKey`.
 Verified with real OpenSSH: `ssh-add -l` lists the key with a matching
@@ -166,12 +249,16 @@ make xdg-desktop-portal route to it.
 
 Next:
 
-1. **Import** — from gnome-keyring (via its own Secret Service), `pass`,
-   KeePassXC, Bitwarden.
-3. **COSMIC applet** — panel indicator with lock state and quick copy.
-4. **PKCS#11** — for consumers of gnome-keyring's certificate store.
-5. **PAM for `sudo`** — a *different* module from the session one below, and
-   still gated on the reasoning in the TPM section.
+1. **A FIDO2 token on hardware.** The slot type is implemented and unit-tested,
+   but the two round-trip tests need a physical touch and no token has been
+   attached to this machine. Until that happens, treat it as untested.
+2. **Packaging.** `passman-setup` builds from a git checkout with `cargo`,
+   which is fine for the person who wrote it and not for anybody else.
+3. **PAM for `sudo`** — a *different* module from the session one, and still
+   gated on the reasoning in [On authorising `sudo`](#on-authorising-sudo).
+4. **PKCS#11**, only if a caller turns up. See
+   [Why there is no PKCS#11 module](#why-there-is-no-pkcs11-module) for why
+   writing one now would be a module nothing loads.
 
 ## Installing as your secret store
 
@@ -231,6 +318,7 @@ why replacing it is probably unnecessary.
 passman-cli import --dry-run          # see what would come across
 passman-cli import                    # from org.freedesktop.secrets
 passman-cli import --from org.passman.secrets --into Imported
+passman-cli import --replace          # overwrite rather than skip duplicates
 ```
 
 There are importers for the other common escape routes too:
@@ -240,6 +328,10 @@ passman-cli import-csv chrome-passwords.csv     # Chrome, Edge, Brave, Firefox,
                                                 # Safari, Bitwarden, 1Password
 passman-cli import-pass                         # ~/.password-store
 passman-cli import-keepass secrets.kdbx
+passman-cli import-env ~/GitHub                 # .env files across a tree
+passman-cli import-ssh                          # ~/.ssh private keys
+passman-cli import-cloud                        # aws, gcloud, az, gh, docker, npm
+passman-cli import-totp aegis-export.json       # otpauth:// URIs, Aegis, andOTP
 ```
 
 The CSV importer matches *column aliases* rather than detecting a vendor
@@ -270,6 +362,32 @@ Verified end to end: 9 items across 2 collections transfer with byte-identical
 secrets, a dry run writes nothing, and a second run imports 0 while recognising
 all 9 as already present.
 
+### Repairing an import that went wrong
+
+Skipping duplicates is the right default and the wrong behaviour for a repair:
+the attributes match, but the secret in the vault is not the secret the source
+holds. `import --replace` overwrites in place instead, keeping the item's id so
+anything referring to it still resolves, and counts replacements separately
+from new items.
+
+```sh
+scripts/passman-reimport-keyring --dry-run
+scripts/passman-reimport-keyring
+```
+
+That script exists because the obvious way to read gnome-keyring again — stop
+passman, start gnome-keyring, import, swap back — takes `org.freedesktop.secrets`
+away from every running application for the duration, and they do not all cope:
+some cache the name owner, some quietly fall back to storing secrets in the
+clear. So it runs gnome-keyring on a *private* bus against the same
+`~/.local/share/keyrings` files and imports from that, while your session keeps
+passman throughout.
+
+It checks that the keyring actually *unlocked* rather than that gnome-keyring
+started, because gnome-keyring starts happily on a wrong password and simply
+leaves the collection locked — at which point an import would read zero items
+and report success.
+
 **One thing does not survive, by construction.** The Secret Service carries a
 label, an `a{ss}` attribute map and a schema string — it has no concept of item
 *kind*. Logins, notes and Wi-Fi passwords are recovered because they have
@@ -286,11 +404,17 @@ gnome-keyring-specific dialog. `org.passman.Manager1` is that missing half:
 `Unlock(passphrase) -> bool`, `Lock()`, and `Locked`/`ItemCount`/`VaultPath`
 properties, plus an `UnlockRequested` signal.
 
-A locked passman vault cannot be enumerated at all — labels and attributes live
-inside the sealed body, which is the point, but it means gnome-keyring's trick
-of listing locked items is unavailable. Returning "no matches" would be a lie
-clients believe, reporting a secret as *missing* rather than locked. So
-`SearchItems` on a locked vault emits `UnlockRequested` and waits.
+A locked passman vault cannot have its *items* enumerated — labels and
+attributes live inside the sealed body, which is the point, but it means
+gnome-keyring's trick of listing locked items is unavailable. Returning "no
+matches" would be a lie clients believe, reporting a secret as *missing* rather
+than locked. So `SearchItems` on a locked vault emits `UnlockRequested` and
+waits.
+
+Its *collections* are a different matter, and that is why the vault keeps a
+plaintext index of them: a service that cannot answer `ReadAlias` or
+`Collections` while locked does not look locked to `libsecret`, it looks like a
+machine with no keyring on it.
 
 The GUI closes the loop in both directions: it subscribes to `UnlockRequested`
 and raises its unlock screen saying *why* it appeared, and when you unlock it
