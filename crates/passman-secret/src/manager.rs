@@ -27,6 +27,11 @@ use crate::service::{ServiceState, SharedState, register_vault_objects};
 /// How long a Secret Service `Prompt` waits for the user before giving up.
 pub const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// How long a signing confirmation waits. Shorter than an unlock prompt: an
+/// `ssh` client is holding the connection open on the other side of it, and a
+/// signature nobody has allowed after half a minute is one nobody asked for.
+pub const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub const MANAGER_PATH: &str = "/org/passman/Manager";
 
 pub struct Manager {
@@ -95,7 +100,7 @@ impl Manager {
                     alias: c.alias.clone(),
                 })
                 .collect();
-            state.vault = Some(vault);
+            state.open_vault(vault);
         }
         register_vault_objects(server, &self.state)
             .await
@@ -113,9 +118,69 @@ impl Manager {
         {
             tracing::error!("failed to save on lock: {e}");
         }
-        state.vault = None;
+        state.close_vault();
         tracing::info!("vault locked");
         Ok(())
+    }
+
+    /// Set the idle timeout, in seconds. 0 turns it off.
+    ///
+    /// The frontend owns this number — it is stored with the rest of the
+    /// desktop's settings in `cosmic-config` — and pushes it here so that one
+    /// setting means one thing. `passmand --auto-lock` is the default for a
+    /// session where no frontend ever runs.
+    async fn set_auto_lock(&self, seconds: u64) -> fdo::Result<()> {
+        let state = self.state.lock().await;
+        if state.auto_lock_seconds() != seconds {
+            tracing::info!(seconds, "idle auto-lock changed by the frontend");
+        }
+        state.set_auto_lock_seconds(seconds);
+        Ok(())
+    }
+
+    /// Answer a [`confirm_requested`](Manager::confirm_requested) signal.
+    ///
+    /// Unknown ids are ignored rather than refused: a stale answer from a
+    /// frontend that was slow, or a second window, must not cancel a
+    /// confirmation somebody is still looking at.
+    async fn answer_confirm(&self, id: u32, allow: bool) -> fdo::Result<()> {
+        self.state.lock().await.answer_confirmation(id, allow);
+        Ok(())
+    }
+
+    /// Re-read the vault file, for when another process has written to it.
+    ///
+    /// The frontend edits the vault file directly, so after it saves the
+    /// daemon is holding a stale copy — one that would serve outdated secrets
+    /// and, worse, refuse its own next save for conflicting. Rather than
+    /// having the daemon poll, whoever wrote the file says so.
+    ///
+    /// Returns false when the vault is locked (nothing to refresh) or the
+    /// reload failed, which happens when the other writer changed the key
+    /// material: the DEK we hold no longer opens that file, and the honest
+    /// answer is to lock and ask for the new passphrase.
+    async fn reload(&self) -> fdo::Result<bool> {
+        let mut state = self.state.lock().await;
+        let Some(vault) = state.vault.as_mut() else {
+            return Ok(false);
+        };
+        if !vault.changed_on_disk() {
+            return Ok(true);
+        }
+        match vault.reload() {
+            Ok(()) => {
+                tracing::info!("reloaded the vault after an external write");
+                // Everything watching the vault — the SSH agent above all —
+                // has to see the new contents, not the ones it cached.
+                state.notify_opened();
+                Ok(true)
+            }
+            Err(e) => {
+                tracing::warn!("could not reload the vault: {e}; locking instead");
+                state.close_vault();
+                Ok(false)
+            }
+        }
     }
 
     #[zbus(property)]
@@ -143,6 +208,14 @@ impl Manager {
     /// A frontend should raise its unlock dialog and call `Unlock`.
     #[zbus(signal)]
     pub async fn unlock_requested(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// One signature with `key` is waiting to be allowed or refused.
+    #[zbus(signal)]
+    pub async fn confirm_requested(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        key: &str,
+    ) -> zbus::Result<()>;
 }
 
 /// Bridge `Prompt` objects to the frontend.
@@ -154,13 +227,85 @@ impl Manager {
 /// Polling for the state change (rather than having `unlock` notify) keeps the
 /// two paths independent: an unlock typed directly into the frontend, with no
 /// prompt outstanding, resolves any pending prompt just the same.
+/// Ask the frontend to allow one signature, and wait for the answer.
+///
+/// Fails closed on every path that is not an explicit yes: no frontend, no
+/// answer in time, a frontend that went away. A key marked `confirm-each-use`
+/// is one its owner decided must not be used unattended, so silence is a no.
+async fn confirm_signing(
+    connection: &zbus::Connection,
+    state: &SharedState,
+    key: String,
+    reply: tokio::sync::oneshot::Sender<bool>,
+) {
+    let id = {
+        let mut guard = state.lock().await;
+        guard.next_confirmation(key.clone())
+    };
+
+    let emitter = match SignalEmitter::new(connection, MANAGER_PATH) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("cannot ask for confirmation: {e}");
+            let _ = reply.send(false);
+            return;
+        }
+    };
+    if let Err(e) = Manager::confirm_requested(&emitter, id, &key).await {
+        tracing::error!("failed to emit ConfirmRequested: {e}");
+        let _ = reply.send(false);
+        return;
+    }
+    tracing::info!("asked the frontend to confirm signing with `{key}`");
+
+    // Unlike an unlock prompt, this does not start a frontend on a machine
+    // that has no screen to show it on: the request came from an ssh client
+    // that may well be a script, and making it wait out the timeout for a
+    // window nobody can see is worse than refusing at once.
+    if !has_display() {
+        tracing::info!("no graphical session to ask in; refusing to sign with `{key}`");
+        state.lock().await.forget_confirmation(id);
+        let _ = reply.send(false);
+        return;
+    }
+
+    // A signal only helps if something is listening. Give a running frontend a
+    // moment, then start one.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    if state.lock().await.confirmation_answer(id).is_none()
+        && let Err(e) = spawn_frontend()
+    {
+        tracing::warn!("could not launch the frontend to ask: {e}");
+    }
+
+    let deadline = tokio::time::Instant::now() + CONFIRM_TIMEOUT;
+    let answer = loop {
+        if let Some(answer) = state.lock().await.confirmation_answer(id) {
+            break answer;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            tracing::info!("confirmation for `{key}` timed out; refusing");
+            break false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    state.lock().await.forget_confirmation(id);
+    let _ = reply.send(answer);
+}
+
 pub async fn serve_prompts(
     connection: zbus::Connection,
     state: SharedState,
     mut requests: tokio::sync::mpsc::Receiver<crate::service::PromptRequest>,
 ) {
     while let Some(request) = requests.recv().await {
-        let crate::service::PromptRequest::Unlock { reply } = request;
+        let reply = match request {
+            crate::service::PromptRequest::Unlock { reply } => reply,
+            crate::service::PromptRequest::ConfirmSigning { key, reply } => {
+                confirm_signing(&connection, &state, key, reply).await;
+                continue;
+            }
+        };
 
         if !state.lock().await.is_locked() {
             let _ = reply.send(true);
@@ -206,6 +351,11 @@ pub async fn serve_prompts(
 /// Resolved next to this executable before falling back to `PATH`: the daemon
 /// runs as a systemd user unit, whose environment is not the login shell's, so
 /// a `PATH` lookup is not something an unlock path should depend on.
+/// Whether there is a graphical session to put a window in.
+fn has_display() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+}
+
 fn spawn_frontend() -> std::io::Result<String> {
     let sibling = std::env::current_exe()
         .ok()

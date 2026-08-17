@@ -11,10 +11,15 @@ repository.workspace = true
 name = "passmand"
 path = "src/main.rs"
 
+[features]
+# Passes through to passman-agent: serve `sk-` SSH keys from a security key.
+default = ["fido"]
+fido = ["passman-agent/fido"]
+
 [dependencies]
 passman-core.workspace = true
 passman-secret.workspace = true
-passman-agent.workspace = true
+passman-agent = { path = "../passman-agent", default-features = false }
 zbus.workspace = true
 tokio.workspace = true
 futures-util.workspace = true

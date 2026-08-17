@@ -12,6 +12,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod idle;
+
 use clap::Parser;
 use passman_core::{Vault, crypto::KdfParams};
 use passman_secret::service::{ServiceConfig, ServiceState, register_objects};
@@ -70,6 +72,21 @@ struct Args {
     /// Agent socket path. Defaults to $XDG_RUNTIME_DIR/passman/ssh-agent.sock
     #[arg(long, value_name = "PATH")]
     ssh_agent_socket: Option<PathBuf>,
+
+    /// Lock the vault after this many seconds without a request. 0 disables it.
+    ///
+    /// The frontend has its own idle timer, but it only knows about its own
+    /// window: close it and the daemon would hold the key until logout. This
+    /// is the one that covers the session.
+    #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+    auto_lock: u64,
+
+    /// Do not lock the vault when the session locks or the machine suspends.
+    ///
+    /// Both are on by default: a locked screen that leaves every secret
+    /// readable by anything on the session bus is not a locked screen.
+    #[arg(long)]
+    no_lock_on_idle_session: bool,
 }
 
 #[tokio::main]
@@ -77,7 +94,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "passmand=info,passman_secret=info".into()),
+                // `passman_agent` is in the default set because that is where
+                // "touch your security key" is logged. A signature that waits
+                // silently for hardware looks like a hang.
+                .unwrap_or_else(|_| {
+                    "passmand=info,passman_secret=info,passman_agent=info".into()
+                }),
         )
         .init();
 
@@ -131,23 +153,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(vault)
     };
 
-    // Load SSH identities before the vault moves into the shared state. A
-    // daemon that starts locked has no keys to offer yet; they appear when it
-    // is unlocked.
+    // The agent starts empty and is filled by the observer below, including
+    // when the vault is already open. A daemon that starts `--locked` — which
+    // is how the installed unit starts, so PAM can unlock it — would otherwise
+    // serve an empty agent for the rest of the session.
     let ssh_agent = args.ssh_agent.then(|| {
-        let agent = vault
-            .as_ref()
-            .map(passman_agent::Agent::load_from_vault)
-            .unwrap_or_default();
-        tracing::info!(keys = agent.len(), "loaded SSH identities");
-        Arc::new(Mutex::new(agent))
+        let mut agent = passman_agent::Agent::new();
+        if let Some(signer) = token_signer() {
+            agent = agent.with_signer(signer);
+        }
+        Arc::new(std::sync::Mutex::new(agent))
     });
 
     let mut state = ServiceState::new(ServiceConfig {
         bus_name: bus_name.clone(),
         autosave: true,
     });
-    state.vault = vault;
+    if let Some(vault) = vault {
+        state.vault = Some(vault);
+    }
+    if let Some(agent) = ssh_agent.as_ref() {
+        state.add_observer(Arc::new(AgentKeys(agent.clone())));
+    }
     // Read the plaintext collection index so a locked daemon can still answer
     // ReadAlias and Collections. Without it clients conclude no keyring exists.
     match Vault::read_index(&vault_path) {
@@ -159,6 +186,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let state = Arc::new(Mutex::new(state));
 
+    if let Some(agent) = ssh_agent.as_ref() {
+        // Wired after the state exists, because asking the frontend goes
+        // through the same prompt bridge the Secret Service uses.
+        let confirmer = Arc::new(AskFrontend {
+            state: state.clone(),
+            handle: tokio::runtime::Handle::current(),
+        });
+        let mut guard = agent.lock().unwrap_or_else(|p| p.into_inner());
+        let existing = std::mem::take(&mut *guard);
+        *guard = existing.with_confirmer(confirmer);
+    }
+
+    let ssh_agent_handle = ssh_agent.clone();
     if let Some(agent) = ssh_agent {
         let socket = match args.ssh_agent_socket {
             Some(p) => p,
@@ -169,6 +209,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(socket = %socket.display(), "serving SSH agent");
         println!("SSH_AUTH_SOCK={}; export SSH_AUTH_SOCK;", socket.display());
         tokio::spawn(passman_agent::listener::serve(listener, agent));
+    }
+
+    // Seeded from the flag and then owned by the frontend, which stores it
+    // with the rest of the desktop's settings. The task runs either way, so
+    // switching auto-lock on in Settings takes effect without a restart.
+    state.lock().await.set_auto_lock_seconds(args.auto_lock);
+    tokio::spawn(idle::auto_lock(state.clone(), ssh_agent_handle.clone()));
+    if !args.no_lock_on_idle_session {
+        let state = state.clone();
+        tokio::spawn(async move {
+            // A missing logind is not an error worth failing startup over —
+            // the daemon still works, it just cannot follow the session.
+            if let Err(e) = idle::lock_with_session(state).await {
+                tracing::warn!("not following the session's lock state: {e}");
+            }
+        });
     }
 
     // The prompt bridge turns a locked-vault Prompt into a request the
@@ -252,9 +308,92 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         tracing::error!("failed to save vault on shutdown: {e}");
     }
-    guard.vault = None;
+    guard.close_vault();
     tracing::info!("vault locked, exiting");
     Ok(())
+}
+
+/// Keeps the SSH agent's identities in step with the vault.
+///
+/// Both directions matter. Unlocking has to *add* the keys, because the daemon
+/// normally starts locked and nothing else would ever load them. Locking has to
+/// *drop* them: they are decrypted copies, and leaving them behind would let
+/// anything that can reach the agent socket keep authenticating as you after
+/// you locked the vault — which is exactly what locking is for.
+struct AgentKeys(Arc<std::sync::Mutex<passman_agent::Agent>>);
+
+impl AgentKeys {
+    fn with<R>(&self, f: impl FnOnce(&mut passman_agent::Agent) -> R) -> R {
+        let mut guard = self.0.lock().unwrap_or_else(|poisoned| {
+            self.0.clear_poison();
+            poisoned.into_inner()
+        });
+        f(&mut guard)
+    }
+}
+
+impl passman_secret::service::VaultObserver for AgentKeys {
+    fn vault_opened(&self, vault: &Vault) {
+        self.with(|agent| agent.reload_from_vault(vault));
+    }
+
+    fn vault_closed(&self) {
+        self.with(|agent| agent.forget_keys());
+    }
+}
+
+/// Asks the frontend to allow one signature, from the agent's blocking thread.
+///
+/// The agent handles requests on a `spawn_blocking` thread, which is exactly
+/// where blocking on a runtime future is allowed — and blocking is what is
+/// wanted here: an `ssh` client is waiting for its signature and there is
+/// nothing useful to do until someone answers.
+struct AskFrontend {
+    state: passman_secret::service::SharedState,
+    handle: tokio::runtime::Handle,
+}
+
+impl passman_agent::confirm::SigningConfirmer for AskFrontend {
+    fn confirm(&self, key: &str) -> bool {
+        let state = self.state.clone();
+        let key = key.to_owned();
+        self.handle.block_on(async move {
+            let sender = {
+                let guard = state.lock().await;
+                guard.prompts.clone()
+            };
+            let Some(tx) = sender else {
+                tracing::warn!("no prompt bridge; refusing to sign with `{key}`");
+                return false;
+            };
+            let (reply, wait) = tokio::sync::oneshot::channel();
+            if tx
+                .send(passman_secret::service::PromptRequest::ConfirmSigning { key, reply })
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            // Every failure is a refusal: this key was marked as one that must
+            // not be used without asking.
+            wait.await.unwrap_or(false)
+        })
+    }
+}
+
+/// How the agent reaches a security key, when this build can.
+///
+/// Returned unconditionally rather than gated on a token being plugged in
+/// right now: `sk-` identities are still real when the key is in your pocket,
+/// and the token only has to be present at the moment you sign.
+#[cfg(feature = "fido")]
+fn token_signer() -> Option<Arc<dyn passman_agent::sk::TokenSigner>> {
+    Some(Arc::new(passman_agent::fido::HardwareSigner))
+}
+
+#[cfg(not(feature = "fido"))]
+fn token_signer() -> Option<Arc<dyn passman_agent::sk::TokenSigner>> {
+    None
 }
 
 async fn terminate() {

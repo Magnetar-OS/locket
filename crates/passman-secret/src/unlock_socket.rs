@@ -79,27 +79,110 @@ pub async fn serve(
     }
 }
 
+/// Re-wrap the vault key under a new passphrase, at PAM's request.
+///
+/// Proving knowledge of the old passphrase is the whole security argument
+/// here: the socket is reachable by this uid, so without that check anything
+/// running as the user could set the vault's passphrase to a value of its own
+/// choosing and lock the owner out — or worse, know it.
+///
+/// Opening the file is what constitutes the proof, and it also gives us a copy
+/// to rewrite even when the daemon is locked.
+async fn rekey(
+    state: &SharedState,
+    vault_path: &Path,
+    old: &str,
+    new: &str,
+) -> bool {
+    let path = vault_path.to_path_buf();
+    let (old, new) = (old.to_owned(), new.to_owned());
+
+    // Argon2id twice — once to open, once to re-wrap — so this belongs off the
+    // executor's core threads like every other passphrase operation.
+    let result = tokio::task::spawn_blocking(move || -> passman_core::Result<()> {
+        let mut vault = Vault::open(&path, &old)?;
+        vault.change_passphrase(&new, passman_core::crypto::KdfParams::default())?;
+        vault.save()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(())) => {
+            tracing::info!("vault passphrase changed to match the new login password");
+            // Our in-memory copy is now stale — the file has a new key slot.
+            let mut guard = state.lock().await;
+            if let Some(vault) = guard.vault.as_mut()
+                && let Err(e) = vault.reload()
+            {
+                tracing::warn!("locking: could not reload after the rekey ({e})");
+                guard.close_vault();
+            }
+            true
+        }
+        Ok(Err(e)) => {
+            // Almost always "the old login password was not the vault
+            // passphrase", which is an ordinary state of affairs and not
+            // something to shout about in the journal at every password change.
+            tracing::info!("unlock socket: rekey refused ({e})");
+            false
+        }
+        Err(e) => {
+            tracing::error!("rekey task failed: {e}");
+            false
+        }
+    }
+}
+
 async fn handle(
     mut stream: UnixStream,
     state: SharedState,
     vault_path: PathBuf,
     connection: zbus::Connection,
 ) -> std::io::Result<()> {
-    let mut len = [0u8; 4];
-    stream.read_exact(&mut len).await?;
-    let len = u32::from_be_bytes(len) as usize;
-    if len > passman_ipc::MAX_PASSPHRASE_LEN {
-        // Refuse rather than allocate on a bad client's say-so.
-        let _ = stream.write_all(&[passman_ipc::REPLY_REFUSED]).await;
-        return Ok(());
+    // Read the whole request into memory first, then parse it with the shared
+    // codec, so the framing lives in exactly one place — the crate the PAM
+    // module links against.
+    let mut framed = zeroize::Zeroizing::new(Vec::new());
+    {
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).await?;
+        let raw = u32::from_be_bytes(len);
+        let body_len = (raw & 0x7FFF_FFFF) as usize;
+        if body_len > 2 * passman_ipc::MAX_PASSPHRASE_LEN + 9 {
+            // Refuse rather than allocate on a bad client's say-so.
+            let _ = stream.write_all(&[passman_ipc::REPLY_REFUSED]).await;
+            return Ok(());
+        }
+        framed.extend_from_slice(&len);
+        let mut body = zeroize::Zeroizing::new(vec![0u8; body_len]);
+        stream.read_exact(&mut body).await?;
+        framed.extend_from_slice(&body);
     }
 
-    let mut buf = zeroize::Zeroizing::new(vec![0u8; len]);
-    stream.read_exact(&mut buf).await?;
-    let Ok(passphrase) = std::str::from_utf8(&buf) else {
-        let _ = stream.write_all(&[passman_ipc::REPLY_REFUSED]).await;
-        return Ok(());
+    let request = match passman_ipc::read_request(&mut framed.as_slice()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!("unlock socket: malformed request ({e})");
+            let _ = stream.write_all(&[passman_ipc::REPLY_REFUSED]).await;
+            return Ok(());
+        }
     };
+
+    let passphrase = match &request {
+        passman_ipc::Request::Unlock(p) => p.to_string(),
+        passman_ipc::Request::Rekey { old, new } => {
+            let ok = rekey(&state, &vault_path, old, new).await;
+            stream
+                .write_all(&[if ok {
+                    passman_ipc::REPLY_UNLOCKED
+                } else {
+                    passman_ipc::REPLY_REFUSED
+                }])
+                .await?;
+            return Ok(());
+        }
+    };
+    let passphrase = passphrase.as_str();
 
     // Already open: report success without re-deriving anything.
     if !state.lock().await.is_locked() {
@@ -132,7 +215,7 @@ async fn handle(
                     alias: c.alias.clone(),
                 })
                 .collect();
-            guard.vault = Some(vault);
+            guard.open_vault(vault);
             drop(guard);
             if let Err(e) = register_vault_objects(connection.object_server(), &state).await {
                 tracing::error!("could not publish vault objects after unlock: {e}");

@@ -52,6 +52,12 @@ mod prop {
 pub enum PromptRequest {
     /// Unlock the vault so a client's call can proceed.
     Unlock { reply: oneshot::Sender<bool> },
+    /// Allow one SSH signature with a key that asks to be confirmed.
+    ConfirmSigning {
+        /// The key's comment — what the user will recognise it by.
+        key: String,
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +78,23 @@ impl Default for ServiceConfig {
     }
 }
 
+/// Notified whenever the unlocked vault appears, changes or goes away.
+///
+/// The SSH agent is the reason this exists. It holds decrypted copies of every
+/// key, which have to appear when the vault is unlocked — the daemon normally
+/// starts locked so PAM can unlock it, so "load the keys once at startup" gets
+/// zero of them — and have to be dropped when it locks, or locking the vault
+/// would leave the keys usable by anything that can reach the agent socket.
+///
+/// Deliberately not the agent itself: this crate serves the Secret Service and
+/// has no business knowing what SSH is.
+pub trait VaultObserver: Send + Sync {
+    /// The vault is open. Called on unlock and after an external reload.
+    fn vault_opened(&self, vault: &Vault);
+    /// The vault is gone. Called on lock.
+    fn vault_closed(&self);
+}
+
 /// Everything the D-Bus objects share.
 pub struct ServiceState {
     /// `None` while locked. All item access goes through this, so locking is
@@ -88,6 +111,26 @@ pub struct ServiceState {
     pub config: ServiceConfig,
     pub prompts: Option<tokio::sync::mpsc::Sender<PromptRequest>>,
     prompt_counter: AtomicU64,
+    observers: Vec<Arc<dyn VaultObserver>>,
+    /// Signing confirmations waiting for an answer, by id.
+    ///
+    /// `None` means "asked, still waiting"; `Some` is the answer. Kept here
+    /// rather than in a channel because the answer arrives on a different
+    /// D-Bus call than the one that is waiting for it.
+    confirmations: std::collections::HashMap<u32, Option<bool>>,
+    next_confirmation_id: u32,
+    /// Lock the vault after this many idle seconds; 0 disables it.
+    ///
+    /// Lives here rather than in the idle task's arguments because the
+    /// frontend changes it at runtime: the number belongs to the person using
+    /// the desktop, and it is stored in `cosmic-config` where the rest of
+    /// their settings are.
+    auto_lock_seconds: AtomicU64,
+    /// When a client last reached for a secret, as seconds since the epoch.
+    ///
+    /// Drives the daemon's idle lock. An atomic because the read paths take
+    /// `&self` and touching this must not force them to take the write lock.
+    last_activity: AtomicU64,
 }
 
 impl ServiceState {
@@ -99,6 +142,87 @@ impl ServiceState {
             config,
             prompts: None,
             prompt_counter: AtomicU64::new(0),
+            observers: Vec::new(),
+            confirmations: std::collections::HashMap::new(),
+            next_confirmation_id: 0,
+            auto_lock_seconds: AtomicU64::new(0),
+            last_activity: AtomicU64::new(now()),
+        }
+    }
+
+    /// Register a pending signing confirmation and return its id.
+    pub fn next_confirmation(&mut self, _key: String) -> u32 {
+        self.next_confirmation_id = self.next_confirmation_id.wrapping_add(1);
+        let id = self.next_confirmation_id;
+        self.confirmations.insert(id, None);
+        id
+    }
+
+    /// Record a frontend's answer. Unknown ids are dropped.
+    pub fn answer_confirmation(&mut self, id: u32, allow: bool) {
+        if let Some(slot) = self.confirmations.get_mut(&id) {
+            *slot = Some(allow);
+        }
+    }
+
+    /// The answer to a pending confirmation, if one has arrived.
+    pub fn confirmation_answer(&self, id: u32) -> Option<bool> {
+        self.confirmations.get(&id).copied().flatten()
+    }
+
+    /// Drop a confirmation once it has been resolved or timed out.
+    pub fn forget_confirmation(&mut self, id: u32) {
+        self.confirmations.remove(&id);
+    }
+
+    /// How long the vault may sit idle before it locks itself. 0 is never.
+    pub fn auto_lock_seconds(&self) -> u64 {
+        self.auto_lock_seconds.load(Ordering::Relaxed)
+    }
+
+    /// Change the idle timeout. Takes effect on the next tick.
+    pub fn set_auto_lock_seconds(&self, seconds: u64) {
+        self.auto_lock_seconds.store(seconds, Ordering::Relaxed);
+    }
+
+    /// Note that something used the vault, for the idle timer's benefit.
+    pub fn touch(&self) {
+        self.last_activity.store(now(), Ordering::Relaxed);
+    }
+
+    /// How long since anything asked this service for a secret.
+    pub fn idle_seconds(&self) -> u64 {
+        now().saturating_sub(self.last_activity.load(Ordering::Relaxed))
+    }
+
+    /// Register something that has to follow the vault's lock state.
+    pub fn add_observer(&mut self, observer: Arc<dyn VaultObserver>) {
+        if let Some(vault) = self.vault.as_ref() {
+            observer.vault_opened(vault);
+        }
+        self.observers.push(observer);
+    }
+
+    /// Put an unlocked vault in place and tell everyone watching.
+    pub fn open_vault(&mut self, vault: Vault) {
+        self.vault = Some(vault);
+        self.notify_opened();
+    }
+
+    /// Drop the vault — and with it the DEK — and tell everyone watching.
+    pub fn close_vault(&mut self) {
+        self.vault = None;
+        for observer in &self.observers {
+            observer.vault_closed();
+        }
+    }
+
+    /// Re-announce the current vault, after its contents changed underneath.
+    pub fn notify_opened(&self) {
+        if let Some(vault) = self.vault.as_ref() {
+            for observer in &self.observers {
+                observer.vault_opened(vault);
+            }
         }
     }
 
@@ -125,10 +249,29 @@ impl ServiceState {
     }
 
     fn vault(&self) -> Result<&Vault> {
+        self.touch();
         self.vault.as_ref().ok_or(Error::Locked)
     }
 
+    /// The vault, refreshed first if another process has written to it.
+    ///
+    /// The GUI edits the vault file directly whenever it is not going through
+    /// this daemon, so "someone else wrote it" is an ordinary event. Reloading
+    /// before we mutate means our write is built on their state rather than
+    /// discarding it. Only safe while our own copy is clean, which autosave
+    /// keeps it: a reload throws away unsaved edits.
     fn vault_mut(&mut self) -> Result<&mut Vault> {
+        self.touch();
+        let vault = self.vault.as_mut().ok_or(Error::Locked)?;
+        if self.config.autosave && !vault.is_dirty() && vault.changed_on_disk() {
+            match vault.reload() {
+                Ok(()) => tracing::info!("vault changed on disk; reloaded before writing"),
+                // Most likely the key material changed — a passphrase change
+                // from another process. Carry on with what we have; the save
+                // will refuse and say so rather than clobbering it.
+                Err(e) => tracing::warn!("could not reload the changed vault: {e}"),
+            }
+        }
         self.vault.as_mut().ok_or(Error::Locked)
     }
 
@@ -139,10 +282,24 @@ impl ServiceState {
         if !self.config.autosave {
             return;
         }
-        if let Some(v) = self.vault.as_mut()
-            && let Err(e) = v.save()
-        {
-            tracing::error!("failed to persist vault: {e}");
+        let Some(v) = self.vault.as_mut() else {
+            return;
+        };
+        match v.save() {
+            Ok(()) => {}
+            Err(passman_core::Error::ChangedOnDisk { .. }) => {
+                // Another writer got in between our reload and this save. We
+                // do not overwrite them; the change we were persisting is lost
+                // and saying so is the only honest option.
+                tracing::error!(
+                    "the vault was written by another process mid-update; \
+                     this change was not saved"
+                );
+                if let Err(e) = v.reload() {
+                    tracing::error!("and reloading it failed: {e}");
+                }
+            }
+            Err(e) => tracing::error!("failed to persist vault: {e}"),
         }
     }
 
@@ -168,7 +325,7 @@ impl ServiceState {
         wait.await.unwrap_or(false)
     }
 
-    /// Unlock on demand, the way macOS Keychain does.
+    /// Ask the frontend to unlock, and block this call until it answers.
     ///
     /// Every method that actually touches secret data funnels through here.
     /// The alternative — answering "locked" or, worse, "no such item" — is
@@ -463,7 +620,7 @@ impl SecretService {
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
         let mut state = self.state.lock().await;
         state.persist();
-        state.vault = None;
+        state.close_vault();
         Ok((objects, null_path()))
     }
 
@@ -472,7 +629,7 @@ impl SecretService {
     async fn lock_service(&self) -> fdo::Result<()> {
         let mut state = self.state.lock().await;
         state.persist();
-        state.vault = None;
+        state.close_vault();
         state.sessions = SessionStore::new();
         Ok(())
     }

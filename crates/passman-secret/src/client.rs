@@ -18,6 +18,10 @@ pub const MANAGER_PATH: &str = "/org/passman/Manager";
 pub trait Manager {
     fn unlock(&self, passphrase: &str) -> zbus::Result<bool>;
     fn lock(&self) -> zbus::Result<()>;
+    /// Tell the daemon its copy of the vault file is out of date.
+    fn reload(&self) -> zbus::Result<bool>;
+    /// Set the daemon's idle timeout, in seconds. 0 turns it off.
+    fn set_auto_lock(&self, seconds: u64) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn locked(&self) -> zbus::Result<bool>;
@@ -28,8 +32,15 @@ pub trait Manager {
     #[zbus(property)]
     fn vault_path(&self) -> zbus::Result<String>;
 
+    /// Allow or refuse a signature the daemon asked about.
+    fn answer_confirm(&self, id: u32, allow: bool) -> zbus::Result<()>;
+
     #[zbus(signal)]
     fn unlock_requested(&self) -> zbus::Result<()>;
+
+    /// One SSH signature is waiting to be allowed; `key` names the identity.
+    #[zbus(signal)]
+    fn confirm_requested(&self, id: u32, key: String) -> zbus::Result<()>;
 }
 
 /// Connect to whichever bus name the daemon holds.
