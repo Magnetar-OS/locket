@@ -1,8 +1,9 @@
 //! `pam_passman.so` — unlock the vault at login.
 //!
-//! This is the `pam_gnome_keyring` equivalent: when your login password is
-//! also your vault passphrase, logging in unlocks the vault, and every
-//! `libsecret` application finds its secrets without a second prompt.
+//! Takes the password PAM has already collected at the login screen and hands
+//! it to the daemon over the unlock socket. When that password is also your
+//! vault passphrase, logging in unlocks the vault, and every `libsecret`
+//! application finds its secrets without a second prompt.
 //!
 //! # What this module is not
 //!
@@ -32,9 +33,16 @@
 use std::ffi::CStr;
 
 use pam::constants::{PamFlag, PamResultCode};
-use pam::items::AuthTok;
+use pam::items::{AuthTok, OldAuthTok};
 use pam::module::{PamHandle, PamHooks};
 use zeroize::Zeroizing;
+
+/// `PAM_PRELIM_CHECK` from `<security/_pam_types.h>`.
+///
+/// Spelled out here because `pam-bindings` does not re-export it, and reading
+/// the flag wrong would mean rekeying the vault during the dry-run pass — the
+/// one that exists precisely so nothing is changed yet.
+const PAM_PRELIM_CHECK: PamFlag = 0x4000;
 
 /// Key under which the token is stashed between `auth` and `session`.
 ///
@@ -108,6 +116,55 @@ impl PamHooks for PamPassman {
         PamResultCode::PAM_IGNORE
     }
 
+    /// Follow a login password change through to the vault.
+    ///
+    /// Without this, `passwd` silently ends the arrangement: the login
+    /// password and the vault passphrase drift apart, auto-unlock stops
+    /// working, and nothing anywhere says why. The daemon is handed both
+    /// halves and re-wraps the vault key under the new one — it verifies the
+    /// old passphrase itself, so a failure here means the vault was never
+    /// using this password and there is nothing to change.
+    ///
+    /// PAM calls this twice. The first pass (`PAM_PRELIM_CHECK`) is for
+    /// modules to object *before* anything is changed; this module has no
+    /// grounds to object, and says so by ignoring it.
+    fn sm_chauthtok(pamh: &mut PamHandle, _args: Vec<&CStr>, flags: PamFlag) -> PamResultCode {
+        if flags & PAM_PRELIM_CHECK != 0 {
+            return PamResultCode::PAM_IGNORE;
+        }
+
+        let old = match pamh.get_item::<OldAuthTok>() {
+            Ok(Some(token)) => token_string(token.as_bytes()),
+            _ => None,
+        };
+        let new = match pamh.get_item::<AuthTok>() {
+            Ok(Some(token)) => token_string(token.as_bytes()),
+            _ => None,
+        };
+        let (Some(old), Some(new)) = (old, new) else {
+            // A passwordless or non-interactive change. Nothing to carry over.
+            return PamResultCode::PAM_IGNORE;
+        };
+
+        let Some(uid) = PamPassman::target_uid(pamh) else {
+            return PamResultCode::PAM_IGNORE;
+        };
+        let socket = passman_ipc::socket_path_for_uid(uid);
+        match passman_ipc::request_rekey(&socket, &old, &new) {
+            Ok(true) => log("passman: vault passphrase updated to match"),
+            Ok(false) => {
+                // The vault was not using the login password. Common and fine.
+                log("passman: login password changed; the vault uses a different one")
+            }
+            Err(passman_ipc::Error::NotListening) => {}
+            Err(e) => log(&format!("passman: could not reach the daemon: {e}")),
+        }
+
+        // Never the reason a password change fails, for the same reason
+        // `sm_authenticate` is never the reason a login does.
+        PamResultCode::PAM_IGNORE
+    }
+
     /// Hand the token to the daemon, if one is listening.
     fn sm_open_session(pamh: &mut PamHandle, _args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
         // Every early return is PAM_SUCCESS: this module must never be the
@@ -147,6 +204,12 @@ impl PamHooks for PamPassman {
         // under a second, still-live login.
         PamResultCode::PAM_SUCCESS
     }
+}
+
+/// A PAM token as a `String`, if it is text and not empty.
+fn token_string(bytes: &[u8]) -> Option<Zeroizing<String>> {
+    let s = std::str::from_utf8(bytes).ok()?;
+    (!s.is_empty()).then(|| Zeroizing::new(s.to_owned()))
 }
 
 /// Write to syslog. A PAM module has no stderr worth using.
