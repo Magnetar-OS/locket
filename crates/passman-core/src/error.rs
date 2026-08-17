@@ -7,6 +7,12 @@ pub enum Error {
     #[error("vault at {path} is not a passman vault (bad magic)")]
     NotAVault { path: PathBuf },
 
+    #[error("{path} was changed by another process since it was read; reload before saving")]
+    ChangedOnDisk { path: PathBuf },
+
+    #[error("{path} already exists")]
+    AlreadyExists { path: PathBuf },
+
     #[error("vault format version {found} is newer than this build supports (max {supported})")]
     UnsupportedVersion { found: u16, supported: u16 },
 

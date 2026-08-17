@@ -183,6 +183,57 @@ pub struct Vault {
     dek: SymKey,
     data: VaultData,
     dirty: bool,
+    /// What the file looked like when we last read or wrote it.
+    ///
+    /// passman is routinely two processes deep — the daemon holds the vault
+    /// and the GUI opens the same file directly when no daemon is on the bus —
+    /// so "the file changed since I read it" is a normal condition, not a
+    /// corner case, and overwriting blindly loses whichever edit came second.
+    stamp: Option<Stamp>,
+}
+
+/// Enough of a file's metadata to notice it was replaced.
+///
+/// Modification time and length rather than a hash: a save rewrites the whole
+/// file through a rename, so the inode changes wholesale and there is nothing
+/// subtle to catch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+impl Stamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: meta.modified().ok()?,
+            len: meta.len(),
+        })
+    }
+}
+
+/// Take the advisory lock guarding a vault file.
+///
+/// The lock lives on a sibling `.lock` file rather than the vault itself,
+/// because a save renames a new file over the old one: a lock held on the
+/// vault's own inode would be released the moment it stopped being the vault.
+fn lock_file(path: &Path, exclusive: bool) -> Result<std::fs::File> {
+    let lock_path = path.with_extension("vault.lock");
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let file = opts.open(&lock_path).map_err(|e| Error::io(&lock_path, e))?;
+    let locked = if exclusive { file.lock() } else { file.lock_shared() };
+    locked.map_err(|e| Error::io(&lock_path, e))?;
+    Ok(file)
 }
 
 impl std::fmt::Debug for Vault {
@@ -243,8 +294,20 @@ impl Vault {
             dek,
             data: VaultData::default(),
             dirty: true,
+            // Nothing on disk yet, so nothing to be stale against.
+            stamp: None,
         };
-        vault.save()?;
+
+        // Check and write under one lock. A caller that looked before calling
+        // is racing anything else that might be creating the same vault, and
+        // the loser of that race would otherwise silently replace a vault that
+        // already had secrets in it.
+        let guard = lock_file(&vault.path, true)?;
+        if vault.path.exists() {
+            return Err(Error::AlreadyExists { path: vault.path });
+        }
+        vault.write_locked()?;
+        drop(guard);
         Ok(vault)
     }
 
@@ -299,6 +362,7 @@ impl Vault {
             file.wrapped_key = None;
 
             tracing::info!("upgrading vault from format 1 to {FORMAT_VERSION}");
+            let stamp = Stamp::of(&path);
             return Ok(Self {
                 path,
                 file,
@@ -306,6 +370,7 @@ impl Vault {
                 data,
                 // Dirty, so the upgraded layout is written on the next save.
                 dirty: true,
+                stamp,
             });
         } else {
             Self::unwrap_with(&file, &PassphraseOpener::new(passphrase))?
@@ -334,12 +399,14 @@ impl Vault {
             &file.body_aad(),
         )?;
         let data: VaultData = serde_json::from_slice(&plaintext)?;
+        let stamp = Stamp::of(&path);
         Ok(Self {
             path,
             file,
             dek,
             data,
             dirty: false,
+            stamp,
         })
     }
 
@@ -493,12 +560,41 @@ impl Vault {
         self.save()
     }
 
-    /// Encrypt and write the vault, atomically.
+    /// Encrypt and write the vault, atomically, refusing to clobber another
+    /// writer.
     ///
     /// Writes to a sibling temp file, fsyncs it, then renames over the target,
     /// so a crash mid-write can never leave a truncated vault. The temp file is
     /// created 0600 before any ciphertext reaches it.
+    ///
+    /// Two processes editing the same vault is the normal arrangement here,
+    /// not an exotic one, so the whole read-check-write is done under an
+    /// exclusive lock and a file that changed since we read it produces
+    /// [`Error::ChangedOnDisk`] rather than silently discarding the other
+    /// side's edits. Recover with [`Vault::reload`].
     pub fn save(&mut self) -> Result<()> {
+        let _guard = lock_file(&self.path, true)?;
+        let on_disk = Stamp::of(&self.path);
+        // `None` on both sides means the file does not exist yet, which is the
+        // create path, not a conflict.
+        if on_disk.is_some() && on_disk != self.stamp {
+            return Err(Error::ChangedOnDisk {
+                path: self.path.clone(),
+            });
+        }
+        self.write_locked()
+    }
+
+    /// Write unconditionally, discarding whatever is on disk.
+    ///
+    /// For the one case where that is right: the caller has already reconciled
+    /// with the other writer, or is deliberately restoring.
+    pub fn save_force(&mut self) -> Result<()> {
+        let _guard = lock_file(&self.path, true)?;
+        self.write_locked()
+    }
+
+    fn write_locked(&mut self) -> Result<()> {
         // Regenerate the plaintext index from the real data every time, so it
         // cannot drift from what the body actually contains.
         self.file.collections = self
@@ -539,8 +635,44 @@ impl Vault {
         }
         std::fs::rename(&tmp, &self.path).map_err(|e| Error::io(&self.path, e))?;
 
+        self.stamp = Stamp::of(&self.path);
         self.dirty = false;
         Ok(())
+    }
+
+    /// Re-read the vault from disk, keeping the key we already hold.
+    ///
+    /// This is how a process recovers from [`Error::ChangedOnDisk`], and how
+    /// the daemon picks up an edit the GUI made directly to the file. The DEK
+    /// survives a normal save — only re-wrapping it does not — so a reload
+    /// needs no passphrase. If it fails to decrypt, the other writer changed
+    /// the key material, and the honest answer is to lock and ask again.
+    ///
+    /// In-memory edits that were never saved are discarded, which is why this
+    /// reports how many there were rather than deciding for the caller.
+    pub fn reload(&mut self) -> Result<()> {
+        let _guard = lock_file(&self.path, false)?;
+        let file = Self::read_file(&self.path)?;
+        let plaintext = self.dek.open(
+            &file.body.nonce_bytes("body.nonce")?,
+            &file.body.ciphertext_bytes("body.ciphertext")?,
+            &file.body_aad(),
+        )?;
+        self.data = serde_json::from_slice(&plaintext)?;
+        self.file = file;
+        self.stamp = Stamp::of(&self.path);
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Whether the file on disk has been replaced since this vault read it.
+    pub fn changed_on_disk(&self) -> bool {
+        match Stamp::of(&self.path) {
+            Some(current) => Some(current) != self.stamp,
+            // A vault whose file has vanished is not "changed"; saving will
+            // recreate it, which is better than refusing to write at all.
+            None => false,
+        }
     }
 
     // -- convenience wrappers over VaultData --------------------------------
@@ -851,6 +983,106 @@ mod tests {
         Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "vault is readable by group or other");
+    }
+
+    #[test]
+    fn creating_over_an_existing_vault_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let mut first = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        first.add_item_default(Item::new(ItemKind::Login, "precious"));
+        first.save().unwrap();
+
+        let err = Vault::create(&path, "other", KdfParams::insecure_fast()).unwrap_err();
+        assert!(
+            matches!(err, Error::AlreadyExists { .. }),
+            "a second create replaced a vault with secrets in it: {err:?}"
+        );
+
+        // Untouched: still opens with the original passphrase, still has the item.
+        let disk = Vault::open(&path, "pw").unwrap();
+        assert_eq!(disk.data().item_count(), 1);
+    }
+
+    #[test]
+    fn saving_over_another_writer_is_refused_rather_than_silently_winning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+
+        // Two processes, both with the vault open: the daemon and the GUI.
+        let mut first = Vault::open(&path, "pw").unwrap();
+        let mut second = Vault::open(&path, "pw").unwrap();
+
+        first.add_item_default(Item::new(ItemKind::Login, "from the daemon"));
+        first.save().unwrap();
+
+        second.add_item_default(Item::new(ItemKind::Login, "from the GUI"));
+        let err = second.save().unwrap_err();
+        assert!(
+            matches!(err, Error::ChangedOnDisk { .. }),
+            "second writer clobbered the first: {err:?}"
+        );
+
+        // The first writer's item is still there.
+        let disk = Vault::open(&path, "pw").unwrap();
+        assert_eq!(disk.data().item_count(), 1);
+        assert!(disk.data().all_items().any(|(_, i)| i.label == "from the daemon"));
+    }
+
+    #[test]
+    fn reloading_picks_up_the_other_writer_and_lets_the_save_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+
+        let mut first = Vault::open(&path, "pw").unwrap();
+        let mut second = Vault::open(&path, "pw").unwrap();
+
+        first.add_item_default(Item::new(ItemKind::Login, "first"));
+        first.save().unwrap();
+
+        assert!(second.changed_on_disk());
+        second.reload().unwrap();
+        assert!(!second.changed_on_disk());
+        assert_eq!(second.data().item_count(), 1, "reload did not pick up the write");
+
+        second.add_item_default(Item::new(ItemKind::Login, "second"));
+        second.save().expect("save after reload should succeed");
+
+        let disk = Vault::open(&path, "pw").unwrap();
+        assert_eq!(disk.data().item_count(), 2);
+    }
+
+    #[test]
+    fn a_forced_save_is_the_way_to_overwrite_on_purpose() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+
+        let mut first = Vault::open(&path, "pw").unwrap();
+        let mut second = Vault::open(&path, "pw").unwrap();
+        first.add_item_default(Item::new(ItemKind::Login, "first"));
+        first.save().unwrap();
+
+        second.add_item_default(Item::new(ItemKind::Login, "second"));
+        second.save_force().expect("forced save should not check");
+
+        let disk = Vault::open(&path, "pw").unwrap();
+        assert_eq!(disk.data().item_count(), 1);
+        assert!(disk.data().all_items().any(|(_, i)| i.label == "second"));
+    }
+
+    #[test]
+    fn repeated_saves_from_one_writer_are_not_mistaken_for_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        for n in 0..3 {
+            vault.add_item_default(Item::new(ItemKind::Login, format!("item {n}")));
+            vault.save().expect("own writes must not look like someone else's");
+        }
+        assert_eq!(Vault::open(&path, "pw").unwrap().data().item_count(), 3);
     }
 
     /// Raising FORMAT_VERSION must not lock an existing vault out of its key.

@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vault.add_item_default(item);
     }
 
-    // A second keychain, to exercise multi-collection handling.
+    // A second collection, to exercise multi-collection handling.
     let mut work = Collection::new("Work");
     work.items.push(
         Item::new(ItemKind::Login, "Jira")

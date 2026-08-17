@@ -235,6 +235,12 @@ pub mod field_names {
     pub const PRIVATE_KEY: &str = "private-key";
     pub const PUBLIC_KEY: &str = "public-key";
     pub const KEY_COMMENT: &str = "comment";
+    /// An OpenSSH certificate (`*-cert.pub`) issued for this key.
+    pub const CERTIFICATE: &str = "certificate";
+    /// Set truthy on an SSH key to require a confirmation for every signature.
+    pub const CONFIRM_EACH_USE: &str = "confirm-each-use";
+    /// A security key's PIN, for an `sk-` SSH key created `verify-required`.
+    pub const TOKEN_PIN: &str = "token-pin";
     pub const CLIENT_ID: &str = "client-id";
     pub const CLIENT_SECRET: &str = "client-secret";
     pub const REFRESH_TOKEN: &str = "refresh-token";
@@ -404,9 +410,11 @@ impl Item {
     }
 }
 
-/// A keychain: a named group of items that locks and unlocks as a unit.
+/// A named group of items that locks and unlocks as a unit.
 ///
-/// Mirrors both a Secret Service *collection* and a macOS *keychain*.
+/// This is the Secret Service *collection*, carried through the vault so a
+/// client's `ReadAlias`, `Collections` and per-collection locking all resolve
+/// to something real rather than a single flat list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Collection {
     pub id: Uuid,
