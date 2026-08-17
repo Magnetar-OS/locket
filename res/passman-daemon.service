@@ -16,7 +16,12 @@ Type=simple
 # Exec= line in the .service file is never used — these flags are the only
 # thing that claims the Secret Service name. Without it the daemon starts on
 # org.passman.secrets and nothing owns org.freedesktop.secrets at all.
-ExecStart=/usr/bin/passmand --replace-keyring --locked --unlock-socket --ssh-agent --portal
+#
+# --auto-lock drops the key after 15 minutes with nothing asking for a secret
+# and nothing using the SSH agent. The frontend has its own idle timer, but it
+# only covers its own window; this one covers the session. The vault is also
+# locked when the session locks or the machine suspends, which needs no flag.
+ExecStart=/usr/bin/passmand --replace-keyring --locked --unlock-socket --ssh-agent --portal --auto-lock 900
 Restart=on-failure
 RestartSec=2
 

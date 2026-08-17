@@ -1,13 +1,13 @@
 //! TPM 2.0 sealed key slots.
 //!
 //! Enrols a [`SlotFactor::Tpm2`] slot whose key-encryption key is a random
-//! secret *sealed to this machine's TPM*, optionally behind a PIN. This is the
-//! Linux equivalent of what Windows Hello does: the PIN is not a password and
-//! is never used to derive anything, it is a TPM `authValue` that releases a
-//! hardware-held secret. The TPM's dictionary-attack lockout is what makes a
-//! short PIN defensible — six digits are fine when the hardware allows a
-//! handful of guesses, and indefensible when an attacker can try them offline
-//! at GPU speed.
+//! secret *sealed to this machine's TPM*, optionally behind a PIN. The PIN is
+//! not a password and is never used to derive anything: it is a TPM
+//! `authValue` that releases a hardware-held secret, so its own entropy is not
+//! what stands between an attacker and the key. The dictionary-attack lockout
+//! on the chip is what makes a short PIN defensible — six digits are fine when
+//! the hardware allows a handful of guesses, and indefensible when an attacker
+//! can try them offline at GPU speed.
 //!
 //! Because the slot only *adds* a way in, losing the machine does not lose the
 //! vault: the passphrase slot still opens it.

@@ -124,6 +124,12 @@ status() {
     fi
     if grep -q "pam_passman.so" "$PAM_STACK" 2>/dev/null; then
         ok "pam_passman.so wired into $PAM_STACK"
+        # Having the auth line without the password one works today and stops
+        # working silently the day the login password changes.
+        if ! grep -qE '^password[[:space:]]+optional[[:space:]]+pam_passman.so' "$PAM_STACK" 2>/dev/null; then
+            warn "no 'password' line: changing your login password will leave the vault behind"
+            printf "     add: password optional  pam_passman.so\n"
+        fi
     else
         printf '   login unlock: not configured\n'
     fi
@@ -417,6 +423,8 @@ install_pam() {
 auth     required  pam_permit.so
 auth     optional  pam_passman.so
 account  required  pam_permit.so
+password required  pam_permit.so
+password optional  pam_passman.so
 session  required  pam_permit.so
 session  optional  pam_passman.so
 EOF
@@ -440,16 +448,19 @@ EOF
 
     say "Adding pam_passman.so to $PAM_STACK"
     if [ "$DRY" = 1 ]; then
-        printf '   would append auth/session optional lines\n'
+        printf '   would append auth/password/session optional lines\n'
         return
     fi
     # `optional` so a failure here can never stop a login, and placed at the
     # end so it runs after pam_systemd has created /run/user/<uid>.
     sudo tee -a "$PAM_STACK" >/dev/null <<'EOF'
 
-# passman: unlock the vault at login. `optional` on purpose — a failure here
-# must never prevent logging in. Remove these two lines to disable.
+# passman: unlock the vault at login, and keep its passphrase in step when the
+# login password changes. `optional` on purpose — a failure here must never
+# prevent logging in or block a password change. Remove these three lines to
+# disable.
 auth     optional  pam_passman.so
+password optional  pam_passman.so
 session  optional  pam_passman.so
 EOF
 

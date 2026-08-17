@@ -57,6 +57,9 @@ pub enum Error {
     #[error("the security key did not return an hmac-secret value; it may not support the extension")]
     NoHmacSecret,
 
+    #[error("the security key returned no assertion; the credential may belong to another token")]
+    NoAssertion,
+
     #[error("stored credential data is malformed")]
     MalformedSlot,
 
@@ -209,6 +212,65 @@ pub fn unlock(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
     assert_hmac(&device, &credential_id, &salt, pin)
 }
 
+/// One CTAP2 assertion, exactly as the token produced it.
+///
+/// Deliberately unparsed. Every protocol that builds on FIDO — WebAuthn, SSH's
+/// `sk-` keys — wraps these two byte strings in its own way, and a token's
+/// signature covers `auth_data || SHA256(challenge)` verbatim, so anything this
+/// crate re-encoded would have to be re-derived byte for byte by the caller
+/// anyway.
+#[derive(Debug, Clone)]
+pub struct Assertion {
+    /// `rp_id_hash(32) || flags(1) || counter(4)`, plus extension data.
+    pub auth_data: Vec<u8>,
+    /// Raw for Ed25519 credentials, ASN.1 DER for ES256 ones.
+    pub signature: Vec<u8>,
+}
+
+/// Ask the token to sign a challenge with an existing credential.
+///
+/// `challenge` is hashed to the CTAP client-data hash, so callers pass the
+/// message itself rather than a digest of it. Requires a touch, and a PIN or
+/// on-device biometric when `user_verification` is set.
+///
+/// This is the generic half of what an `sk-` SSH key needs; the SSH-specific
+/// encoding lives in `passman-agent`, which is why nothing here knows what a
+/// signature blob looks like.
+pub fn assert(
+    rp_id: &str,
+    credential_id: &[u8],
+    challenge: &[u8],
+    pin: Option<&str>,
+    user_verification: bool,
+) -> Result<Assertion> {
+    let device = open_device()?;
+
+    let builder = GetAssertionArgsBuilder::new(rp_id, challenge).credential_id(credential_id);
+    let mut args = match pin {
+        Some(pin) => builder.pin(pin).build(),
+        None => builder.without_pin_and_uv().build(),
+    };
+    // The builder can only clear user verification, not ask for it; a key
+    // created with `verify-required` needs it demanded explicitly, and the
+    // token then chooses how (its own PIN, or a fingerprint).
+    if user_verification && pin.is_none() {
+        args.uv = Some(true);
+    }
+
+    let assertions = device
+        .get_assertion_with_args(&args)
+        .map_err(|e| Error::Device(e.to_string()))?;
+
+    let assertion = assertions.into_iter().next().ok_or(Error::NoAssertion)?;
+    if assertion.auth_data.is_empty() || assertion.signature.is_empty() {
+        return Err(Error::NoAssertion);
+    }
+    Ok(Assertion {
+        auth_data: assertion.auth_data,
+        signature: assertion.signature,
+    })
+}
+
 /// A [`SlotOpener`] backed by a security key.
 pub struct FidoOpener {
     pin: Option<String>,
@@ -341,6 +403,54 @@ mod tests {
             again.expose(),
             "the token returned a different hmac-secret for the same salt"
         );
+    }
+
+    /// The property `passman-agent`'s `sk-` encoder rests on: an SSH assertion
+    /// comes back with exactly 37 bytes of authenticator data, over the
+    /// application the credential was made under. A token that appended
+    /// extension output here would produce signatures no SSH server accepts.
+    #[test]
+    #[ignore = "requires a FIDO2 token and a human touch; set PASSMAN_FIDO_TESTS=1"]
+    fn an_ssh_style_assertion_has_bare_37_byte_authenticator_data() {
+        if !hardware_tests_enabled() {
+            return;
+        }
+        use sha2::Digest as _;
+
+        const SSH_RP_ID: &str = "ssh:";
+        let pin = std::env::var("PASSMAN_FIDO_PIN").ok();
+        let device = open_device().expect("no token");
+
+        let challenge = random_challenge().unwrap();
+        let mut builder = MakeCredentialArgsBuilder::new(SSH_RP_ID, &challenge);
+        builder = match pin.as_deref() {
+            Some(pin) => builder.pin(pin),
+            None => builder.without_pin_and_uv(),
+        };
+        let attestation = device
+            .make_credential_with_args(&builder.build())
+            .expect("could not create an ssh: credential");
+
+        let assertion = assert(
+            SSH_RP_ID,
+            &attestation.credential_descriptor.id,
+            b"an ssh sign request",
+            pin.as_deref(),
+            pin.is_some(),
+        )
+        .expect("assertion failed");
+
+        assert_eq!(
+            assertion.auth_data.len(),
+            37,
+            "authenticator data carried extensions; the sk- encoder rejects that"
+        );
+        assert_eq!(
+            &assertion.auth_data[..32],
+            sha2::Sha256::digest(SSH_RP_ID.as_bytes()).as_slice(),
+            "the token asserted a different relying party"
+        );
+        assert!(!assertion.signature.is_empty());
     }
 
     #[test]

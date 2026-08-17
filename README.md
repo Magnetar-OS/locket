@@ -1,22 +1,26 @@
 # passman
 
-A password and secrets manager for Linux, built for COSMIC — aiming to be what
-Passwords + Keychain Access are on macOS, and to replace `gnome-keyring` as the
-system's secret store rather than sit beside it.
+A password and secrets manager for the COSMIC desktop. It keeps logins, keys,
+tokens and notes in an encrypted vault, and it is also the process the rest of
+the system asks for secrets: it owns `org.freedesktop.secrets`, serves the
+`org.freedesktop.impl.portal.Secret` backend that sandboxed Flatpak
+applications get their per-application key from, and runs an SSH agent. On a
+stock session `gnome-keyring-daemon` holds those; installing passman takes
+them over rather than sitting beside it.
 
-Status: **early, but real.** The vault, the cryptography, the freedesktop
-Secret Service, the Secret portal, the SSH agent and the PAM module are
-implemented and verified against the real clients — `libsecret`, a sandboxed
-Flatpak through `xdg-desktop-portal`, OpenSSH, `pamtester` — rather than
-against mocks. The GUI is a working password manager: it creates, edits and
-deletes items, generates passwords, shows live TOTP codes, imports from eight
-sources and enrols TPM and FIDO2 unlock factors. A browser extension and its
-native messaging host exist and answer the live daemon.
+The desktop application creates, edits and deletes items, generates passwords,
+shows live TOTP codes, imports from eight sources and enrols TPM and FIDO2
+unlock factors. There is a CLI, a panel applet, a PAM module that unlocks at
+login, and a browser extension with its native messaging host.
 
-What it is not yet: packaged for any distribution, run by anyone but its
-author, or exercised on a FIDO2 token. It has been used as the only secret
-store on one COSMIC machine, which is a much smaller claim than "ready".
-See [Roadmap](#roadmap).
+Each of those has been exercised against the software that actually calls it —
+`libsecret`, a sandboxed Flatpak through `xdg-desktop-portal`, OpenSSH,
+`pamtester` — and the results are recorded in [Verified](#verified) and in the
+section covering each piece.
+
+It runs on one machine, its author's, as that machine's only secret store. It
+is not packaged for any distribution, has no other users, and has never been
+tried against a FIDO2 token. See [Roadmap](#roadmap).
 
 ## Why replace gnome-keyring rather than wrap it
 
@@ -32,17 +36,17 @@ nothing in COSMIC does:
   `--components=pkcs11,secrets` and `SSH_AUTH_SOCK` is empty, so nothing does.
 
 Wrapping it would mean inheriting its storage format and its lock semantics.
-passman implements the same D-Bus contracts on top of a modern vault instead.
+passman implements the same D-Bus contracts on top of its own vault instead.
 
 ## The application
 
-`passman` is the window you actually use: a COSMIC nav bar of categories, a
+`passman` is the desktop application: a COSMIC nav bar of categories, a
 search-filtered list, and the selected item in a context drawer. The vault
 models twelve kinds of item — logins, notes, cards, identities, SSH and GPG
 keys, API tokens, OAuth registrations, certificates, environment bundles, Wi-Fi
 passphrases, and *application* secrets, which is where anything a `libsecret`
-client stored lands so foreign secrets stay first-class rather than untyped
-blobs.
+client stored lands: a secret another application wrote is an item you can
+open, edit and delete like the ones you typed in yourself.
 
 Every item has a primary secret — the one the Secret Service hands out — plus
 any number of extra fields, each with a kind: text, secret, URL, TOTP seed,
@@ -53,7 +57,12 @@ the editor lets you set it per field rather than guessing from the name.
 - **TOTP** fields render the current code with a bar that drains over the
   period, and the caption turns into a warning under five seconds. The
   question while typing a code into a form is "have I got long enough", and a
-  number you have to read and subtract from is a poor way to answer it.
+  number you have to read and subtract from is a poor way to answer it. **Show
+  QR code** puts the seed back on screen as the `otpauth://` URI a phone
+  authenticator expects, rebuilt from the parsed seed so the algorithm, digits
+  and period travel with it rather than being guessed at the other end. It is
+  a secret on display, so it hides again with everything else — on lock, on
+  changing item, and on losing focus if you asked for that.
 - **Copying** clears the clipboard afterwards — 30 seconds by default,
   configurable, or never.
 - **Auto-lock** after 15 minutes idle by default. Revealed secrets also
@@ -63,12 +72,19 @@ the editor lets you set it per field rather than guessing from the name.
   reading it over the Secret Service too.
 - `Ctrl+N` new item, `Ctrl+F` search, `Ctrl+L` lock. Shortcuts are only
   claimed when no text field has already consumed the key.
+- **Settings live in `cosmic-config`**, the desktop's own store, mediated by
+  `cosmic-settings-daemon`. They are watched, so a change made anywhere else —
+  a second window, the settings daemon — lands here without a restart. That is
+  as close to control-center integration as COSMIC currently offers: there is
+  no third-party panel mechanism in `cosmic-settings` to plug into.
 - The **Settings** page is a status panel as much as a preferences screen: who
   owns `org.freedesktop.secrets` right now, whether the portal backend is
   installed *and* routed, whether the PAM line is in the login stack, whether
   gnome-keyring is running against you. Every one of those can be undone by a
   desktop upgrade without announcing itself, and the failure mode is
-  applications quietly not finding their secrets.
+  applications quietly not finding their secrets. It ends with the About
+  section, because the version number is the first thing a bug report asks
+  for.
 
 A running daemon is the normal case but not a requirement: with no `passmand`
 on the bus the GUI opens the vault file directly. The Settings panel is where
@@ -82,12 +98,12 @@ crates/
   passman-core     vault format, Argon2id + XChaCha20-Poly1305, item model  (no I/O, no D-Bus, no UI)
   passman-secret   org.freedesktop.secrets + org.freedesktop.impl.portal.Secret
   passman-daemon   passmand — owns the unlocked vault, serves D-Bus and the agent
-  passman-agent    SSH agent protocol
+  passman-agent    SSH agent protocol, including security-key (`sk-`) signing
   passman-cli      command line interface
   passman-cosmic   libcosmic GUI (binary: `passman`)
   passman-applet   COSMIC panel indicator
   passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
-  passman-fido     FIDO2 hmac-secret key slots (ctap-hid-fido2)
+  passman-fido     FIDO2: hmac-secret key slots and assertions (ctap-hid-fido2)
   passman-import   importers: browser CSV, .env trees, SSH keys, cloud CLIs, TOTP exports, pass, KeePass
   passman-ipc      the unlock-socket protocol (no deps; linked into PAM)
   passman-pam      pam_passman.so — unlocks the vault at login
@@ -199,14 +215,17 @@ the vault (round-trip, passphrase change, format upgrade, no-plaintext-on-disk,
 0600 perms, a tampered collection index failing authentication), key slots and
 the rule that the last one cannot be removed, RFC 6238 TOTP vectors for
 SHA-1/256/512, the password generator's bias and composition properties, the DH
-session against a simulated libsecret peer, the SSH agent's wire format, the
-unlock socket, the portal's key derivation, every importer's parsing and
-classification, the browser host's origin matching, and the GUI's editor and
-import state machines. All of that runs without hardware. The TPM and FIDO2
-round trips are `#[ignore]`d behind environment variables because they need a
-chip and a touch — the TPM ones have been run against a real AMD fTPM and
-`swtpm` (see [On authorising `sudo`](#on-authorising-sudo)); the FIDO2 ones
-have not been run at all.
+session against a simulated libsecret peer, the SSH agent's wire format, its
+lock/unlock round trip, the RSA hash the client asks for, certificate
+identities and the confirm-each-use gate, the security-key signature encoding
+against a software token, two writers racing for the vault
+file, the unlock socket's rekey framing, the portal's key derivation, every importer's parsing and classification, the
+browser host's origin matching, and the GUI's editor and import state machines.
+All of that runs without hardware. The TPM and FIDO2 round trips are
+`#[ignore]`d behind environment variables because they need a chip and a touch
+— the TPM ones have been run against a real AMD fTPM and `swtpm` (see
+[On authorising `sudo`](#on-authorising-sudo)); the FIDO2 ones have not been
+run at all.
 
 End-to-end against real `libsecret` on a private bus: store, lookup, search
 (single and multi-attribute, narrowing and contradictory), replace-on-store
@@ -234,11 +253,66 @@ SSH agent, the daemon, the CLI, eight importers, the PAM module, the browser
 extension and its native messaging host, the panel applet, the installer, and a
 GUI that creates, edits, deletes, generates, imports and enrols factors.
 
-**SSH agent** (`passmand --ssh-agent`) serves vault items of kind `SshKey`.
-Verified with real OpenSSH: `ssh-add -l` lists the key with a matching
-fingerprint, `ssh-keygen -Y sign` signs through the agent, and `-Y verify`
-accepts the result. It refuses `ADD_IDENTITY`/`REMOVE_IDENTITY` on purpose —
-every process running as you can reach that socket.
+**SSH agent** (`passmand --ssh-agent`) serves vault items of kind `SshKey`,
+including security-key (`sk-`) identities — see
+[Security keys over SSH](#security-keys-over-ssh). Verified with real OpenSSH:
+`ssh-add -l` lists the keys with matching fingerprints, `ssh-keygen -Y sign`
+signs through the agent, and `-Y verify` accepts the result. It refuses
+`ADD_IDENTITY`/`REMOVE_IDENTITY` on purpose — every process running as you can
+reach that socket. `ssh-add -x` and `-X` work, with the passphrase compared in
+constant time.
+
+Its identities follow the vault rather than the process: they are loaded when
+the vault unlocks and **dropped when it locks**. Both halves matter. The
+installed unit starts `--locked` so that PAM can unlock it, so keys loaded once
+at startup would be no keys at all; and the keys the agent holds are decrypted
+copies, so keeping them after a lock would leave anything that can reach the
+socket able to authenticate as you.
+
+RSA keys sign under the hash the client asks for — `rsa-sha2-256`,
+`rsa-sha2-512`, or `ssh-rsa` when a client explicitly wants the old one.
+OpenSSH rejects a signature that comes back under a different name than it
+requested, and `ssh-key` cannot choose a hash for a key loaded from a file at
+all, so passman does that part itself.
+
+**Certificates.** A key with an OpenSSH certificate is advertised twice, the
+certificate first, exactly as `ssh-add` does — a host configured for
+certificate authentication will not accept the bare key, so a vault holding
+only the key is useless there. `import-ssh` picks up `<key>-cert.pub`
+alongside the key. A certificate for a different key, or one outside its
+validity window, is dropped with a log line rather than offered: every server
+would reject it while it still cost the client one of its permitted attempts.
+
+```console
+$ ssh-add -l
+256 SHA256:ORWwGI7n… user@host (ED25519-CERT)
+256 SHA256:ORWwGI7n… user@host (ED25519)
+```
+
+**Confirm each use.** An agent socket is reachable by every process running as
+you — which is why `ADD_IDENTITY` is refused — but a key that signs silently is
+still a key any of them can use. Setting a `confirm-each-use` field on an item
+makes every signature with it wait for a dialog naming the key:
+
+> Something on this machine is asking to authenticate with "deploy@prod". This
+> key is set to ask every time, so nothing happens unless you allow it.
+
+This is OpenSSH's `ssh-add -c`, kept in the vault so it survives a restart and
+travels with the key. It fails closed: no frontend, no answer within 30
+seconds, or no graphical session at all, and the signature is refused — the
+last of those immediately rather than after a timeout, since an `ssh` in a
+script is waiting on the other end. Deliberately per key: confirming every
+signature trains people to click yes, and the keys worth gating are the few
+that authorise something expensive.
+
+Three fields on an `SSH Key` item drive all of this, and the editor sets them
+like any other field:
+
+| Field | What it does |
+|---|---|
+| `certificate` | The `*-cert.pub` text, advertised as a second identity |
+| `confirm-each-use` | `yes` to require a confirmation for every signature |
+| `token-pin` | The security key's PIN, for a `verify-required` `sk-` key |
 
 **Secret portal** (`passmand --portal`) implements
 `org.freedesktop.impl.portal.Secret`. App secrets are *derived*, not stored:
@@ -249,9 +323,10 @@ make xdg-desktop-portal route to it.
 
 Next:
 
-1. **A FIDO2 token on hardware.** The slot type is implemented and unit-tested,
-   but the two round-trip tests need a physical touch and no token has been
-   attached to this machine. Until that happens, treat it as untested.
+1. **A FIDO2 token on hardware.** Both the vault slot and the SSH agent's
+   `sk-` support are implemented and unit-tested, but every path that talks to
+   a real token needs a physical touch and no token has been attached to this
+   machine. Until that happens, treat the hardware half as untested.
 2. **Packaging.** `passman-setup` builds from a git checkout with `cargo`,
    which is fine for the person who wrote it and not for anybody else.
 3. **PAM for `sudo`** — a *different* module from the session one, and still
@@ -288,10 +363,11 @@ file in `~/.local/share/dbus-1/services`, a `Hidden=true` autostart entry, a
 masked user unit. `--uninstall` deletes them and gnome-keyring comes straight
 back. No file under `/usr` is modified.
 
-**It cannot lock you out.** The PAM step backs up the stack, proves the module
-loads against a throwaway service *before* going near `system-login`, adds the
-lines as `optional`, and then checks `sudo` still works — restoring the backup
-automatically if it does not.
+**It guards the login path.** The PAM step backs up the stack, proves the
+module loads against a throwaway service *before* going near `system-login`,
+adds the lines as `optional`, and then checks `sudo` still works — restoring
+the backup automatically if it does not. Keep a root shell open anyway; that
+is the advice for editing any PAM stack and this is no exception.
 
 Two things the switch gets wrong if you do it by hand, both of which make it a
 silent no-op:
@@ -333,6 +409,30 @@ passman-cli import-ssh                          # ~/.ssh private keys
 passman-cli import-cloud                        # aws, gcloud, az, gh, docker, npm
 passman-cli import-totp aegis-export.json       # otpauth:// URIs, Aegis, andOTP
 ```
+
+And the way out, because a manager you cannot leave is a trap:
+
+```sh
+passman-cli export everything.json --i-understand-this-is-plaintext
+passman-cli passwd                              # change the vault passphrase
+```
+
+The CLI edits too, so the documented recovery tool can actually repair things
+when the daemon will not start:
+
+```sh
+passman-cli edit github --set username=ada --secret --generate
+passman-cli edit github --label "GitHub (work)" --unset old-field --favorite true
+passman-cli rm gitlab
+```
+
+An ambiguous query lists the candidates and stops rather than guessing, since
+these two overwrite and delete.
+
+The export includes the secrets — an export that leaves them out is not a
+migration path — so it is written 0600, refuses to overwrite, and tells you to
+delete it. The flag is mandatory for the same reason the importers nag: this
+file is every credential you own, in the clear.
 
 The CSV importer matches *column aliases* rather than detecting a vendor
 dialect, because every exporter names things differently and renames them
@@ -436,17 +536,24 @@ secret from your vault."
 
 ## Unlocking at login
 
-`pam_passman.so` is the `pam_gnome_keyring` equivalent: when your login
-password is also your vault passphrase, logging in unlocks the vault and every
-`libsecret` application finds its secrets without a second prompt. See
-[res/pam-install.md](res/pam-install.md).
+`pam_passman.so` takes the password you have already typed at the login screen
+and hands it to the daemon. When that password is also your vault passphrase,
+logging in unlocks the vault and every `libsecret` application finds its
+secrets without a second prompt. See [res/pam-install.md](res/pam-install.md).
 
-It is a **session** module and nothing more. `sm_authenticate` returns
-`PAM_IGNORE`, so it takes no part in the authentication decision — it only
-observes a token PAM already accepted. Every failure path returns success: a
-password manager that stops you logging in is worse than one that does not
+It is an **auth/password/session** module and nothing more. `sm_authenticate`
+returns `PAM_IGNORE`, so it takes no part in the authentication decision — it
+only observes a token PAM already accepted. Every failure path returns success:
+a password manager that stops you logging in is worse than one that does not
 auto-unlock. There is deliberately no `sudo` entry; authorising privilege
 escalation is a different module with a much higher bar.
+
+The `password` line is what survives `passwd`. Change your login password
+without it and the vault keeps the old passphrase: auto-unlock quietly stops
+working and nothing anywhere explains why. With it, PAM hands the daemon both
+the old and the new password, and the daemon re-wraps the vault key under the
+new one — after proving the old one opens the vault, so this cannot be used to
+change a passphrase nobody knew.
 
 The passphrase reaches the daemon over a socket in `/run/user/<uid>/passman/`,
 a directory the kernel already restricts to that user (0700), with the socket
@@ -521,12 +628,30 @@ Your key files stay exactly where they are; OpenSSH keeps reading them.
 Confirm `ssh-add -l` lists them through passman's agent before removing
 anything.
 
+A security-key file — `sk-ssh-ed25519@openssh.com` or
+`sk-ecdsa-sha2-nistp256@openssh.com` — is imported like any other, but it is
+not the same kind of thing and the import says so:
+
+```console
+$ passman-cli import-ssh
+imported 2 item(s); 0 already present, 0 unreadable from /home/you/.ssh
+
+1 of these sign on a security key: id_ed25519_sk. The files hold credential
+handles rather than private keys, so importing them is not a backup — they
+authenticate only with the token present.
+```
+
+The item carries the same warning in a note, because months later the vault is
+the only thing anyone reads, and "I have a copy of the key" is the wrong
+conclusion to be left with. The algorithm is recorded as an attribute either
+way.
+
 ### Cloud CLI credentials
 
 `aws`, `gcloud`, `az`, `gh`, `docker` and `npm` all cache long-lived
-credentials in your home directory with no encryption. Between them they are
-usually the most valuable unprotected material on a developer's machine, and
-unlike `.env` files they are not project-scoped — they authorise everything.
+credentials in your home directory with no encryption. Unlike `.env` files
+they are not project-scoped: one of them authorises everything the account
+behind it can do.
 
 ```console
 $ passman-cli import-cloud --dry-run
@@ -625,9 +750,8 @@ machine this was developed against:
   (`~/.pki/nssdb`, `cert9.db`), never in gnome-keyring;
 * nothing outside its own `.module` file references it.
 
-So a passman PKCS#11 provider would be a module nothing loads. Writing one
-would be a large C ABI surface — around 68 function pointers — serving no
-caller, and the honest engineering answer is not to write it.
+So a passman PKCS#11 provider would be a module nothing loads: a large C ABI
+surface — around 68 function pointers — with no caller. It is not written.
 
 It becomes worth revisiting if you install one of those two programs, or want
 to expose vault certificates to a PKCS#11 consumer such as an EAP-TLS VPN
@@ -655,8 +779,13 @@ hostile. So the host never exposes the vault wholesale:
 
 * `search` returns metadata only — labels and usernames, never a password —
   and only for entries matching the origin the caller names.
-* `get` returns exactly one secret, for an id the extension had to learn from a
-  matching `search`.
+* `get` returns exactly one secret, and re-checks the origin at that moment
+  against the page the secret is about to be typed into. The id is not the
+  authorisation: a tab can navigate between the popup opening and the click,
+  and an extension is assumed hostile. The extension checks the tab too, but
+  the host does not rely on that.
+* A secret that is not text is refused rather than converted lossily — some
+  genuinely are binary, and none of those belong in a login form.
 * Nothing unlocks the vault. A locked vault answers `locked` and stops; the
   passphrase is typed into passman's own window, never into a web page.
 * Filling happens only on an explicit click in the popup, never automatically
@@ -688,6 +817,60 @@ take. Locking is safe to expose because a fake "lock" button costs nothing.
 The applet and the GUI share one `ManagerProxy` definition in
 `passman-secret::client`; a drifting copy is the kind of bug that surfaces as
 "the applet says locked but the window says unlocked".
+
+Opening the window from the panel asks the compositor for an XDG activation
+token first. Without one, a window launched from a panel button comes up
+unfocused behind it — and if passman is already running there is nothing to
+raise it with. The launch itself goes through `spawn_desktop_exec`, which
+double-forks it out of the panel process and into its own systemd scope, so
+restarting the panel does not take the vault window with it.
+
+Clicking the button twice does not give you two vault windows: a second
+`passman` hands its activation over D-Bus to the one already running and exits.
+Two windows would each hold their own vault handle, so locking one would leave
+the other unlocked. Set `COSMIC_SINGLE_INSTANCE=0` to opt out — needed if you
+want two vaults side by side with `PASSMAN_VAULT`, since the hand-off carries
+no arguments.
+
+## When the vault locks
+
+Locking is the whole security story of a session daemon, so it happens on more
+than a button:
+
+* **The GUI locks it** with `Ctrl+L`, and that locks the daemon too — otherwise
+  the window would look locked while every `libsecret` client carried on
+  reading secrets.
+* **Idle**: the frontend has a 15-minute default for its own window, and
+  `passmand --auto-lock SECONDS` covers the session, because closing the window
+  is not the same as ending the session. Both Secret Service traffic and SSH
+  agent requests count as use — being locked out mid-`ssh` because no secret
+  had been read would be its own bug. The installed unit passes
+  `--auto-lock 900`.
+* **The session locks**, or the machine suspends. `passmand` watches logind for
+  both `Lock` and the `LockedHint` a screen locker sets, plus
+  `PrepareForSleep`, because different lockers announce themselves differently
+  and a locked screen with a readable vault behind it is not a locked screen.
+  `--no-lock-on-idle-session` turns that off.
+
+In every case the SSH agent's identities go with it.
+
+## Two processes, one file
+
+The daemon holds the vault, and the GUI opens the same file directly whenever
+it is not going through a daemon — so two writers is the normal arrangement,
+not an exotic one. Saving is done under an advisory lock on a sibling
+`.vault.lock`, and a file that changed since it was read is refused with
+`ChangedOnDisk` rather than overwritten:
+
+* the daemon reloads before it writes, and after an external write it is told
+  to catch up by whoever wrote it (`org.passman.Manager1.Reload`);
+* the frontend reloads before it edits, polls for external changes while it is
+  open, and calls `Reload` after saving so the daemon is never left serving
+  what it read ten minutes ago.
+
+A conflict that survives all that loses one write and says so. It does not
+silently discard the other side's, which is what the previous arrangement did
+every time the two processes were both open.
 
 ## Managing unlock factors
 
@@ -735,17 +918,82 @@ deliberately not a real domain: `hmac-secret` is scoped per (rp_id, credential),
 so a passman credential cannot be exercised by a website.
 
 **Not verified on hardware** — no FIDO2 token is attached to this machine. The
-two round-trip tests are `#[ignore]`d behind `PASSMAN_FIDO_TESTS=1` (plus
+round-trip tests are `#[ignore]`d behind `PASSMAN_FIDO_TESTS=1` (plus
 `PASSMAN_FIDO_PIN` if your token has one); they need a physical touch.
+
+## Security keys over SSH
+
+A security-key SSH identity is a different animal from the vault slot above,
+and the agent serves it. `sk-ssh-ed25519@openssh.com` and
+`sk-ecdsa-sha2-nistp256@openssh.com` private key files contain no signing
+scalar at all: a public key, an *application* string (`ssh:`), a flags byte and
+a credential handle. Signing means asking the token for a FIDO2 assertion over
+
+```
+SHA256(application) ‖ flags ‖ counter ‖ SHA256(message)
+└─────────── authenticator data ──────┘  └ client data hash ┘
+```
+
+and dressing the result in SSH's clothing: `string algorithm, string signature,
+byte flags, uint32 counter`, with the trailer *outside* the signature string.
+
+Three things there are easy to get wrong, so each is checked rather than
+assumed:
+
+* **The trailer's position.** `ssh_key::Signature` keeps flags and counter
+  inside its own byte array and splits them back out only for Ed25519, not for
+  ECDSA — so passman writes the blob itself, and the tests hand what it wrote
+  back to `ssh-key`'s decoder and verifier to prove the two agree.
+* **ECDSA integer encoding.** A token returns ES256 signatures in ASN.1 DER;
+  SSH wants `mpint r ‖ mpint s`. A component with its high bit set needs a
+  leading zero byte or it reads as negative, and the failure would surface only
+  as a server rejecting a signature that looked fine here.
+* **Extension data.** The verifier reconstructs exactly 37 bytes of
+  authenticator data. A token that appended extension output would sign
+  something no server rebuilds, so an oversized assertion is refused locally
+  with an explanation instead of becoming an unexplainable auth failure.
+
+A `verify-required` key needs the token's PIN as well as a touch; store it in
+the item's `token-pin` field and the agent passes it through. Without it the
+assertion asks for user verification and the token decides how to get it —
+its own PIN entry, or a fingerprint.
+
+The hardware call is a blocking one that waits for a human, so it runs on a
+blocking thread rather than a runtime worker, and the daemon logs *"touch your
+security key to sign with `<key>`"* at its default log level. A signature that
+waits silently for hardware is indistinguishable from a hang.
+
+Verified end to end against real OpenSSH, with a key file `ssh-keygen -l`
+reports as `ED25519-SK`:
+
+```console
+$ ssh-add -l
+256 SHA256:xypkA6tk… ordinary@key (ED25519)
+256 SHA256:0ErLWxzF… token@laptop (ED25519-SK)
+```
+
+and, with no token plugged in, `ssh-keygen -Y sign` fails in about a second
+with the agent logging *"no FIDO2 security key found; plug one in and try
+again"* rather than hanging. The signature encoding itself is covered by unit
+tests driving a software token that produces assertions the way real hardware
+does; **the hardware path has never run against an actual token**, for the same
+reason the slot above has not.
+
+Support is behind the `fido` cargo feature (on by default) because it needs
+`hidapi`. Built without it, `sk-` identities are dropped at load with a log
+line saying why — an identity the agent cannot sign for is worse than a missing
+one, since the client still spends one of the server's permitted
+authentication attempts offering it.
 
 ## On authorising `sudo`
 
 A PAM module that accepts "the user's daemon said yes" is *weaker* than typing
 a password: any process running as you could claim the bus name and mint root
-for itself. The fix is to anchor the decision in something your own uid cannot
-forge, which is exactly what Windows Hello does — the PIN is not a password,
-it unlocks a TPM-bound key, and the TPM's dictionary-attack lockout is what
-makes a 6-digit PIN viable.
+for itself. The decision has to be anchored in something your own uid cannot
+forge. A short PIN can do that when it is not acting as a password but as the
+`authValue` on a TPM-bound key: the entropy is nowhere near enough on its own,
+and what makes it viable is the chip refusing further attempts after a handful
+of wrong ones.
 
 `passman-tpm` implements that: a random 32-byte secret sealed to the TPM under
 an `authValue`, enrolled as a key slot. One detail is load-bearing —

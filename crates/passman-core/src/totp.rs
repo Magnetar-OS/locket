@@ -23,6 +23,14 @@ impl Algorithm {
             _ => None,
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha1 => "SHA1",
+            Self::Sha256 => "SHA256",
+            Self::Sha512 => "SHA512",
+        }
+    }
 }
 
 /// A parsed TOTP configuration.
@@ -191,6 +199,65 @@ impl Totp {
         let now = crate::model::now();
         self.period - (now % self.period)
     }
+
+    /// The `otpauth://totp/` URI for this configuration.
+    ///
+    /// The inverse of the URI parser: this is what goes into a QR code so an
+    /// authenticator app on a phone ends up with the same seed, algorithm and
+    /// period rather than the defaults it would assume from a bare secret.
+    ///
+    /// ```
+    /// # use passman_core::Totp;
+    /// let totp = Totp::parse("JBSWY3DPEHPK3PXP").unwrap();
+    /// assert!(totp.to_uri().starts_with("otpauth://totp/"));
+    /// ```
+    pub fn to_uri(&self) -> String {
+        let label = match (&self.issuer, &self.account) {
+            (Some(issuer), Some(account)) => format!("{issuer}:{account}"),
+            (Some(one), None) | (None, Some(one)) => one.clone(),
+            (None, None) => String::new(),
+        };
+
+        // `issuer` is repeated as a parameter as well as in the label: the
+        // label is what older apps display, the parameter is what current ones
+        // read, and the Key Uri Format asks for both.
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair(
+            "secret",
+            &base32::encode(
+                base32::Alphabet::Rfc4648 { padding: false },
+                &self.secret,
+            ),
+        );
+        if let Some(issuer) = &self.issuer {
+            query.append_pair("issuer", issuer);
+        }
+        query.append_pair("algorithm", self.algorithm.as_str());
+        query.append_pair("digits", &self.digits.to_string());
+        query.append_pair("period", &self.period.to_string());
+
+        format!("otpauth://totp/{}?{}", encode_label(&label), query.finish())
+    }
+}
+
+/// Percent-encode the label segment of an `otpauth://` URI.
+///
+/// `:` stays literal because it separates issuer from account, and `@` because
+/// accounts are usually email addresses and encoding it only makes the URI
+/// harder to read. Everything else outside the unreserved set is escaped —
+/// including `/`, which would otherwise split the label into two path
+/// segments.
+fn encode_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    for byte in label.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' | b'@' => {
+                out.push(byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 /// Decode an RFC 4648 base32 secret, tolerating lowercase, spaces and missing
@@ -280,6 +347,48 @@ mod tests {
         assert!(Totp::parse("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP").is_err());
         assert!(Totp::parse("otpauth://totp/x?issuer=nope").is_err());
         assert!(Totp::parse("!!!not base32!!!").is_err());
+    }
+
+    #[test]
+    fn uri_round_trips_through_the_parser() {
+        let original = Totp {
+            secret: RFC_SECRET.to_vec(),
+            algorithm: Algorithm::Sha512,
+            digits: 8,
+            period: 60,
+            issuer: Some("ACME Co".into()),
+            account: Some("alice@example.com".into()),
+        };
+        let parsed = Totp::parse(&original.to_uri()).unwrap();
+        assert_eq!(parsed.secret, original.secret);
+        assert_eq!(parsed.algorithm, original.algorithm);
+        assert_eq!(parsed.digits, original.digits);
+        assert_eq!(parsed.period, original.period);
+        assert_eq!(parsed.issuer, original.issuer);
+        assert_eq!(parsed.account, original.account);
+    }
+
+    #[test]
+    fn a_slash_in_the_label_does_not_become_a_path_segment() {
+        let totp = Totp {
+            issuer: Some("ACME/EU".into()),
+            account: Some("alice".into()),
+            ..Totp::parse("JBSWY3DPEHPK3PXP").unwrap()
+        };
+        assert!(totp.to_uri().contains("ACME%2FEU:alice"));
+        assert_eq!(
+            Totp::parse(&totp.to_uri()).unwrap().issuer.as_deref(),
+            Some("ACME/EU")
+        );
+    }
+
+    #[test]
+    fn a_bare_secret_becomes_a_uri_an_app_can_read() {
+        let totp = Totp::parse("jbsw y3dp ehpk 3pxp").unwrap();
+        let uri = totp.to_uri();
+        // No label to speak of, but the parameters must still be there.
+        assert!(uri.starts_with("otpauth://totp/?"), "{uri}");
+        assert_eq!(Totp::parse(&uri).unwrap().secret, totp.secret);
     }
 
     #[test]

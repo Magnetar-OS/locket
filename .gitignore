@@ -2,3 +2,6 @@
 *.swp
 *.vault
 *.vault.tmp
+
+# Stray daemon logs from local test runs.
+*.log
