@@ -26,6 +26,8 @@ pub enum DaemonEvent {
     Connected { locked: bool },
     /// An application asked for a secret and the vault is locked.
     UnlockRequested,
+    /// An SSH client wants to sign with a key that asks to be confirmed.
+    ConfirmRequested { id: u32, key: String },
     /// The daemon went away, or was never there.
     Unavailable,
 }
@@ -53,12 +55,36 @@ pub fn subscription() -> Subscription<DaemonEvent> {
                     let _ = tx.send(DaemonEvent::Unavailable).await;
                     continue;
                 };
+                let Ok(mut confirmations) = proxy.receive_confirm_requested().await else {
+                    let _ = tx.send(DaemonEvent::Unavailable).await;
+                    continue;
+                };
 
-                // Ends when the daemon drops off the bus, which sends us back
-                // around to reconnect.
-                while requests.next().await.is_some() {
-                    tracing::info!("daemon asked for an unlock");
-                    let _ = tx.send(DaemonEvent::UnlockRequested).await;
+                // Both streams end when the daemon drops off the bus, which
+                // sends us back around to reconnect.
+                loop {
+                    tokio::select! {
+                        request = requests.next() => {
+                            if request.is_none() {
+                                break;
+                            }
+                            tracing::info!("daemon asked for an unlock");
+                            let _ = tx.send(DaemonEvent::UnlockRequested).await;
+                        }
+                        confirmation = confirmations.next() => {
+                            let Some(signal) = confirmation else {
+                                break;
+                            };
+                            let Ok(args) = signal.args() else { continue };
+                            tracing::info!("daemon asked to confirm signing with `{}`", args.key);
+                            let _ = tx
+                                .send(DaemonEvent::ConfirmRequested {
+                                    id: args.id,
+                                    key: args.key.to_string(),
+                                })
+                                .await;
+                        }
+                    }
                 }
                 let _ = tx.send(DaemonEvent::Unavailable).await;
             }
@@ -88,6 +114,41 @@ pub async fn unlock(passphrase: String) -> bool {
             false
         }
     }
+}
+
+/// Allow or refuse a signature the daemon asked about.
+pub async fn answer_confirm(id: u32, allow: bool) {
+    let Some((_connection, proxy)) = client::connect().await else {
+        return;
+    };
+    if let Err(e) = proxy.answer_confirm(id, allow).await {
+        tracing::warn!("could not answer the confirmation: {e}");
+    }
+}
+
+/// Give the daemon the idle timeout from the desktop's settings.
+///
+/// The frontend owns the number; the daemon's `--auto-lock` flag is only the
+/// default for a session where no frontend ever runs. Sent on connect and on
+/// every change, so the two never disagree about what "auto-lock" means.
+pub async fn set_auto_lock(seconds: u64) {
+    let Some((_connection, proxy)) = client::connect().await else {
+        return;
+    };
+    if let Err(e) = proxy.set_auto_lock(seconds).await {
+        tracing::warn!("could not set the daemon's auto-lock: {e}");
+    }
+}
+
+/// Tell the daemon we have written the vault file, so it re-reads it.
+///
+/// Best effort: no daemon is a supported setup, and a daemon that cannot
+/// reload has said so in its own log.
+pub async fn reload() -> bool {
+    let Some((_connection, proxy)) = client::connect().await else {
+        return false;
+    };
+    proxy.reload().await.unwrap_or(false)
 }
 
 /// Ask the daemon to drop its key too, so locking the GUI locks everything.

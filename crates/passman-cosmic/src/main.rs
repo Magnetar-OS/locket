@@ -35,6 +35,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .min_height(400.0),
         );
 
-    cosmic::app::run::<app::App>(settings, app::Flags { vault_path })?;
+    // A second `passman` activates the window that is already open rather than
+    // starting a second process: two windows would each hold their own vault
+    // handle, so locking one would leave the other unlocked. Set
+    // COSMIC_SINGLE_INSTANCE=0 to opt out — needed to run two vaults side by
+    // side with PASSMAN_VAULT, since the hand-off carries no arguments.
+    cosmic::app::run_single_instance::<app::App>(settings, app::Flags { vault_path })?;
     Ok(())
 }

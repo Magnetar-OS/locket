@@ -48,10 +48,20 @@ features = [
     "multi-window",
     "wgpu",
     "about",
-    "desktop",
+    # Only for opening the About page's links; `desktop` would pull in the
+    # desktop-entry and settings-config machinery for the same one call.
+    "process",
+    # Launching passman twice hands off to the running window instead of
+    # opening a second one with its own vault handle — which is what the panel
+    # applet's "Open passman" would otherwise do on every click.
+    "single-instance",
     "xdg-portal",
     "qr_code",
 ]
+# Deliberately absent: `advanced-shaping`. iced already defaults to
+# `Shaping::Auto`, which shapes anything non-ASCII the expensive way and leaves
+# plain ASCII — most of a vault — on the cheap path. Enabling it only removes
+# that second half.
 
 [dependencies.cosmic-config]
 git = "https://github.com/pop-os/libcosmic"

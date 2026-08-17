@@ -386,6 +386,7 @@ impl Job {
 /// Run a file-based import. Saves on success, so a crash afterwards cannot
 /// lose what was just imported.
 pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
+    refresh(vault);
     let into = (!job.collection.trim().is_empty()).then(|| job.collection.trim());
     let path = job.path.as_deref();
 
@@ -435,8 +436,22 @@ pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
     Ok(summary)
 }
 
+/// Bring the vault in line with the file before a long import.
+///
+/// An import can take a while, and the daemon writes the same file whenever a
+/// `libsecret` client stores something. Starting from stale data would mean
+/// the save at the end is refused and the whole import is lost.
+fn refresh(vault: &mut Vault) {
+    if vault.changed_on_disk()
+        && let Err(e) = vault.reload()
+    {
+        tracing::warn!("could not refresh the vault before importing: {e}");
+    }
+}
+
 /// Run the live Secret Service import.
 pub async fn run_keyring(vault: &mut Vault, job: &Job) -> Outcome {
+    refresh(vault);
     let into = (!job.collection.trim().is_empty()).then(|| job.collection.trim());
     let summary =
         passman_secret::import::import_from(vault, passman_secret::WELL_KNOWN_NAME, into, false)
@@ -450,6 +465,7 @@ pub async fn run_keyring(vault: &mut Vault, job: &Job) -> Outcome {
         imported: summary.imported + summary.replaced,
         skipped_duplicate: summary.skipped_duplicate,
         skipped_unreadable: summary.skipped_unreadable,
+        notes: Vec::new(),
     })
 }
 

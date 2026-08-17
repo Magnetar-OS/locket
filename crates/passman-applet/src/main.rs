@@ -11,6 +11,10 @@
 //! is safe to expose because a spoofed "lock" button costs nothing.
 
 use cosmic::app::{Core, Task};
+use cosmic::applet::token::subscription::{
+    TokenRequest, TokenUpdate, activation_token_subscription,
+};
+use cosmic::cctk::sctk::reexports::calloop;
 use cosmic::iced::window::Id;
 use cosmic::iced::{Length, Rectangle, Subscription};
 use cosmic::surface::action::{app_popup, destroy_popup};
@@ -19,6 +23,9 @@ use cosmic::{Element, iced::window};
 use passman_secret::client::Status;
 
 const ID: &str = "io.github.idominikos.PassmanApplet";
+
+/// The main window's binary, as the desktop entry spells it.
+const APP_EXEC: &str = "passman";
 
 /// How often the panel icon re-checks the daemon.
 ///
@@ -32,6 +39,9 @@ pub struct Applet {
     popup: Option<Id>,
     /// `None` until the first poll completes, or when no daemon is running.
     status: Option<Status>,
+    /// Where to ask for an activation token. `None` until the subscription
+    /// has started, or on a compositor without the protocol.
+    token: Option<calloop::channel::Sender<TokenRequest>>,
 }
 
 #[derive(Clone, Debug)]
@@ -42,6 +52,28 @@ pub enum Message {
     Status(Option<Status>),
     Lock,
     OpenApp,
+    Token(TokenUpdate),
+}
+
+/// Launch the main window, handing on an activation token if we have one.
+///
+/// The token is what lets the compositor give the new window focus, or raise
+/// the instance that is already running — a launch without one appears behind
+/// the panel with nothing to say it arrived. Both variable names are set
+/// because which one the other end reads depends on whether it came up under
+/// Wayland or X11.
+fn launch(token: Option<String>) -> Task<Message> {
+    cosmic::iced::Task::future(async move {
+        let env = match token {
+            Some(token) => vec![
+                ("XDG_ACTIVATION_TOKEN", token.clone()),
+                ("DESKTOP_STARTUP_ID", token),
+            ],
+            None => Vec::new(),
+        };
+        cosmic::desktop::spawn_desktop_exec(APP_EXEC, env, Some(ID), false).await;
+    })
+    .discard()
 }
 
 impl Applet {
@@ -83,6 +115,7 @@ impl cosmic::Application for Applet {
             core,
             popup: None,
             status: None,
+            token: None,
         };
         // Ask immediately so the icon is right before the first tick.
         (
@@ -122,10 +155,30 @@ impl cosmic::Application for Applet {
             }
             Message::OpenApp => {
                 // Unlocking belongs in the real window, not a panel popup.
-                if let Err(e) = std::process::Command::new("passman").spawn() {
-                    tracing::warn!("could not launch passman: {e}");
+                //
+                // The token is minted asynchronously by the Wayland thread, so
+                // the launch happens when it comes back rather than here.
+                match self.token.as_ref() {
+                    Some(sender) => {
+                        if let Err(e) = sender.send(TokenRequest {
+                            app_id: ID.to_owned(),
+                            exec: APP_EXEC.to_owned(),
+                        }) {
+                            tracing::warn!("could not ask for an activation token: {e}");
+                            return launch(None);
+                        }
+                    }
+                    None => return launch(None),
                 }
             }
+
+            Message::Token(update) => match update {
+                TokenUpdate::Init(sender) => self.token = Some(sender),
+                // The Wayland thread is gone; later launches go without a
+                // token rather than not happening.
+                TokenUpdate::Finished => self.token = None,
+                TokenUpdate::ActivationToken { token, .. } => return launch(token),
+            },
         }
         Task::none()
     }
@@ -182,7 +235,10 @@ impl cosmic::Application for Applet {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        cosmic::iced::time::every(POLL).map(|_| Message::Tick)
+        Subscription::batch([
+            cosmic::iced::time::every(POLL).map(|_| Message::Tick),
+            activation_token_subscription(0).map(Message::Token),
+        ])
     }
 
     fn style(&self) -> Option<cosmic::iced::theme::Style> {

@@ -98,8 +98,18 @@ pub enum Message {
     SearchChanged(String),
     Select(Uuid),
     ToggleReveal(String),
+    /// Show or hide the `otpauth://` QR for a one-time-code field.
+    ToggleQr(String),
     CopyValue(&'static str, String),
     ClearClipboard,
+    /// What the clipboard held when the clear timer fired.
+    ClipboardChecked(Option<String>),
+    /// The vault file changed underneath us; pick the change up.
+    ReloadVaultFile,
+    /// Answer the daemon's "may this key sign?" question.
+    AnswerConfirm(bool),
+    /// The settings store changed somewhere else; take the new values.
+    SettingsChanged(Settings),
     CloseContext,
     ToggleFavorite(Uuid),
     Tick,
@@ -147,6 +157,16 @@ pub struct Flags {
     pub vault_path: PathBuf,
 }
 
+/// What a second `passman` forwards to the instance already running.
+///
+/// Nothing: there are no subcommands, and the vault path is not worth passing
+/// because switching an unlocked window to another vault mid-session is not
+/// something the app can do. A bare activation just raises the window.
+impl cosmic::app::CosmicFlags for Flags {
+    type SubCommand = String;
+    type Args = Vec<String>;
+}
+
 pub struct App {
     core: Core,
     nav: nav_bar::Model,
@@ -190,11 +210,96 @@ pub struct App {
     /// the unlock screen can say why it appeared.
     security: Security,
     unlock_requested_by_app: bool,
-    /// Whether a passmand is reachable at all.
-    daemon_present: bool,
+    /// The secret we last put on the clipboard, so the clear timer can check
+    /// it is still ours before wiping it.
+    clipboard_copy: Option<String>,
+    /// An SSH signature waiting to be allowed: (request id, key name).
+    pending_confirm: Option<(u32, String)>,
+
+    /// The one-time-code field currently shown as a QR, with its encoded
+    /// image. Held rather than rebuilt per frame because the widget borrows
+    /// the data, and because re-encoding a seed on every redraw is work for
+    /// nothing.
+    qr: Option<(String, widget::qr_code::Data)>,
+    /// Name, version and links for the About section of Settings.
+    about: widget::about::About,
 }
 
 impl App {
+    /// Tell the daemon what the idle timeout is now.
+    ///
+    /// One setting, one meaning: the same number that locks this window also
+    /// locks the daemon, which is the process actually holding the key.
+    fn push_auto_lock(&self) -> Task<Message> {
+        let seconds = self.settings.auto_lock_seconds;
+        cosmic::task::future(async move {
+            daemon::set_auto_lock(seconds).await;
+            Message::Tick
+        })
+    }
+
+    /// Pick up an edit another process made to the vault file.
+    ///
+    /// The daemon writes the same file whenever a `libsecret` client stores
+    /// something, so our copy goes stale without anyone doing anything wrong.
+    /// Returns true if a reload happened.
+    fn reload_if_changed(&mut self) -> bool {
+        let Some(vault) = self.vault.as_mut() else {
+            return false;
+        };
+        if !vault.changed_on_disk() {
+            return false;
+        }
+        match vault.reload() {
+            Ok(()) => {
+                tracing::info!("the vault file changed; reloaded it");
+                true
+            }
+            Err(e) => {
+                // The key material changed — someone changed the passphrase.
+                // Our DEK is useless against that file, so the only honest
+                // move is back to the unlock screen.
+                tracing::warn!("could not reload the changed vault: {e}");
+                self.vault = None;
+                self.screen = Screen::Locked;
+                self.error = Some("The vault was changed elsewhere. Unlock it again.".into());
+                false
+            }
+        }
+    }
+
+    /// Persist, and tell the daemon its copy is now behind.
+    ///
+    /// Without that last part the daemon would keep serving the secrets it had
+    /// before this edit, and would refuse its own next save for conflicting
+    /// with a file it does not know changed.
+    fn save_vault(&mut self) -> Result<Task<Message>, String> {
+        let Some(vault) = self.vault.as_mut() else {
+            return Ok(Task::none());
+        };
+        match vault.save() {
+            Ok(()) => Ok(cosmic::task::future(async {
+                daemon::reload().await;
+                Message::Tick
+            })),
+            Err(passman_core::Error::ChangedOnDisk { .. }) => Err(
+                "Another passman process wrote the vault a moment ago. Nothing was \
+                 overwritten — try that again."
+                    .to_owned(),
+            ),
+            Err(e) => Err(format!("Could not save: {e}")),
+        }
+    }
+
+    /// Take every secret back off the screen.
+    ///
+    /// Revealed values and the QR go together: both put something on display
+    /// that was meant to stay hidden, so anything that hides one hides both.
+    fn conceal(&mut self) {
+        self.revealed.clear();
+        self.qr = None;
+    }
+
     fn category(&self) -> Category {
         self.nav
             .active_data::<Category>()
@@ -597,6 +702,41 @@ impl App {
                                 .push(bar)
                                 .push(caption),
                         );
+
+                        // Enrolling the same account on a phone needs the
+                        // seed, not the code — so this is a secret going on
+                        // screen, and it hides again with everything else.
+                        let showing = self
+                            .qr
+                            .as_ref()
+                            .is_some_and(|(shown, _)| *shown == field.name);
+                        column = column.push(
+                            widget::button::standard(if showing {
+                                "Hide QR code"
+                            } else {
+                                "Show QR code"
+                            })
+                            .on_press(Message::ToggleQr(field.name.clone())),
+                        );
+                        if let Some((_, data)) = self.qr.as_ref().filter(|(shown, _)| {
+                            *shown == field.name
+                        }) {
+                            column = column.push(
+                                widget::column::with_capacity(2)
+                                    .spacing(spacing.space_xxs)
+                                    .align_x(Alignment::Center)
+                                    .width(Length::Fill)
+                                    .push(widget::qr_code::QRCode::new(data).cell_size(5.0))
+                                    .push(
+                                        widget::text::caption(
+                                            "Scan to add this account to an authenticator \
+                                             app. Anyone who photographs this can generate \
+                                             your codes.",
+                                        )
+                                        .center(),
+                                    ),
+                            );
+                        }
                     }
                     Err(e) => {
                         column = column
@@ -696,7 +836,10 @@ impl cosmic::Application for App {
             pending_delete: None,
             security: Security::default(),
             unlock_requested_by_app: false,
-            daemon_present: false,
+            clipboard_copy: None,
+            pending_confirm: None,
+            qr: None,
+            about: about(),
         };
 
         // Focus the passphrase field, but not before the window exists.
@@ -732,7 +875,7 @@ impl cosmic::Application for App {
     fn on_nav_select(&mut self, id: nav_bar::Id) -> Task<Self::Message> {
         self.nav.activate(id);
         self.selected = None;
-        self.revealed.clear();
+        self.conceal();
         self.core.window.show_context = false;
 
         // Read the integration state each time the screen is opened rather
@@ -843,7 +986,7 @@ impl cosmic::Application for App {
                 self.vault = None;
                 self.screen = Screen::Locked;
                 self.selected = None;
-                self.revealed.clear();
+                self.conceal();
                 self.search.clear();
                 self.core.window.show_context = false;
                 self.unlock_requested_by_app = false;
@@ -866,7 +1009,7 @@ impl cosmic::Application for App {
 
             Message::Select(id) => {
                 self.selected = Some(id);
-                self.revealed.clear();
+                self.conceal();
                 self.core.window.show_context = true;
             }
 
@@ -876,8 +1019,46 @@ impl cosmic::Application for App {
                 }
             }
 
+            Message::ToggleQr(name) => {
+                if self.qr.as_ref().is_some_and(|(shown, _)| *shown == name) {
+                    self.qr = None;
+                    return Task::none();
+                }
+                // Built from the parsed seed rather than passed through
+                // verbatim: a bare base32 secret is not a URI, and a phone
+                // given one would fall back to SHA-1 and 30 seconds whatever
+                // this account actually uses.
+                let uri = {
+                    let Some(item) = self.selected_item() else {
+                        return Task::none();
+                    };
+                    let Some(field) = item.fields.iter().find(|f| f.name == name) else {
+                        return Task::none();
+                    };
+                    match Totp::parse(field.value.expose()) {
+                        Ok(mut totp) => {
+                            // An unlabelled seed would arrive on the phone as
+                            // an anonymous entry; the item's own name is the
+                            // only thing here that says which account it is.
+                            if totp.issuer.is_none() && totp.account.is_none() {
+                                totp.account = Some(item.label.clone());
+                            }
+                            totp.to_uri()
+                        }
+                        Err(e) => return self.toast(format!("Invalid TOTP seed: {e}")),
+                    }
+                };
+                match widget::qr_code::Data::new(uri) {
+                    Ok(data) => self.qr = Some((name, data)),
+                    Err(e) => return self.toast(format!("Could not build a QR code: {e}")),
+                }
+            }
+
             Message::CopyValue(what, value) => {
                 let clear_after = self.settings.clipboard_clear_seconds;
+                // Kept so the timer can tell "our secret is still there" from
+                // "the user has copied something else since".
+                self.clipboard_copy = Some(value.clone());
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(value);
                 let notice = self.toast(if clear_after > 0 {
                     format!("{what} copied — clipboard clears in {clear_after}s")
@@ -896,19 +1077,36 @@ impl cosmic::Application for App {
             }
 
             Message::ClearClipboard => {
-                // Overwrite rather than clear: some clipboard managers treat an
-                // empty payload as "no change" and keep serving the old value.
-                return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(String::new());
+                // Look before wiping: between the copy and this timer the user
+                // may well have copied something of their own, and clearing
+                // the clipboard out from under them is its own small disaster.
+                return cosmic::iced::clipboard::read()
+                    .map(|current| cosmic::Action::App(Message::ClipboardChecked(current)));
+            }
+
+            Message::ClipboardChecked(current) => {
+                let ours = self.clipboard_copy.take();
+                if current.is_some() && current == ours {
+                    // Overwrite rather than clear: some clipboard managers
+                    // treat an empty payload as "no change" and keep serving
+                    // the old value.
+                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
+                        String::new(),
+                    );
+                }
+                tracing::debug!("clipboard holds something else now; leaving it alone");
             }
 
             Message::ToggleFavorite(id) => {
+                self.reload_if_changed();
                 if let Some(vault) = self.vault.as_mut() {
                     if let Some(item) = vault.item_mut(id) {
                         item.favorite = !item.favorite;
                         item.touch();
                     }
-                    if let Err(e) = vault.save() {
-                        return self.toast(format!("Could not save: {e}"));
+                    match self.save_vault() {
+                        Ok(task) => return task,
+                        Err(e) => return self.toast(e),
                     }
                 }
             }
@@ -916,10 +1114,51 @@ impl cosmic::Application for App {
             Message::CloseContext => {
                 self.core.window.show_context = false;
                 self.selected = None;
-                self.revealed.clear();
+                self.conceal();
             }
 
             Message::Tick => {}
+
+            Message::AnswerConfirm(allow) => {
+                let Some((id, key)) = self.pending_confirm.take() else {
+                    return Task::none();
+                };
+                let notice = self.toast(if allow {
+                    format!("Allowed one signature with {key}")
+                } else {
+                    format!("Refused a signature with {key}")
+                });
+                return Task::batch([
+                    cosmic::task::future(async move {
+                        daemon::answer_confirm(id, allow).await;
+                        Message::Tick
+                    }),
+                    notice,
+                ]);
+            }
+
+            Message::SettingsChanged(settings) => {
+                if settings == self.settings {
+                    return Task::none();
+                }
+                let auto_lock_changed = settings.auto_lock_seconds != self.settings.auto_lock_seconds;
+                self.settings = settings;
+                // Anything already on screen was rendered against the old
+                // values; re-conceal rather than leave a secret revealed under
+                // a setting that now says not to.
+                if self.settings.conceal_on_blur {
+                    self.revealed.clear();
+                }
+                if auto_lock_changed {
+                    return self.push_auto_lock();
+                }
+            }
+
+            Message::ReloadVaultFile => {
+                if self.reload_if_changed() {
+                    return self.update_title();
+                }
+            }
 
             Message::CloseToast(id) => self.toasts.remove(id),
 
@@ -973,23 +1212,30 @@ impl cosmic::Application for App {
                                 vault.add_item_default(item);
                             }
                         }
-                        if let Err(e) = vault.save() {
-                            return self.toast(format!("Could not save: {e}"));
-                        }
+                        let saved = match self.save_vault() {
+                            Ok(task) => task,
+                            Err(e) => return self.toast(e),
+                        };
                         self.editor = None;
                         self.selected = Some(new_id);
                         let title = self.update_title();
-                        return Task::batch([title, self.toast(format!("Saved {label}"))]);
+                        return Task::batch([
+                            title,
+                            saved,
+                            self.toast(format!("Saved {label}")),
+                        ]);
                     }
                 }
             }
 
             Message::Daemon(event) => match event {
                 DaemonEvent::Connected { locked } => {
-                    self.daemon_present = true;
                     if !locked {
                         self.unlock_requested_by_app = false;
                     }
+                    // A daemon that just appeared is running on its own
+                    // default; hand it the setting the user actually chose.
+                    return self.push_auto_lock();
                 }
                 DaemonEvent::UnlockRequested => {
                     // Surface it wherever the user is: if the GUI is already
@@ -1003,7 +1249,15 @@ impl cosmic::Application for App {
                         self.screen = Screen::Locked;
                     }
                 }
-                DaemonEvent::Unavailable => self.daemon_present = false,
+                DaemonEvent::ConfirmRequested { id, key } => {
+                    // Raise the window: this is a question, and one nobody can
+                    // answer from behind whatever they were looking at.
+                    self.pending_confirm = Some((id, key));
+                }
+                // Nothing to do: the next call simply finds no daemon and the
+                // frontend falls back to the vault file, which is a supported
+                // way to run.
+                DaemonEvent::Unavailable => {}
             },
 
             Message::DaemonUnlocked(ok) => {
@@ -1044,11 +1298,17 @@ impl cosmic::Application for App {
                         self.status = None;
                         return Task::batch([Self::refresh_status()]);
                     }
+                    preferences::Message::OpenUrl(url) => return open_url(url),
                 }
-                if changed && let Some(config) = self.config.as_ref() {
-                    // Written straight through: a preferences screen with a
-                    // Save button is a preferences screen you forget to save.
-                    self.settings.store(config);
+                if changed {
+                    if let Some(config) = self.config.as_ref() {
+                        // Written straight through: a preferences screen with a
+                        // Save button is a preferences screen you forget to save.
+                        self.settings.store(config);
+                    }
+                    // The daemon holds the key, so the setting has to reach it
+                    // too — not only the window it was changed in.
+                    return self.push_auto_lock();
                 }
             }
 
@@ -1068,7 +1328,7 @@ impl cosmic::Application for App {
                     // Only the on-screen reveal is undone; nothing is locked,
                     // because alt-tabbing away is not a request to re-type a
                     // passphrase.
-                    self.revealed.clear();
+                    self.conceal();
                 }
             }
 
@@ -1098,8 +1358,15 @@ impl cosmic::Application for App {
                 match outcome {
                     Ok(summary) => {
                         self.import = None;
-                        let text = format!("Imported {summary}");
-                        return Task::batch([self.update_title(), self.toast(text)]);
+                        // Notes are things the counts cannot say — a key that
+                        // only signs with hardware present, say. One toast per
+                        // note, so none of them is buried in a summary line.
+                        let mut tasks = vec![self.update_title()];
+                        tasks.push(self.toast(format!("Imported {summary}")));
+                        for note in &summary.notes {
+                            tasks.push(self.toast(note.clone()));
+                        }
+                        return Task::batch(tasks);
                     }
                     Err(e) => {
                         if let Some(form) = self.import.as_mut() {
@@ -1223,16 +1490,18 @@ impl cosmic::Application for App {
                     return Task::none();
                 };
                 let removed = vault.remove_item(id).map(|i| i.label);
-                if let Err(e) = vault.save() {
-                    return self.toast(format!("Could not save: {e}"));
-                }
+                let saved = match self.save_vault() {
+                    Ok(task) => task,
+                    Err(e) => return self.toast(e),
+                };
                 if self.selected == Some(id) {
                     self.selected = None;
                     self.core.window.show_context = false;
                 }
                 if let Some(label) = removed {
-                    return self.toast(format!("Deleted {label}"));
+                    return Task::batch([saved, self.toast(format!("Deleted {label}"))]);
                 }
+                return saved;
             }
         }
 
@@ -1255,7 +1524,7 @@ impl cosmic::Application for App {
                     .view(self.vault.as_ref())
                     .map(Message::Security),
                 None if self.category() == Category::Settings => {
-                    preferences::view(&self.settings, self.status.as_ref())
+                    preferences::view(&self.settings, self.status.as_ref(), &self.about)
                         .map(Message::Preferences)
                 }
                 None => self.browse_view(),
@@ -1303,6 +1572,27 @@ impl cosmic::Application for App {
     }
 
     fn dialog(&self) -> Option<Element<'_, Self::Message>> {
+        // A signing request is somebody waiting on the other end of an ssh
+        // connection, so it goes in front of anything else.
+        if let Some((_, key)) = &self.pending_confirm {
+            return Some(
+                widget::dialog()
+                    .title("Allow this SSH signature?")
+                    .body(format!(
+                        "Something on this machine is asking to authenticate with \u{201c}{key}\u{201d}.                          This key is set to ask every time, so nothing happens unless you allow it.",
+                    ))
+                    .primary_action(
+                        widget::button::suggested("Allow once")
+                            .on_press(Message::AnswerConfirm(true)),
+                    )
+                    .secondary_action(
+                        widget::button::destructive("Refuse")
+                            .on_press(Message::AnswerConfirm(false)),
+                    )
+                    .into(),
+            );
+        }
+
         let id = self.pending_delete?;
         let label = self
             .vault
@@ -1329,6 +1619,22 @@ impl cosmic::Application for App {
         )
     }
 
+    /// A second `passman` — usually the applet's "Unlock in passman" — asking
+    /// this one to come forward.
+    ///
+    /// libcosmic has already unminimised and raised the window by the time
+    /// this runs; all that is left is to put the caret where the person who
+    /// clicked is about to type.
+    fn dbus_activation(
+        &mut self,
+        _message: cosmic::dbus_activation::Message,
+    ) -> Task<Self::Message> {
+        if self.screen == Screen::Locked {
+            return self.update(Message::FocusPassphrase);
+        }
+        Task::none()
+    }
+
     /// Escape backs out of the innermost thing, in the order they stack.
     fn on_escape(&mut self) -> Task<Self::Message> {
         if self.pending_delete.is_some() {
@@ -1344,13 +1650,16 @@ impl cosmic::Application for App {
         } else if self.core.window.show_context {
             self.core.window.show_context = false;
             self.selected = None;
-            self.revealed.clear();
+            self.conceal();
         }
         Task::none()
     }
 
     fn subscription(&self) -> Subscription<Self::Message> {
         let daemon = daemon::subscription().map(Message::Daemon);
+        // The settings store is shared with the rest of the desktop, so it can
+        // change without this window doing anything.
+        let settings = config::subscription().map(Message::SettingsChanged);
 
         // Only bind shortcuts while browsing: they would fight the passphrase
         // field on the unlock screen, and the editor owns its own typing.
@@ -1383,7 +1692,7 @@ impl cosmic::Application for App {
             Subscription::none()
         };
 
-        let mut subs = vec![daemon, shortcuts];
+        let mut subs = vec![daemon, settings, shortcuts];
 
         if self.screen == Screen::Browsing && self.selected_item().is_some_and(has_totp) {
             // Only tick while a live one-time code is on screen.
@@ -1399,6 +1708,16 @@ impl cosmic::Application for App {
             subs.push(
                 cosmic::iced::time::every(std::time::Duration::from_secs(1))
                     .map(|_| Message::IdleCheck),
+            );
+        }
+
+        if self.screen == Screen::Browsing {
+            // One stat() every few seconds. The daemon rewrites this file
+            // whenever a libsecret client stores something, and a list that
+            // silently lags behind the truth is worse than a cheap poll.
+            subs.push(
+                cosmic::iced::time::every(std::time::Duration::from_secs(3))
+                    .map(|_| Message::ReloadVaultFile),
             );
         }
 
@@ -1418,6 +1737,40 @@ impl cosmic::Application for App {
 
 fn has_totp(item: &Item) -> bool {
     item.fields.iter().any(|f| f.kind == FieldKind::Totp)
+}
+
+/// What the About section says. Everything here comes from the manifest, so a
+/// release cannot ship a version string that disagrees with the crate.
+fn about() -> widget::about::About {
+    let repository = env!("CARGO_PKG_REPOSITORY");
+    widget::about::About::default()
+        .name("passman")
+        .icon(widget::icon::from_name(
+            <App as cosmic::Application>::APP_ID,
+        ))
+        .version(env!("CARGO_PKG_VERSION"))
+        // The same line the desktop entry shows, so the app describes itself
+        // the same way wherever you meet it.
+        .comments("Passwords, keys and secrets for the COSMIC desktop")
+        .license(env!("CARGO_PKG_LICENSE"))
+        .license_url("https://www.gnu.org/licenses/gpl-3.0.html")
+        .links([
+            ("Source code", repository.to_owned()),
+            ("Report an issue", format!("{repository}/issues")),
+        ])
+}
+
+/// Hand a URL to the desktop's browser.
+///
+/// Double-forked and detached by `cosmic::process`, so the browser does not
+/// die with passman and passman does not inherit its output.
+fn open_url(url: String) -> Task<Message> {
+    cosmic::iced::Task::future(async move {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        cosmic::process::spawn(command).await;
+    })
+    .discard()
 }
 
 impl App {

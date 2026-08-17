@@ -25,6 +25,8 @@ pub enum Message {
     CompactListToggled(bool),
     Refresh,
     Loaded(Status),
+    /// A link in the About section was clicked.
+    OpenUrl(String),
 }
 
 /// Auto-lock choices, in seconds. Zero is "never".
@@ -62,6 +64,11 @@ pub struct Status {
     pub portal_routed: bool,
     /// `pam_passman.so` appears in the login stack.
     pub pam_wired: bool,
+    /// …and on the `password` line, which is what keeps the vault's passphrase
+    /// in step when the login password changes. Reported separately because
+    /// having one without the other is a real state people end up in, and it
+    /// fails silently months later.
+    pub pam_rekeys: bool,
     /// gnome-keyring is running, which usually means it is contending with us.
     pub gnome_keyring_running: bool,
 }
@@ -82,7 +89,11 @@ fn row<'a>(good: bool, warn: bool, title: &'a str, detail: String) -> Element<'a
         .into()
 }
 
-pub fn view<'a>(settings: &Settings, status: Option<&'a Status>) -> Element<'a, Message> {
+pub fn view<'a>(
+    settings: &Settings,
+    status: Option<&'a Status>,
+    about: &'a widget::about::About,
+) -> Element<'a, Message> {
     let spacing = cosmic::theme::active().cosmic().spacing;
 
     let auto_lock = AUTO_LOCK
@@ -165,11 +176,17 @@ pub fn view<'a>(settings: &Settings, status: Option<&'a Status>) -> Element<'a, 
                     },
                 ))
                 .add(row(
-                    s.pam_wired,
-                    false,
+                    s.pam_wired && s.pam_rekeys,
+                    // Half-wired is a warning, not a failure: it works today
+                    // and breaks the day you change your password.
+                    s.pam_wired && !s.pam_rekeys,
                     "Unlock at login",
-                    if s.pam_wired {
+                    if s.pam_wired && s.pam_rekeys {
                         "pam_passman.so is in the login stack".to_owned()
+                    } else if s.pam_wired {
+                        "Unlocks at login, but has no `password` line — changing \
+                         your login password will quietly stop that working"
+                            .to_owned()
                     } else {
                         "Not configured; you unlock manually each session"
                             .to_owned()
@@ -190,7 +207,7 @@ pub fn view<'a>(settings: &Settings, status: Option<&'a Status>) -> Element<'a, 
         }
     };
 
-    widget::column::with_capacity(5)
+    widget::column::with_capacity(7)
         .spacing(spacing.space_m)
         .max_width(720.0)
         .push(widget::text::title3("Settings"))
@@ -203,9 +220,17 @@ pub fn view<'a>(settings: &Settings, status: Option<&'a Status>) -> Element<'a, 
                 .apply(widget::container)
                 .align_x(cosmic::iced::alignment::Horizontal::Left),
         )
+        // Last, because it is the thing you come here for least often — but
+        // here rather than nowhere, since a version number is the first thing
+        // a bug report asks for.
+        .push(widget::divider::horizontal::default())
+        .push(widget::about::about(about, |url| {
+            Message::OpenUrl(url.to_owned())
+        }))
         .apply(widget::container)
         .padding(spacing.space_l)
         .width(cosmic::iced::Length::Fill)
+        .apply(widget::scrollable)
         .into()
 }
 
@@ -225,11 +250,24 @@ impl Status {
             )
             .is_file(),
             portal_routed: Self::portal_routed(),
-            pam_wired: std::fs::read_to_string("/etc/pam.d/system-login")
-                .map(|s| s.contains("pam_passman.so"))
-                .unwrap_or(false),
+            pam_wired: Self::pam_line("auth"),
+            pam_rekeys: Self::pam_line("password"),
             gnome_keyring_running: Self::gnome_keyring_running(),
         }
+    }
+
+    /// Whether the login stack has `pam_passman.so` on the given line.
+    fn pam_line(kind: &str) -> bool {
+        std::fs::read_to_string("/etc/pam.d/system-login")
+            .map(|stack| {
+                stack.lines().any(|line| {
+                    let line = line.trim_start();
+                    !line.starts_with('#')
+                        && line.starts_with(kind)
+                        && line.contains("pam_passman.so")
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// Ask the bus who owns the Secret Service, then who that process is.
