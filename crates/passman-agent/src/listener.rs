@@ -3,9 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use std::sync::Mutex;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
 
 use crate::{Agent, MAX_MESSAGE_LEN, error::Result, protocol};
 
@@ -80,10 +81,7 @@ async fn handle_connection(mut stream: UnixStream, agent: Arc<Mutex<Agent>>) -> 
         // Drain every complete message already buffered before reading more,
         // since clients may pipeline requests.
         while let Some((body, used)) = protocol::take_message(&buf)? {
-            let response = {
-                let mut guard = agent.lock().await;
-                guard.handle(body)
-            };
+            let response = dispatch(&agent, body.to_vec()).await?;
             stream.write_all(&response).await?;
             buf.drain(..used);
         }
@@ -97,4 +95,32 @@ async fn handle_connection(mut stream: UnixStream, agent: Arc<Mutex<Agent>>) -> 
         }
         buf.extend_from_slice(&chunk[..n]);
     }
+}
+
+/// Handle one request on a blocking thread.
+///
+/// Signing with a security key waits for someone to walk over and touch it —
+/// seconds, sometimes tens of them — and a runtime worker is the wrong place
+/// to spend that.
+///
+/// A plain `std` mutex rather than tokio's, because every holder of this lock
+/// is synchronous: this closure, and the daemon reacting to the vault being
+/// locked or unlocked. An async mutex would force that second caller to be
+/// async for no benefit.
+///
+/// The lock is held for the whole request, so a second one queues behind a
+/// pending touch. That is the honest behaviour with one token: it can only be
+/// touched for one thing at a time.
+async fn dispatch(agent: &Arc<Mutex<Agent>>, body: Vec<u8>) -> Result<Vec<u8>> {
+    let agent = agent.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = agent.lock().unwrap_or_else(|poisoned| {
+            // A panic in one request must not take the agent out of service.
+            agent.clear_poison();
+            poisoned.into_inner()
+        });
+        guard.handle(&body)
+    })
+    .await
+    .map_err(|e| crate::Error::Io(std::io::Error::other(e.to_string())))
 }

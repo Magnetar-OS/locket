@@ -11,13 +11,26 @@
 //! This fills a slot nothing currently owns: on a stock COSMIC session
 //! `gnome-keyring-daemon` runs as `--components=pkcs11,secrets` and
 //! `SSH_AUTH_SOCK` is unset.
+//!
+//! # Security keys
+//!
+//! `sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`
+//! identities are served too, by asking the token for a FIDO2 assertion per
+//! signature — see [`sk`]. Those keys hold no signing scalar, so an agent that
+//! merely listed them would advertise identities it could never use; without a
+//! token backend they are dropped at load instead.
 
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod confirm;
 pub mod error;
+#[cfg(feature = "fido")]
+pub mod fido;
 pub mod listener;
 pub mod protocol;
+pub mod signing;
+pub mod sk;
 pub mod wire;
 
 pub use agent::{Agent, AgentKey};

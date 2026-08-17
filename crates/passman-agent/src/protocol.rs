@@ -1,5 +1,7 @@
 //! Agent message numbers and framing.
 
+use zeroize::Zeroizing;
+
 use crate::error::{Error, Result};
 use crate::wire::{Reader, Writer};
 
@@ -39,8 +41,13 @@ pub enum Request {
         key_blob: Vec<u8>,
     },
     RemoveAllIdentities,
-    Lock,
-    Unlock,
+    /// Both carry the passphrase the agent is locked and unlocked with.
+    Lock {
+        passphrase: Zeroizing<Vec<u8>>,
+    },
+    Unlock {
+        passphrase: Zeroizing<Vec<u8>>,
+    },
     Extension {
         name: String,
     },
@@ -71,8 +78,12 @@ impl Request {
                 key_blob: r.read_string()?.to_vec(),
             },
             SSH_AGENTC_REMOVE_ALL_IDENTITIES => Request::RemoveAllIdentities,
-            SSH_AGENTC_LOCK => Request::Lock,
-            SSH_AGENTC_UNLOCK => Request::Unlock,
+            SSH_AGENTC_LOCK => Request::Lock {
+                passphrase: Zeroizing::new(r.read_string()?.to_vec()),
+            },
+            SSH_AGENTC_UNLOCK => Request::Unlock {
+                passphrase: Zeroizing::new(r.read_string()?.to_vec()),
+            },
             SSH_AGENTC_EXTENSION => Request::Extension {
                 name: r.read_utf8()?,
             },

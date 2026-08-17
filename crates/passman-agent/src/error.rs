@@ -21,5 +21,8 @@ pub enum Error {
     Signing(String),
 
     #[error("{0}")]
+    Refused(String),
+
+    #[error("{0}")]
     Io(#[from] std::io::Error),
 }
