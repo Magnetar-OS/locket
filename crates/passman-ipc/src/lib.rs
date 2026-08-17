@@ -30,10 +30,38 @@ use zeroize::Zeroizing;
 /// allocate without bound.
 pub const MAX_PASSPHRASE_LEN: usize = 4096;
 
-/// Reply byte: the vault is now unlocked.
+/// Reply byte: the vault is now unlocked, or the rekey went through.
 pub const REPLY_UNLOCKED: u8 = 1;
 /// Reply byte: the passphrase was refused.
 pub const REPLY_REFUSED: u8 = 0;
+
+/// Marks a request that is not a bare passphrase.
+///
+/// Set in the top bit of the length word. An older daemon reads the length as
+/// an enormous number, exceeds [`MAX_PASSPHRASE_LEN`] and refuses — which is
+/// the right answer for a request it does not understand, and much better than
+/// a shared magic byte that a passphrase could conceivably start with.
+const EXTENDED: u32 = 0x8000_0000;
+
+/// Request opcodes, for the extended form.
+const OP_REKEY: u8 = 1;
+
+/// What arrived over the socket.
+#[derive(Debug)]
+pub enum Request {
+    /// Open the vault with this passphrase.
+    Unlock(Zeroizing<String>),
+    /// The login password changed: re-wrap the vault key under the new one.
+    ///
+    /// Both halves are needed. The new passphrase is what the vault will use;
+    /// the old one is proof that whoever is asking could already open it, so a
+    /// daemon that is already unlocked cannot be told to change the passphrase
+    /// by someone who never knew it.
+    Rekey {
+        old: Zeroizing<String>,
+        new: Zeroizing<String>,
+    },
+}
 
 /// Where the unlock socket lives for a given uid.
 ///
@@ -90,19 +118,86 @@ pub fn encode_request(passphrase: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
     Ok(out)
 }
 
-/// Read one framed passphrase from a stream.
-pub fn read_request<R: Read>(reader: &mut R) -> Result<Zeroizing<String>, Error> {
-    let mut len = [0u8; 4];
-    reader.read_exact(&mut len)?;
-    let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_PASSPHRASE_LEN {
-        return Err(Error::TooLong(len));
+/// Frame a rekey request.
+pub fn encode_rekey(old: &str, new: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
+    for p in [old, new] {
+        if p.len() > MAX_PASSPHRASE_LEN {
+            return Err(Error::TooLong(p.len()));
+        }
+    }
+    let mut body = Zeroizing::new(Vec::with_capacity(9 + old.len() + new.len()));
+    body.push(OP_REKEY);
+    for p in [old, new] {
+        body.extend_from_slice(&(p.len() as u32).to_be_bytes());
+        body.extend_from_slice(p.as_bytes());
     }
 
-    let mut buf = Zeroizing::new(vec![0u8; len]);
-    reader.read_exact(&mut buf)?;
-    let s = std::str::from_utf8(&buf).map_err(|_| Error::Malformed)?;
-    Ok(Zeroizing::new(s.to_owned()))
+    let mut out = Zeroizing::new(Vec::with_capacity(4 + body.len()));
+    out.extend_from_slice(&(EXTENDED | body.len() as u32).to_be_bytes());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Read one request from a stream.
+pub fn read_request<R: Read>(reader: &mut R) -> Result<Request, Error> {
+    let mut len = [0u8; 4];
+    reader.read_exact(&mut len)?;
+    let raw = u32::from_be_bytes(len);
+
+    if raw & EXTENDED == 0 {
+        let len = raw as usize;
+        if len > MAX_PASSPHRASE_LEN {
+            return Err(Error::TooLong(len));
+        }
+        let mut buf = Zeroizing::new(vec![0u8; len]);
+        reader.read_exact(&mut buf)?;
+        let s = std::str::from_utf8(&buf).map_err(|_| Error::Malformed)?;
+        return Ok(Request::Unlock(Zeroizing::new(s.to_owned())));
+    }
+
+    let len = (raw & !EXTENDED) as usize;
+    // Two passphrases, two length words and an opcode.
+    if len > 2 * MAX_PASSPHRASE_LEN + 9 {
+        return Err(Error::TooLong(len));
+    }
+    let mut body = Zeroizing::new(vec![0u8; len]);
+    reader.read_exact(&mut body)?;
+
+    let mut rest = &body[..];
+    let opcode = *rest.first().ok_or(Error::Malformed)?;
+    rest = &rest[1..];
+    if opcode != OP_REKEY {
+        return Err(Error::Malformed);
+    }
+
+    let take = |rest: &mut &[u8]| -> Result<Zeroizing<String>, Error> {
+        let (len, tail) = rest.split_at_checked(4).ok_or(Error::Malformed)?;
+        let len = u32::from_be_bytes(len.try_into().map_err(|_| Error::Malformed)?) as usize;
+        if len > MAX_PASSPHRASE_LEN {
+            return Err(Error::TooLong(len));
+        }
+        let (value, tail) = tail.split_at_checked(len).ok_or(Error::Malformed)?;
+        *rest = tail;
+        let s = std::str::from_utf8(value).map_err(|_| Error::Malformed)?;
+        Ok(Zeroizing::new(s.to_owned()))
+    };
+    let old = take(&mut rest)?;
+    let new = take(&mut rest)?;
+    if !rest.is_empty() {
+        return Err(Error::Malformed);
+    }
+    Ok(Request::Rekey { old, new })
+}
+
+/// Tell the daemon the passphrase changed, and report whether it took.
+///
+/// Fails the same way [`request_unlock`] does when nothing is listening.
+pub fn request_rekey(
+    socket: &std::path::Path,
+    old: &str,
+    new: &str,
+) -> Result<bool, Error> {
+    send(socket, &encode_rekey(old, new)?)
 }
 
 /// Send a passphrase to the daemon and report whether it unlocked.
@@ -110,6 +205,10 @@ pub fn read_request<R: Read>(reader: &mut R) -> Result<Zeroizing<String>, Error>
 /// A missing socket is [`Error::NotListening`] rather than a generic I/O
 /// error, so callers can treat "no daemon" as the ordinary case it is.
 pub fn request_unlock(socket: &std::path::Path, passphrase: &str) -> Result<bool, Error> {
+    send(socket, &encode_request(passphrase)?)
+}
+
+fn send(socket: &std::path::Path, request: &[u8]) -> Result<bool, Error> {
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(socket).map_err(|e| match e.kind() {
@@ -124,7 +223,7 @@ pub fn request_unlock(socket: &std::path::Path, passphrase: &str) -> Result<bool
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
 
-    stream.write_all(&encode_request(passphrase)?)?;
+    stream.write_all(request)?;
     stream.flush()?;
 
     let mut reply = [0u8; 1];
@@ -137,10 +236,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_rekey_request_round_trips() {
+        let encoded = encode_rekey("old one", "new one").unwrap();
+        let mut cursor = std::io::Cursor::new(encoded.to_vec());
+        match read_request(&mut cursor).unwrap() {
+            Request::Rekey { old, new } => {
+                assert_eq!(&*old, "old one");
+                assert_eq!(&*new, "new one");
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unlock_and_a_rekey_cannot_be_confused() {
+        // A passphrase that happens to start with the rekey opcode byte must
+        // still parse as a passphrase: the two are told apart by the length
+        // word's top bit, not by anything inside the payload.
+        let encoded = encode_request("\u{1}some passphrase").unwrap();
+        let mut cursor = std::io::Cursor::new(encoded.to_vec());
+        match read_request(&mut cursor).unwrap() {
+            Request::Unlock(p) => assert_eq!(&*p, "\u{1}some passphrase"),
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_older_daemon_refuses_a_rekey_rather_than_misreading_it() {
+        // The extended marker lives in the top bit of the length word, so a
+        // daemon that predates rekeying sees an impossible length and bails.
+        let encoded = encode_rekey("a", "b").unwrap();
+        let len = u32::from_be_bytes(encoded[..4].try_into().unwrap()) as usize;
+        assert!(
+            len > MAX_PASSPHRASE_LEN,
+            "an old daemon would have tried to read this as a passphrase"
+        );
+    }
+
+    #[test]
+    fn a_truncated_rekey_is_rejected() {
+        let encoded = encode_rekey("old", "new").unwrap();
+        for cut in [5, 8, encoded.len() - 1] {
+            let mut cursor = std::io::Cursor::new(encoded[..cut].to_vec());
+            assert!(
+                read_request(&mut cursor).is_err(),
+                "accepted a rekey truncated to {cut} bytes"
+            );
+        }
+    }
+
+    #[test]
     fn framing_roundtrips() {
         let encoded = encode_request("correct horse").unwrap();
         let mut cursor = std::io::Cursor::new(encoded.to_vec());
-        assert_eq!(&*read_request(&mut cursor).unwrap(), "correct horse");
+        assert!(matches!(read_request(&mut cursor).unwrap(), Request::Unlock(p) if &*p == "correct horse"));
     }
 
     #[test]
@@ -148,7 +297,7 @@ mod tests {
         let encoded = encode_request("").unwrap();
         assert_eq!(&encoded[..], &[0, 0, 0, 0]);
         let mut cursor = std::io::Cursor::new(encoded.to_vec());
-        assert_eq!(&**read_request(&mut cursor).unwrap(), "");
+        assert!(matches!(read_request(&mut cursor).unwrap(), Request::Unlock(p) if p.is_empty()));
     }
 
     #[test]
