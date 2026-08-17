@@ -137,7 +137,7 @@ impl Host {
         Response::Matches { items }
     }
 
-    async fn get(&self, id: &str) -> Response {
+    async fn get(&self, id: &str, url: &str) -> Response {
         // The id is an object path the extension got from `search`; validate
         // it rather than trusting it to be well formed.
         let Ok(path) = OwnedObjectPath::try_from(id) else {
@@ -150,10 +150,43 @@ impl Host {
                 message: "no such item".into(),
             };
         };
+
+        // Re-check the origin at the moment of release, against the page the
+        // secret is actually going into. The id is not an authorisation: the
+        // extension is assumed hostile, and a tab can navigate between the
+        // search and the click.
+        let attributes = item.attributes().await.unwrap_or_default();
+        let label = item.label().await.unwrap_or_default();
+        let allowed = [
+            attributes.get("url").map(String::as_str),
+            attributes.get("uri").map(String::as_str),
+            attributes.get("service").map(String::as_str),
+            attributes.get("host").map(String::as_str),
+            Some(label.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|stored| protocol::origin_matches(stored, url));
+        if !allowed {
+            tracing::warn!("refused a secret for an origin it is not saved for");
+            return Response::Error {
+                message: "that entry is not saved for this site".into(),
+            };
+        }
         match item.get_secret(&self.session).await {
-            Ok((secret,)) => Response::Secret {
-                id: id.to_owned(),
-                password: String::from_utf8_lossy(&secret.value).into_owned(),
+            Ok((secret,)) => match String::from_utf8(secret.value) {
+                Ok(password) => Response::Secret {
+                    id: id.to_owned(),
+                    password,
+                },
+                // A lossy conversion here would type replacement characters
+                // into the form and look like a wrong password forever. Some
+                // secrets genuinely are binary — portal application keys are
+                // 64 random bytes — and none of those belong in a login form.
+                Err(_) => Response::Error {
+                    message: "that entry's secret is not text, so it cannot be typed into a page"
+                        .into(),
+                },
             },
             Err(e) => Response::Error {
                 message: format!("could not read the secret: {e}"),
@@ -226,7 +259,7 @@ async fn main() {
                     } else {
                         match other {
                             Request::Search { url } => host.search(&url).await,
-                            Request::Get { id } => host.get(&id).await,
+                            Request::Get { id, url } => host.get(&id, &url).await,
                             Request::Status => unreachable!("handled above"),
                         }
                     }

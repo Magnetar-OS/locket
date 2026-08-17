@@ -44,7 +44,13 @@ pub enum Request {
     /// Credentials whose stored URL matches this origin. Metadata only.
     Search { url: String },
     /// One secret, by an id previously returned from `Search`.
-    Get { id: String },
+    ///
+    /// `url` is the page the secret is about to be typed into, and the host
+    /// checks the item against it before releasing anything. Without that the
+    /// id alone would be the whole authorisation: a tab that navigated between
+    /// the search and the click would be filled with another site's password,
+    /// which is the exact failure autofill is supposed to prevent.
+    Get { id: String, url: String },
 }
 
 /// What the host answers.
@@ -188,8 +194,16 @@ mod tests {
     fn requests_parse_from_the_wire_shape_the_extension_sends() {
         let search: Request = serde_json::from_str(r#"{"type":"search","url":"https://github.com/login"}"#).unwrap();
         assert_eq!(search, Request::Search { url: "https://github.com/login".into() });
-        let get: Request = serde_json::from_str(r#"{"type":"get","id":"abc"}"#).unwrap();
-        assert_eq!(get, Request::Get { id: "abc".into() });
+        let get: Request =
+            serde_json::from_str(r#"{"type":"get","id":"abc","url":"https://github.com/"}"#)
+                .unwrap();
+        assert_eq!(
+            get,
+            Request::Get {
+                id: "abc".into(),
+                url: "https://github.com/".into()
+            }
+        );
     }
 
     #[test]
@@ -213,6 +227,27 @@ mod tests {
         // leak to the parent.
         assert!(!origin_matches("mail.example.com", "example.com"));
         assert!(!origin_matches("", "example.com"));
+    }
+
+    #[test]
+    fn a_get_request_names_the_page_the_secret_is_going_into() {
+        // The id is not the authorisation; the origin at release time is.
+        let json = r#"{"type":"get","id":"/org/freedesktop/secrets/collection/c1/i2","url":"https://example.com/login"}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Get { id, url } => {
+                assert!(id.ends_with("/i2"));
+                assert_eq!(url, "https://example.com/login");
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_get_without_an_origin_is_rejected_outright() {
+        // An older extension that omits it must fail loudly rather than be
+        // served a secret with no origin check at all.
+        let json = r#"{"type":"get","id":"/org/freedesktop/secrets/collection/c1/i2"}"#;
+        assert!(serde_json::from_str::<Request>(json).is_err());
     }
 
     #[test]

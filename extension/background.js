@@ -11,6 +11,14 @@ async function ask(message) {
   }
 }
 
+const origin = (u) => {
+  try {
+    return new URL(u).origin;
+  } catch {
+    return null;
+  }
+};
+
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   (async () => {
     switch (msg.type) {
@@ -21,9 +29,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
         reply(await ask({ type: "search", url: msg.url }));
         break;
       case "fill": {
+        // Where is that tab *now*? The popup listed matches for the page as it
+        // was when it opened; a page that navigated in between must not be
+        // handed the previous origin's password. The host checks this too —
+        // this side cannot be trusted to — but checking here as well means the
+        // secret is never even requested for the wrong site.
+        const tab = await chrome.tabs.get(msg.tabId).catch(() => null);
+        if (!tab || !tab.url || origin(tab.url) !== origin(msg.url)) {
+          reply({ type: "error", message: "That tab is no longer on the page you picked." });
+          break;
+        }
+
         // Fetch the secret and inject it in one step, so it never sits in the
         // popup's memory or crosses more boundaries than necessary.
-        const secret = await ask({ type: "get", id: msg.id });
+        const secret = await ask({ type: "get", id: msg.id, url: tab.url });
         if (secret.type !== "secret") {
           reply(secret);
           break;

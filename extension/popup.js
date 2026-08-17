@@ -31,7 +31,15 @@ const send = (m) => new Promise((r) => chrome.runtime.sendMessage(m, r));
     const fill = document.createElement("button");
     fill.textContent = "Fill";
     fill.onclick = async () => {
-      const r = await send({ type: "fill", id: item.id, username: item.username, tabId: tab.id });
+      // Send the URL the search was done for, so the background script can
+      // notice if the tab has navigated since.
+      const r = await send({
+        type: "fill",
+        id: item.id,
+        username: item.username,
+        tabId: tab.id,
+        url: tab.url,
+      });
       if (r.type === "ok") window.close();
       else out.textContent = r.message || "Could not fill.";
     };
