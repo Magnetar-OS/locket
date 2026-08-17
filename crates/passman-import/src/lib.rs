@@ -63,6 +63,9 @@ pub struct ImportSummary {
     pub skipped_duplicate: usize,
     /// Could not be read or decrypted.
     pub skipped_unreadable: usize,
+    /// Things the person who ran this needs to know about what just landed —
+    /// not errors, and not derivable from the counts. Shown by both frontends.
+    pub notes: Vec<String>,
 }
 
 impl std::fmt::Display for ImportSummary {

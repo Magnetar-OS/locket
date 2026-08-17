@@ -39,6 +39,12 @@ const NOT_KEYS: &[&str] = &[
     "rc",
 ];
 
+/// The two algorithms whose "private" key file holds no signing key.
+const SECURITY_KEY_ALGORITHMS: &[&str] = &[
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyFile {
     pub path: PathBuf,
@@ -50,6 +56,28 @@ pub struct KeyFile {
     pub comment: Option<String>,
     /// Whether the private key is itself passphrase-protected.
     pub encrypted: bool,
+    /// The SSH algorithm name, for keys in OpenSSH's own format.
+    pub algorithm: Option<String>,
+    /// Contents of `<name>-cert.pub`, if the key has been issued a
+    /// certificate. Public data, but useless to the agent unless it travels
+    /// with the key: a host configured for certificate authentication will not
+    /// accept the bare key.
+    pub certificate: Option<String>,
+}
+
+impl KeyFile {
+    /// Whether the signing key lives on a security key rather than in this
+    /// file.
+    ///
+    /// It matters for what an import *means*: for every other algorithm the
+    /// file is the key, and copying it into the vault is a backup. For these
+    /// the file is a credential handle, and the thing that signs is a piece of
+    /// hardware that cannot be copied at all.
+    pub fn is_token_bound(&self) -> bool {
+        self.algorithm
+            .as_deref()
+            .is_some_and(|a| SECURITY_KEY_ALGORITHMS.contains(&a))
+    }
 }
 
 /// `~/.ssh`, if this user has one.
@@ -103,6 +131,50 @@ fn base64_decode(s: &str) -> std::result::Result<Vec<u8>, ()> {
     base64ct::Base64::decode_vec(s.trim()).map_err(|_| ())
 }
 
+/// The key's algorithm name, read out of an OpenSSH-format private key.
+///
+/// The public half of an `openssh-key-v1` file is in the clear even when the
+/// private half is encrypted, so this works on keys we cannot open — which is
+/// the point: whether a key needs hardware has to be answerable before anyone
+/// types a passphrase.
+///
+/// Returns `None` for the older PEM formats, which name the algorithm nowhere
+/// useful. None of those can be security keys, so nothing downstream cares.
+pub fn algorithm_of(text: &str) -> Option<String> {
+    if !text.contains("BEGIN OPENSSH PRIVATE KEY") {
+        return None;
+    }
+    let body: String = text
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("");
+    let bytes = base64_decode(&body).ok()?;
+
+    const MAGIC: &[u8] = b"openssh-key-v1\0";
+    let mut rest = bytes.strip_prefix(MAGIC)?;
+
+    // string ciphername, string kdfname, string kdfoptions, uint32 nkeys,
+    // then the first public key — which itself starts with its algorithm.
+    let take = |rest: &mut &[u8]| -> Option<Vec<u8>> {
+        let (len, tail) = rest.split_at_checked(4)?;
+        let len = u32::from_be_bytes(len.try_into().ok()?) as usize;
+        let (value, tail) = tail.split_at_checked(len)?;
+        *rest = tail;
+        Some(value.to_vec())
+    };
+
+    take(&mut rest)?; // ciphername
+    take(&mut rest)?; // kdfname
+    take(&mut rest)?; // kdfoptions
+    let (_nkeys, tail) = rest.split_at_checked(4)?;
+    rest = tail;
+    let public = take(&mut rest)?;
+
+    let algorithm = take(&mut public.as_slice())?;
+    String::from_utf8(algorithm).ok()
+}
+
 /// The trailing comment of a public key line, if it has one.
 fn comment_of(public: &str) -> Option<String> {
     let mut parts = public.split_whitespace();
@@ -148,9 +220,15 @@ pub fn scan(dir: &Path) -> Result<Vec<KeyFile>> {
             .ok()
             .or_else(|| std::fs::read_to_string(format!("{}.pub", path.display())).ok());
         let comment = public.as_deref().and_then(comment_of);
+        // OpenSSH's own naming: `id_ed25519` -> `id_ed25519-cert.pub`.
+        let certificate = std::fs::read_to_string(format!("{}-cert.pub", path.display()))
+            .ok()
+            .filter(|c| c.contains("-cert-v01@openssh.com"));
 
         out.push(KeyFile {
             encrypted: is_encrypted(&text),
+            algorithm: algorithm_of(&text),
+            certificate,
             path,
             name,
             public,
@@ -186,6 +264,13 @@ pub fn item_for(key: &KeyFile, pem: &str) -> Item {
             comment,
         ));
     }
+    if let Some(certificate) = &key.certificate {
+        item = item.with_field(Field::new(
+            field_names::CERTIFICATE,
+            FieldKind::Text,
+            certificate.trim(),
+        ));
+    }
 
     item.attributes.insert(
         "ssh:path".to_owned(),
@@ -194,6 +279,28 @@ pub fn item_for(key: &KeyFile, pem: &str) -> Item {
     item.attributes
         .insert("ssh:encrypted".to_owned(), key.encrypted.to_string());
     item.tags = vec!["ssh".to_owned()];
+
+    if let Some(algorithm) = &key.algorithm {
+        item.attributes
+            .insert("ssh:algorithm".to_owned(), algorithm.clone());
+    }
+    if key.is_token_bound() {
+        item.attributes
+            .insert("ssh:token-bound".to_owned(), "true".to_owned());
+        item.tags.push("security-key".to_owned());
+        // Said on the item, not only at import time: months later the vault is
+        // the only thing anyone reads, and "I have a copy of the key" is the
+        // wrong conclusion to leave lying around.
+        item = item.with_field(Field::new(
+            field_names::NOTES,
+            FieldKind::Note,
+            "Signing happens on the security key this was created with. What is \
+             stored here is a credential handle, not a private key, so this item \
+             is not a backup: lose the token and no copy of this file will \
+             authenticate anywhere. passman's agent serves it by asking the \
+             token for a signature, which needs the key plugged in and touched.",
+        ));
+    }
     item
 }
 
@@ -211,6 +318,7 @@ pub fn import_dir(
     let keys = scan(dir)?;
     let target = crate::target_collection(vault, into_collection.unwrap_or("SSH"));
     let mut summary = ImportSummary::default();
+    let mut token_bound_names = Vec::new();
 
     for key in &keys {
         let pem = match std::fs::read_to_string(&key.path) {
@@ -226,10 +334,24 @@ pub fn import_dir(
             summary.skipped_duplicate += 1;
             continue;
         }
+        let token_bound = key.is_token_bound();
         vault
             .add_item(target, item)
             .map_err(|e| Error::Vault(e.to_string()))?;
         summary.imported += 1;
+        if token_bound {
+            token_bound_names.push(key.name.clone());
+        }
+    }
+
+    if !token_bound_names.is_empty() {
+        summary.notes.push(format!(
+            "{} of these sign on a security key: {}. The files hold credential \
+             handles rather than private keys, so importing them is not a backup — \
+             they authenticate only with the token present.",
+            token_bound_names.len(),
+            token_bound_names.join(", ")
+        ));
     }
 
     summary.collections = 1;
@@ -240,20 +362,129 @@ pub fn import_dir(
 mod tests {
     use super::*;
 
-    // A real, unencrypted ed25519 key generated for this test only. It
-    // authenticates to nothing.
+    // A real, complete ed25519 key, generated by `ssh-keygen` for this test
+    // only; it authenticates to nothing. Complete matters: the body is
+    // base64-decoded to read the cipher name and the algorithm, so a trimmed
+    // key would exercise the error path instead of the one that parses.
     const UNENCRYPTED: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gt\n\
-ZWQyNTUxOQAAACBHV2VgMPXhbGqvBBOa0Zk4bZLPDDgAxSCF/TFxL7bTxwAAAJj0mDJ29Jgy\n\
-dgAAAAtzc2gtZWQyNTUxOQAAACBHV2VgMPXhbGqvBBOa0Zk4bZLPDDgAxSCF/TFxL7bTxw\n\
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
+QyNTUxOQAAACDgaoI8ORiYR/i24g/2tEjxqVhRFt+IkxWNAfPujegZoQAAAJCX0tRml9LU\n\
+ZgAAAAtzc2gtZWQyNTUxOQAAACDgaoI8ORiYR/i24g/2tEjxqVhRFt+IkxWNAfPujegZoQ\n\
+AAAECWScSjnOg1c1iAdoIlggSLB8GJ6D3HuO/MFiszghHbIeBqgjw5GJhH+LbiD/a0SPGp\n\
+WFEW34iTFY0B8+6N6BmhAAAADGFkYUBsb3ZlbGFjZQE=\n\
 -----END OPENSSH PRIVATE KEY-----\n";
+
+    const UNENCRYPTED_PUB: &str = "ssh-ed25519 \
+AAAAC3NzaC1lZDI1NTE5AAAAIOBqgjw5GJhH+LbiD/a0SPGpWFEW34iTFY0B8+6N6Bmh \
+ada@lovelace\n";
+
+    // An `sk-ssh-ed25519@openssh.com` key file. The credential handle points
+    // at no token that exists, so it signs nothing — but the file itself is
+    // the real format: `ssh-keygen -y` reads it back and `ssh-keygen -l`
+    // reports it as ED25519-SK.
+    const SECURITY_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAASgAAABpzay1zc2\n\
+gtZWQyNTUxOUBvcGVuc3NoLmNvbQAAACAqEJtAlJAHSJbF90/auvjU/tSJCrKnOedazI1o\n\
+2krUxgAAAARzc2g6AAAAgAYeWAkGHlgJAAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY2\n\
+9tAAAAICoQm0CUkAdIlsX3T9q6+NT+1IkKsqc551rMjWjaStTGAAAABHNzaDoBAAAAEWNy\n\
+ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
+-----END OPENSSH PRIVATE KEY-----\n";
+
+    #[test]
+    fn the_algorithm_is_read_out_of_an_openssh_key() {
+        assert_eq!(algorithm_of(UNENCRYPTED).as_deref(), Some("ssh-ed25519"));
+        assert_eq!(
+            algorithm_of(SECURITY_KEY).as_deref(),
+            Some("sk-ssh-ed25519@openssh.com")
+        );
+        // The PEM formats name it nowhere useful, and none of them are sk keys.
+        assert_eq!(algorithm_of("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n"), None);
+        assert_eq!(algorithm_of("not a key at all"), None);
+    }
+
+    #[test]
+    fn truncated_key_data_does_not_panic_the_scanner() {
+        let body: String = SECURITY_KEY
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        for cut in [4, 20, 60, body.len() / 2] {
+            let mangled = format!(
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+                &body[..cut]
+            );
+            let _ = algorithm_of(&mangled);
+        }
+    }
+
+    #[test]
+    fn a_security_key_is_imported_but_labelled_as_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("id_ed25519_sk"), SECURITY_KEY).unwrap();
+
+        let found = scan(dir.path()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].is_token_bound());
+
+        let item = item_for(&found[0], SECURITY_KEY);
+        assert_eq!(item.attributes.get("ssh:token-bound").map(String::as_str), Some("true"));
+        assert_eq!(
+            item.attributes.get("ssh:algorithm").map(String::as_str),
+            Some("sk-ssh-ed25519@openssh.com")
+        );
+        assert!(item.tags.iter().any(|t| t == "security-key"));
+        let note = item
+            .field_value(field_names::NOTES)
+            .expect("no note explaining what this item is");
+        assert!(note.contains("not a backup"), "the note buries the lede: {note}");
+    }
+
+    #[test]
+    fn an_ordinary_key_gains_no_security_key_marks() {
+        let dir = tree();
+        let found = scan(dir.path()).unwrap();
+        let key = found.iter().find(|k| k.name == "id_ed25519").unwrap();
+        assert!(!key.is_token_bound());
+
+        let item = item_for(key, UNENCRYPTED);
+        assert!(!item.attributes.contains_key("ssh:token-bound"));
+        assert!(item.field_value(field_names::NOTES).is_none());
+    }
+
+    #[test]
+    fn importing_a_security_key_says_so_in_the_summary() {
+        use passman_core::{Vault, crypto::KdfParams};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("id_ed25519_sk"), SECURITY_KEY).unwrap();
+        std::fs::write(dir.path().join("id_ed25519"), UNENCRYPTED).unwrap();
+
+        let vault_dir = tempfile::tempdir().unwrap();
+        let mut vault = Vault::create(
+            vault_dir.path().join("v.vault"),
+            "pw",
+            KdfParams::insecure_fast(),
+        )
+        .unwrap();
+
+        let summary = import_dir(&mut vault, dir.path(), None).unwrap();
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.notes.len(), 1);
+        assert!(summary.notes[0].contains("id_ed25519_sk"));
+        assert!(
+            !summary.notes[0].contains("id_ed25519,"),
+            "the ordinary key was reported as token-bound: {}",
+            summary.notes[0]
+        );
+    }
 
     fn tree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("id_ed25519"), UNENCRYPTED).unwrap();
         std::fs::write(
             dir.path().join("id_ed25519.pub"),
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEdXZWAw9eFsaq8EE5rRmTg ada@lovelace\n",
+            UNENCRYPTED_PUB,
         )
         .unwrap();
         // Things that live in ~/.ssh but are not keys.

@@ -61,6 +61,45 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         length: usize,
     },
+    /// Change an item in place.
+    ///
+    /// Every part is optional; what you do not name is left alone. This is the
+    /// recovery-shaped counterpart to the GUI editor — enough to fix a wrong
+    /// username or rotate a password from a terminal, without a mouse.
+    Edit {
+        /// Label or id, matched case-insensitively.
+        query: String,
+        /// New label.
+        #[arg(long)]
+        label: Option<String>,
+        /// Replace the primary secret. Prompts unless --generate is given.
+        #[arg(long)]
+        secret: bool,
+        /// Generate the new secret instead of prompting for it.
+        #[arg(long, requires = "secret")]
+        generate: bool,
+        #[arg(long, default_value_t = 20, requires = "generate")]
+        length: usize,
+        /// Set a field: `--set username=ada`. Repeatable.
+        #[arg(long, value_name = "NAME=VALUE")]
+        set: Vec<String>,
+        /// Remove a field by name. Repeatable.
+        #[arg(long, value_name = "NAME")]
+        unset: Vec<String>,
+        /// Mark or unmark as a favourite.
+        #[arg(long)]
+        favorite: Option<bool>,
+    },
+
+    /// Delete an item.
+    Rm {
+        /// Label or id, matched case-insensitively.
+        query: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+
     /// List the vault's unlock factors.
     Slots,
     /// Import every readable secret from a running Secret Service.
@@ -175,6 +214,33 @@ enum Command {
         #[arg(long)]
         into: Option<String>,
     },
+    /// Change the vault's passphrase.
+    ///
+    /// Rewraps the data-encryption key under a key derived from the new
+    /// passphrase; the vault body is not re-encrypted, so this is fast even on
+    /// a large vault. Every other unlock factor keeps working.
+    Passwd {
+        /// Read the new passphrase from this environment variable instead of
+        /// the tty.
+        #[arg(long, value_name = "VAR")]
+        new_passphrase_env: Option<String>,
+    },
+
+    /// Write every item, secrets included, to a plaintext file.
+    ///
+    /// The way *out*. A password manager you cannot leave is a trap, and the
+    /// only honest export is the one that includes the secrets — so this
+    /// writes 0600 and tells you to delete it, exactly as the importers say
+    /// about the files they read.
+    Export {
+        /// Where to write. Refused if it already exists.
+        file: PathBuf,
+        /// Required, so nobody produces a plaintext copy of every credential
+        /// they own by tab-completing their way through `--help`.
+        #[arg(long)]
+        i_understand_this_is_plaintext: bool,
+    },
+
     /// Generate a password without storing it.
     Generate {
         #[arg(long, default_value_t = 20)]
@@ -335,6 +401,105 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Command::Edit {
+            query,
+            label,
+            secret,
+            generate,
+            length,
+            set,
+            unset,
+            favorite,
+        } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let id = find_item(&vault, &query)?;
+
+            // Read the new secret before taking the mutable borrow, so a
+            // mistyped prompt cannot leave a half-applied edit behind.
+            let new_secret = if secret {
+                if generate {
+                    let recipe = PasswordRecipe {
+                        length,
+                        ..Default::default()
+                    };
+                    let pw = generator::password(&recipe)?;
+                    eprintln!("generated a {length}-character secret");
+                    Some(pw.expose().to_owned())
+                } else {
+                    Some(rpassword::prompt_password("New secret: ")?)
+                }
+            } else {
+                None
+            };
+
+            let mut fields = Vec::new();
+            for pair in &set {
+                let (name, value) = pair
+                    .split_once('=')
+                    .ok_or_else(|| format!("--set wants NAME=VALUE, got `{pair}`"))?;
+                if name.is_empty() {
+                    return Err("--set needs a field name".into());
+                }
+                // Anything that looks like a credential is stored masked, the
+                // same way the importers classify what they read.
+                let kind = if passman_import::dotenv::is_secret(name, value) {
+                    passman_core::model::FieldKind::Secret
+                } else {
+                    passman_core::model::FieldKind::Text
+                };
+                fields.push(Field::new(name, kind, value));
+            }
+
+            let item = vault
+                .item_mut(id)
+                .ok_or("the item vanished between finding and editing it")?;
+            if let Some(label) = &label {
+                item.label = label.clone();
+            }
+            if let Some(value) = new_secret {
+                item.secret = passman_core::secret::SecretString::new(value);
+            }
+            for field in fields {
+                item.set_field(field);
+            }
+            for name in &unset {
+                item.fields.retain(|f| &f.name != name);
+            }
+            if let Some(favorite) = favorite {
+                item.favorite = favorite;
+            }
+            item.touch();
+            let label = item.label.clone();
+
+            vault.save()?;
+            println!("updated {label}");
+        }
+
+        Command::Rm { query, yes } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let id = find_item(&vault, &query)?;
+            let label = vault
+                .item(id)
+                .map(|i| i.label.clone())
+                .unwrap_or_else(|| query.clone());
+
+            if !yes {
+                eprint!("Delete `{label}`? This cannot be undone. [y/N] ");
+                use std::io::Write as _;
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    eprintln!("left alone");
+                    return Ok(());
+                }
+            }
+
+            vault.remove_item(id).ok_or("could not remove the item")?;
+            vault.save()?;
+            println!("deleted {label}");
+        }
+
         Command::Slots => {
             let vault = Vault::open(&path, &passphrase)?;
             for slot in vault.slots() {
@@ -456,6 +621,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary = passman_import::ssh::import_dir(&mut vault, &dir, into.as_deref())?;
             vault.save()?;
             println!("imported {summary} from {}", dir.display());
+            for note in &summary.notes {
+                eprintln!("\n{note}");
+            }
             eprintln!(
                 "\nYour key files are untouched. Point SSH_AUTH_SOCK at passman's agent \
                  and confirm `ssh-add -l` lists them before removing anything."
@@ -489,6 +657,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             vault.save()?;
             println!("imported {summary} from {}", file.display());
             eprintln!("\nNow delete {} — it is a plaintext copy of every seed it held.", file.display());
+        }
+
+        Command::Passwd { new_passphrase_env } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let new = match &new_passphrase_env {
+                Some(var) => std::env::var(var)
+                    .map_err(|_| format!("environment variable `{var}` is not set"))?,
+                None => {
+                    let first = rpassword::prompt_password("New passphrase: ")?;
+                    let again = rpassword::prompt_password("Again: ")?;
+                    if first != again {
+                        return Err("the two passphrases do not match".into());
+                    }
+                    first
+                }
+            };
+            if new.is_empty() {
+                return Err("an empty passphrase is not a passphrase".into());
+            }
+            vault.change_passphrase(&new, KdfParams::default())?;
+            vault.save()?;
+            println!("passphrase changed for {}", path.display());
+            let others = vault.slots().len().saturating_sub(1);
+            if others > 0 {
+                eprintln!("{others} other unlock factor(s) still open this vault.");
+            }
+        }
+
+        Command::Export {
+            file,
+            i_understand_this_is_plaintext,
+        } => {
+            if !i_understand_this_is_plaintext {
+                return Err(
+                    "refusing to write plaintext secrets without \
+                     --i-understand-this-is-plaintext"
+                        .into(),
+                );
+            }
+            if file.exists() {
+                return Err(format!("{} already exists", file.display()).into());
+            }
+            let vault = Vault::open(&path, &passphrase)?;
+            let count = export_to(&vault, &file)?;
+            println!("exported {count} item(s) to {}", file.display());
+            eprintln!(
+                "\n{} now holds every secret in the vault in the clear. Delete it \
+                 once you have moved them.",
+                file.display()
+            );
         }
 
         Command::Add {
@@ -528,6 +746,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Resolve a label or id to exactly one item.
+///
+/// Exact matches first, so an item called `github` is reachable even when
+/// three others merely mention it. An ambiguous substring is an error rather
+/// than a guess: the commands using this delete and overwrite things.
+fn find_item(vault: &Vault, query: &str) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
+    let needle = query.to_lowercase();
+
+    let exact: Vec<_> = vault
+        .data()
+        .all_items()
+        .map(|(_, i)| i)
+        .filter(|i| i.label.to_lowercase() == needle || i.id.to_string() == needle)
+        .collect();
+    if exact.len() == 1 {
+        return Ok(exact[0].id);
+    }
+    if exact.len() > 1 {
+        return Err(format!(
+            "`{query}` matches {} items exactly; use the id instead",
+            exact.len()
+        )
+        .into());
+    }
+
+    let loose: Vec<_> = vault
+        .data()
+        .all_items()
+        .map(|(_, i)| i)
+        .filter(|i| i.matches(query))
+        .collect();
+    match loose.len() {
+        0 => Err(format!("no item matching `{query}`").into()),
+        1 => Ok(loose[0].id),
+        _ => {
+            // Printed rather than folded into the error, because `main` shows
+            // errors through `Debug` and a multi-line one comes out with
+            // literal `\n` in it.
+            eprintln!("`{query}` matches {} items:", loose.len());
+            for item in loose.iter().take(10) {
+                eprintln!("  {}  {}", item.id, item.label);
+            }
+            if loose.len() > 10 {
+                eprintln!("  … and {} more", loose.len() - 10);
+            }
+            Err("be more specific, or use one of those ids".into())
+        }
+    }
+}
+
+/// Write the whole vault out as JSON, secrets included.
+///
+/// JSON rather than CSV because CSV cannot represent an item with arbitrary
+/// extra fields without either losing them or inventing a column per field —
+/// and losing them silently is exactly the failure this command exists to
+/// avoid. Created 0600 before anything is written to it.
+fn export_to(vault: &Vault, path: &std::path::Path) -> Result<usize, Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+
+    let mut items = Vec::new();
+    for (collection, item) in vault.data().all_items() {
+        items.push(serde_json::json!({
+            "collection": collection.label,
+            "id": item.id,
+            "kind": item.kind,
+            "label": item.label,
+            "secret": item.secret.expose(),
+            "attributes": item.attributes,
+            "tags": item.tags,
+            "favorite": item.favorite,
+            "fields": item.fields.iter().map(|f| serde_json::json!({
+                "name": f.name,
+                "kind": f.kind,
+                "value": f.value.expose(),
+            })).collect::<Vec<_>>(),
+        }));
+    }
+    let count = items.len();
+
+    let document = serde_json::json!({
+        "format": "passman-export-v1",
+        "items": items,
+    });
+
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(&serde_json::to_vec_pretty(&document)?)?;
+    file.sync_all()?;
+    Ok(count)
 }
 
 /// CLI spelling of [`passman_import::dotenv::Grouping`].
