@@ -1,0 +1,34 @@
+[package]
+name = "locket-daemon"
+description = "locket session daemon: holds the unlocked vault, serves D-Bus and the SSH agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "locketd"
+path = "src/main.rs"
+
+[features]
+# Passes through to locket-agent: serve `sk-` SSH keys from a security key.
+default = ["fido"]
+fido = ["locket-agent/fido"]
+
+[dependencies]
+locket-core.workspace = true
+locket-secret.workspace = true
+locket-agent = { path = "../locket-agent", default-features = false }
+zbus.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+uuid.workspace = true
+clap.workspace = true
+dirs.workspace = true
+rpassword = "7"

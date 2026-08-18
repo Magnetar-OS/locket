@@ -1,8 +1,8 @@
 {
-  "name": "io.github.idominikos.passman",
-  "description": "passman native messaging host",
+  "name": "io.github.idominikos.locket",
+  "description": "locket native messaging host",
   "path": "@HOST_PATH@",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://@EXTENSION_ID@/"],
-  "allowed_extensions": ["passman@idominikos.github.io"]
+  "allowed_extensions": ["locket@idominikos.github.io"]
 }

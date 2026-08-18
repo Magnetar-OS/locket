@@ -38,11 +38,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --workspace --exclude passman-cosmic --exclude passman-applet
+        run: cargo build --workspace --exclude locket-cosmic --exclude locket-applet
       - name: Test
-        run: cargo test --workspace --exclude passman-cosmic --exclude passman-applet
+        run: cargo test --workspace --exclude locket-cosmic --exclude locket-applet
       - name: Clippy
-        run: cargo clippy --workspace --exclude passman-cosmic --exclude passman-applet --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude locket-cosmic --exclude locket-applet --all-targets -- -D warnings
 
   # The GUI and the panel applet pull in libcosmic, and with it wayland, xkb and
   # a font stack. Built but not tested: the tests there drive state machines,
@@ -62,8 +62,8 @@ jobs:
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p passman-cosmic -p passman-applet
-      - run: cargo test -p passman-cosmic -p passman-applet
+      - run: cargo build -p locket-cosmic -p locket-applet
+      - run: cargo test -p locket-cosmic -p locket-applet
 
   # Cheap checks that catch the things nobody notices until a packager does.
   packaging:
@@ -75,8 +75,8 @@ jobs:
       - name: AppStream metainfo
         # --no-net because the URLs it wants to reach are this repository, which
         # a fork or a pre-publication branch will not have.
-        run: appstreamcli validate --no-net res/io.github.idominikos.Passman.metainfo.xml
+        run: appstreamcli validate --no-net res/io.github.idominikos.Locket.metainfo.xml
       - name: Desktop entries
         run: desktop-file-validate res/*.desktop
       - name: Installer script
-        run: shellcheck -S warning scripts/passman-setup scripts/passman-reimport-keyring
+        run: shellcheck -S warning scripts/locket-setup scripts/locket-reimport-keyring

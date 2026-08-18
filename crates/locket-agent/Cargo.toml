@@ -1,0 +1,33 @@
+[package]
+name = "locket-agent"
+description = "SSH agent protocol implementation backed by a locket vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+# The token backend needs hidapi through ctap-hid-fido2. On by default so a
+# stock build serves `sk-` keys; without it those identities are skipped rather
+# than advertised and left unsignable.
+default = ["fido"]
+fido = ["dep:locket-fido"]
+
+[dependencies]
+locket-core.workspace = true
+locket-fido = { path = "../locket-fido", optional = true }
+ssh-key.workspace = true
+rsa.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+signature.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+subtle.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,27 @@
+[package]
+name = "locket-nmh"
+description = "Native messaging host: lets a browser extension reach the locket vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "locket-native-host"
+path = "src/main.rs"
+
+[dependencies]
+locket-secret.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+url.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,27 @@
+[package]
+name = "locket-cli"
+description = "Command line interface for locket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "locket-cli"
+path = "src/main.rs"
+
+[dependencies]
+locket-core.workspace = true
+locket-secret.workspace = true
+locket-import = { path = "../locket-import" }
+tokio.workspace = true
+zbus.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+uuid.workspace = true
+rpassword = "7"

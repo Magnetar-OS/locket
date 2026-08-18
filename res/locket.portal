@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.locket
+Interfaces=org.freedesktop.impl.portal.Secret;
+UseIn=COSMIC;GNOME;

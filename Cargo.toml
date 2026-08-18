@@ -1,33 +1,33 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/passman-core",
-    "crates/passman-secret",
-    "crates/passman-agent",
-    "crates/passman-daemon",
-    "crates/passman-cli",
-    "crates/passman-cosmic",
-    "crates/passman-applet",
-    "crates/passman-tpm",
-    "crates/passman-fido",
-    "crates/passman-import",
-    "crates/passman-ipc",
-    "crates/passman-pam",
-    "crates/passman-nmh",
+    "crates/locket-core",
+    "crates/locket-secret",
+    "crates/locket-agent",
+    "crates/locket-daemon",
+    "crates/locket-cli",
+    "crates/locket-cosmic",
+    "crates/locket-applet",
+    "crates/locket-tpm",
+    "crates/locket-fido",
+    "crates/locket-import",
+    "crates/locket-ipc",
+    "crates/locket-pam",
+    "crates/locket-nmh",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/idominikos/passman"
+repository = "https://github.com/entro314-labs/locket"
 
 [workspace.dependencies]
-passman-core = { path = "crates/passman-core" }
-passman-secret = { path = "crates/passman-secret" }
-passman-import = { path = "crates/passman-import" }
-passman-agent = { path = "crates/passman-agent" }
+locket-core = { path = "crates/locket-core" }
+locket-secret = { path = "crates/locket-secret" }
+locket-import = { path = "crates/locket-import" }
+locket-agent = { path = "crates/locket-agent" }
 
 # --- Async / IPC -----------------------------------------------------------
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }

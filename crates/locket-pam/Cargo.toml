@@ -1,0 +1,18 @@
+[package]
+name = "locket-pam"
+description = "PAM module that unlocks the locket vault at login"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "pam_locket"
+crate-type = ["cdylib"]
+
+[dependencies]
+locket-ipc = { path = "../locket-ipc" }
+pam-bindings = "0.3"
+libc = "0.2"
+zeroize.workspace = true

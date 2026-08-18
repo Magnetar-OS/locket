@@ -1,0 +1,72 @@
+[package]
+name = "locket-cosmic"
+description = "COSMIC desktop frontend for locket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "locket"
+path = "src/main.rs"
+
+[features]
+# Hardware factors are optional at build time: tss-esapi needs libtss2 and
+# ctap-hid-fido2 needs hidapi, and neither is present everywhere. The GUI
+# degrades to passphrase-only enrolment without them.
+default = ["tpm", "fido"]
+tpm = ["dep:locket-tpm"]
+fido = ["dep:locket-fido"]
+
+[dependencies]
+locket-core.workspace = true
+locket-tpm = { path = "../locket-tpm", optional = true }
+locket-fido = { path = "../locket-fido", optional = true }
+locket-secret.workspace = true
+locket-import.workspace = true
+zbus.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+uuid.workspace = true
+dirs.workspace = true
+
+[dependencies.libcosmic]
+git = "https://github.com/pop-os/libcosmic"
+rev = "43a50cb6f5af18fa6cbea535fb46460a3c5cd573"
+default-features = false
+features = [
+    "winit",
+    "tokio",
+    "a11y",
+    "dbus-config",
+    "wayland",
+    "x11",
+    "multi-window",
+    "wgpu",
+    "about",
+    # Only for opening the About page's links; `desktop` would pull in the
+    # desktop-entry and settings-config machinery for the same one call.
+    "process",
+    # Launching locket twice hands off to the running window instead of
+    # opening a second one with its own vault handle — which is what the panel
+    # applet's "Open locket" would otherwise do on every click.
+    "single-instance",
+    "xdg-portal",
+    "qr_code",
+]
+# Deliberately absent: `advanced-shaping`. iced already defaults to
+# `Shaping::Auto`, which shapes anything non-ASCII the expensive way and leaves
+# plain ASCII — most of a vault — on the cheap path. Enabling it only removes
+# that second half.
+
+[dependencies.cosmic-config]
+git = "https://github.com/pop-os/libcosmic"
+rev = "43a50cb6f5af18fa6cbea535fb46460a3c5cd573"
+features = ["macro"]
+
+[dev-dependencies]
+tempfile = "3"

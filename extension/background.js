@@ -1,7 +1,7 @@
-// Talks to passman-native-host. Nothing here caches secrets: a password is
+// Talks to locket-native-host. Nothing here caches secrets: a password is
 // requested only when the user picks an entry, and is handed straight to the
 // content script for that one fill.
-const HOST = "io.github.idominikos.passman";
+const HOST = "io.github.idominikos.locket";
 
 async function ask(message) {
   try {

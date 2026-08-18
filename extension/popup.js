@@ -4,12 +4,12 @@ const send = (m) => new Promise((r) => chrome.runtime.sendMessage(m, r));
 (async () => {
   const status = await send({ type: "status" });
   if (status.type === "error" || !status.daemon) {
-    out.textContent = "passman is not running.";
+    out.textContent = "locket is not running.";
     return;
   }
   if (!status.unlocked) {
-    // The popup never asks for the passphrase; that belongs in passman itself.
-    out.textContent = "Your vault is locked. Unlock it in passman, then reopen this.";
+    // The popup never asks for the passphrase; that belongs in locket itself.
+    out.textContent = "Your vault is locked. Unlock it in locket, then reopen this.";
     return;
   }
 

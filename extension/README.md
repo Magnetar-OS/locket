@@ -1,4 +1,4 @@
-# passman browser extension
+# locket browser extension
 
 Two manifests, because the browsers genuinely disagree about MV3 backgrounds:
 
@@ -19,7 +19,7 @@ extension with a warning banner, so they are kept apart.
 3. Register the native messaging host:
 
    ```sh
-   scripts/passman-setup --browser <extension-id>
+   scripts/locket-setup --browser <extension-id>
    ```
 
 4. Reload the extension.
@@ -38,4 +38,4 @@ the `manifest.json`. Firefox matches on the id baked into
 
 The popup lists credentials matching the current page and fills on click. It
 never fills automatically, never asks for your passphrase, and shows nothing
-while the vault is locked — unlock in passman itself.
+while the vault is locked — unlock in locket itself.

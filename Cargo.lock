@@ -884,7 +884,7 @@ dependencies = [
 [[package]]
 name = "build_helpers"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#1f8d8786940cc6db59d412153c5a03f69a20375c"
+source = "git+https://github.com/pop-os/libcosmic#c1897c01aa8a25776ceadeddcb161bb59ccffd79"
 dependencies = [
  "cfg_aliases",
 ]
@@ -1389,7 +1389,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#1f8d8786940cc6db59d412153c5a03f69a20375c"
+source = "git+https://github.com/pop-os/libcosmic#c1897c01aa8a25776ceadeddcb161bb59ccffd79"
 dependencies = [
  "atomicwrites",
  "cosmic-config-derive 1.0.0 (git+https://github.com/pop-os/libcosmic)",
@@ -1415,7 +1415,7 @@ dependencies = [
 [[package]]
 name = "cosmic-config-derive"
 version = "1.0.0"
-source = "git+https://github.com/pop-os/libcosmic#1f8d8786940cc6db59d412153c5a03f69a20375c"
+source = "git+https://github.com/pop-os/libcosmic#c1897c01aa8a25776ceadeddcb161bb59ccffd79"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -3055,7 +3055,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#1f8d8786940cc6db59d412153c5a03f69a20375c"
+source = "git+https://github.com/pop-os/libcosmic#c1897c01aa8a25776ceadeddcb161bb59ccffd79"
 dependencies = [
  "bitflags 2.13.1",
  "build_helpers 0.14.0 (git+https://github.com/pop-os/libcosmic)",
@@ -3103,7 +3103,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.14.0"
-source = "git+https://github.com/pop-os/libcosmic#1f8d8786940cc6db59d412153c5a03f69a20375c"
+source = "git+https://github.com/pop-os/libcosmic#c1897c01aa8a25776ceadeddcb161bb59ccffd79"
 dependencies = [
  "futures",
  "iced_core 0.14.0 (git+https://github.com/pop-os/libcosmic)",
@@ -3938,6 +3938,229 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
+]
+
+[[package]]
+name = "locket-agent"
+version = "1.0.0"
+dependencies = [
+ "futures-util",
+ "locket-core",
+ "locket-fido",
+ "rsa",
+ "sha1",
+ "sha2 0.10.9",
+ "signature",
+ "ssh-key",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-applet"
+version = "1.0.0"
+dependencies = [
+ "libcosmic",
+ "locket-secret",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "locket-cli"
+version = "1.0.0"
+dependencies = [
+ "clap",
+ "locket-core",
+ "locket-import",
+ "locket-secret",
+ "rpassword",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-core"
+version = "1.0.0"
+dependencies = [
+ "argon2",
+ "base32",
+ "base64ct",
+ "chacha20poly1305",
+ "dirs",
+ "getrandom 0.4.3",
+ "hmac 0.12.1",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-cosmic"
+version = "1.0.0"
+dependencies = [
+ "cosmic-config 1.0.0 (git+https://github.com/pop-os/libcosmic?rev=43a50cb6f5af18fa6cbea535fb46460a3c5cd573)",
+ "dirs",
+ "futures-util",
+ "libcosmic",
+ "locket-core",
+ "locket-fido",
+ "locket-import",
+ "locket-secret",
+ "locket-tpm",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zbus",
+]
+
+[[package]]
+name = "locket-daemon"
+version = "1.0.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "futures-util",
+ "locket-agent",
+ "locket-core",
+ "locket-secret",
+ "rpassword",
+ "serde",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-fido"
+version = "1.0.0"
+dependencies = [
+ "base64ct",
+ "ctap-hid-fido2",
+ "getrandom 0.4.3",
+ "hkdf",
+ "locket-core",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-import"
+version = "1.0.0"
+dependencies = [
+ "base64ct",
+ "csv",
+ "dirs",
+ "keepass",
+ "locket-core",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-ipc"
+version = "1.0.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "locket-nmh"
+version = "1.0.0"
+dependencies = [
+ "locket-secret",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-pam"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "locket-ipc",
+ "pam-bindings",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-secret"
+version = "1.0.0"
+dependencies = [
+ "aes 0.8.4",
+ "cbc 0.1.2",
+ "chacha20poly1305",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hkdf",
+ "hmac 0.12.1",
+ "locket-core",
+ "locket-ipc",
+ "num-bigint 0.5.1",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
+ "zbus",
+ "zeroize",
+]
+
+[[package]]
+name = "locket-tpm"
+version = "1.0.0"
+dependencies = [
+ "base64ct",
+ "getrandom 0.4.3",
+ "locket-core",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "tss-esapi",
+ "zeroize",
 ]
 
 [[package]]
@@ -4815,229 +5038,6 @@ dependencies = [
  "redox_syscall 0.5.18",
  "smallvec",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "passman-agent"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "passman-core",
- "passman-fido",
- "rsa",
- "sha1",
- "sha2 0.10.9",
- "signature",
- "ssh-key",
- "subtle",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "passman-applet"
-version = "0.1.0"
-dependencies = [
- "libcosmic",
- "passman-secret",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "passman-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "passman-core",
- "passman-import",
- "passman-secret",
- "rpassword",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zbus",
- "zeroize",
-]
-
-[[package]]
-name = "passman-core"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base32",
- "base64ct",
- "chacha20poly1305",
- "dirs",
- "getrandom 0.4.3",
- "hmac 0.12.1",
- "serde",
- "serde_json",
- "sha1",
- "sha2 0.10.9",
- "subtle",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "passman-cosmic"
-version = "0.1.0"
-dependencies = [
- "cosmic-config 1.0.0 (git+https://github.com/pop-os/libcosmic?rev=43a50cb6f5af18fa6cbea535fb46460a3c5cd573)",
- "dirs",
- "futures-util",
- "libcosmic",
- "passman-core",
- "passman-fido",
- "passman-import",
- "passman-secret",
- "passman-tpm",
- "serde",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zbus",
-]
-
-[[package]]
-name = "passman-daemon"
-version = "0.1.0"
-dependencies = [
- "clap",
- "dirs",
- "futures-util",
- "passman-agent",
- "passman-core",
- "passman-secret",
- "rpassword",
- "serde",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zbus",
- "zeroize",
-]
-
-[[package]]
-name = "passman-fido"
-version = "0.1.0"
-dependencies = [
- "base64ct",
- "ctap-hid-fido2",
- "getrandom 0.4.3",
- "hkdf",
- "passman-core",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "zeroize",
-]
-
-[[package]]
-name = "passman-import"
-version = "0.1.0"
-dependencies = [
- "base64ct",
- "csv",
- "dirs",
- "keepass",
- "passman-core",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "passman-ipc"
-version = "0.1.0"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "passman-nmh"
-version = "0.1.0"
-dependencies = [
- "passman-secret",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "zbus",
- "zeroize",
-]
-
-[[package]]
-name = "passman-pam"
-version = "0.1.0"
-dependencies = [
- "libc",
- "pam-bindings",
- "passman-ipc",
- "zeroize",
-]
-
-[[package]]
-name = "passman-secret"
-version = "0.1.0"
-dependencies = [
- "aes 0.8.4",
- "cbc 0.1.2",
- "chacha20poly1305",
- "futures-util",
- "getrandom 0.4.3",
- "hkdf",
- "hmac 0.12.1",
- "num-bigint 0.5.1",
- "passman-core",
- "passman-ipc",
- "serde",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "uuid",
- "zbus",
- "zeroize",
-]
-
-[[package]]
-name = "passman-tpm"
-version = "0.1.0"
-dependencies = [
- "base64ct",
- "getrandom 0.4.3",
- "passman-core",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "tss-esapi",
- "zeroize",
 ]
 
 [[package]]
@@ -8777,9 +8777,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant"
-version = "5.14.0"
+version = "5.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e28c25bd8bb8da5a1f3e7065d0c156b9ee9a7973adf78b0e35eaefdf3b1b5c"
+checksum = "c1d34c27cc6cdd1f458427519dd6b8612f7b7e3f7b9a0b2355d041dda9869147"
 dependencies = [
  "endi",
  "enumflags2",
@@ -8793,9 +8793,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant_derive"
-version = "5.14.0"
+version = "5.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d496a145685283b67e232bd9e47377f6b60ad9d51e3601b23867f77c42477f96"
+checksum = "864155e69b4352db0c7f374917bf45d1e0c8d17659c8b3dbf9795f3673f8c497"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -8806,9 +8806,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant_utils"
-version = "4.1.0"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b84ebb462416c27cdb97f2e7f5f0ccc844da1fe2ecc7121e1b690b41318bf42"
+checksum = "bad0294361a320b694a328460dc73add56c306150f5cb6bfafc44446120008a3"
 dependencies = [
  "proc-macro2",
  "quote",

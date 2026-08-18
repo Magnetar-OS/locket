@@ -1,0 +1,20 @@
+[package]
+name = "locket-tpm"
+description = "TPM 2.0 sealed key slots for locket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+locket-core.workspace = true
+tss-esapi = "7.7"
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+getrandom.workspace = true
+base64ct.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

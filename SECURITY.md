@@ -1,6 +1,6 @@
 # Security policy
 
-passman holds the credentials of whoever runs it, so the honest starting point
+locket holds the credentials of whoever runs it, so the honest starting point
 is this: **it has been written and reviewed by one person, and audited by
 nobody.** Treat it accordingly. Nothing below is a claim that it is safe; it is
 a description of what has been checked and how to tell me when it is not.
@@ -8,7 +8,7 @@ a description of what has been checked and how to tell me when it is not.
 ## Reporting a vulnerability
 
 Report privately first, via GitHub's [private vulnerability
-reporting](https://github.com/idominikos/passman/security/advisories/new) on
+reporting](https://github.com/idominikos/locket/security/advisories/new) on
 this repository. If that is unavailable to you, open an issue saying only that
 you have a security report and how to reach you — no details in the issue.
 
@@ -31,7 +31,7 @@ Anything that lets code or a person reach secrets they should not:
   after the vault has been locked;
 * the PAM module affecting the authentication decision, or leaking a token;
 * a local process escalating through the unlock socket, the agent socket or
-  `org.passman.Manager1`.
+  `org.locket.Manager1`.
 
 ## What is out of scope
 

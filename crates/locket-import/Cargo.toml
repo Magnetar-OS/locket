@@ -1,0 +1,23 @@
+[package]
+name = "locket-import"
+description = "Importers for browser CSV exports, .env trees, SSH keys, cloud CLI credentials, authenticator exports, pass and KeePass"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+locket-core.workspace = true
+uuid.workspace = true
+dirs.workspace = true
+base64ct.workspace = true
+serde_json.workspace = true
+keepass = "0.13"
+csv = "1"
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

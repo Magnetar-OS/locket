@@ -1,11 +1,11 @@
-# passman
+# Locket
 
 A password and secrets manager for the COSMIC desktop. It keeps logins, keys,
 tokens and notes in an encrypted vault, and it is also the process the rest of
 the system asks for secrets: it owns `org.freedesktop.secrets`, serves the
 `org.freedesktop.impl.portal.Secret` backend that sandboxed Flatpak
 applications get their per-application key from, and runs an SSH agent. On a
-stock session `gnome-keyring-daemon` holds those; installing passman takes
+stock session `gnome-keyring-daemon` holds those; installing locket takes
 them over rather than sitting beside it.
 
 The desktop application creates, edits and deletes items, generates passwords,
@@ -38,11 +38,11 @@ nothing in COSMIC does:
   `--components=pkcs11,secrets` and `SSH_AUTH_SOCK` is empty, so nothing does.
 
 Wrapping it would mean inheriting its storage format and its lock semantics.
-passman implements the same D-Bus contracts on top of its own vault instead.
+locket implements the same D-Bus contracts on top of its own vault instead.
 
 ## The application
 
-`passman` is the desktop application: a COSMIC nav bar of categories, a
+`locket` is the desktop application: a COSMIC nav bar of categories, a
 search-filtered list, and the selected item in a context drawer. The vault
 models twelve kinds of item — logins, notes, cards, identities, SSH and GPG
 keys, API tokens, OAuth registrations, certificates, environment bundles, Wi-Fi
@@ -88,7 +88,7 @@ the editor lets you set it per field rather than guessing from the name.
   section, because the version number is the first thing a bug report asks
   for.
 
-A running daemon is the normal case but not a requirement: with no `passmand`
+A running daemon is the normal case but not a requirement: with no `locketd`
 on the bus the GUI opens the vault file directly. The Settings panel is where
 you find out which of the two you are in, since it reports the actual owner of
 `org.freedesktop.secrets` rather than assuming.
@@ -97,30 +97,30 @@ you find out which of the two you are in, since it reports the actual owner of
 
 ```
 crates/
-  passman-core     vault format, Argon2id + XChaCha20-Poly1305, item model  (no I/O, no D-Bus, no UI)
-  passman-secret   org.freedesktop.secrets + org.freedesktop.impl.portal.Secret
-  passman-daemon   passmand — owns the unlocked vault, serves D-Bus and the agent
-  passman-agent    SSH agent protocol, including security-key (`sk-`) signing
-  passman-cli      command line interface
-  passman-cosmic   libcosmic GUI (binary: `passman`)
-  passman-applet   COSMIC panel indicator
-  passman-tpm      TPM 2.0 sealed key slots (tss-esapi)
-  passman-fido     FIDO2: hmac-secret key slots and assertions (ctap-hid-fido2)
-  passman-import   importers: browser CSV, .env trees, SSH keys, cloud CLIs, TOTP exports, pass, KeePass
-  passman-ipc      the unlock-socket protocol (no deps; linked into PAM)
-  passman-pam      pam_passman.so — unlocks the vault at login
-  passman-nmh      native messaging host for the browser extension
+  locket-core     vault format, Argon2id + XChaCha20-Poly1305, item model  (no I/O, no D-Bus, no UI)
+  locket-secret   org.freedesktop.secrets + org.freedesktop.impl.portal.Secret
+  locket-daemon   locketd — owns the unlocked vault, serves D-Bus and the agent
+  locket-agent    SSH agent protocol, including security-key (`sk-`) signing
+  locket-cli      command line interface
+  locket-cosmic   libcosmic GUI (binary: `locket`)
+  locket-applet   COSMIC panel indicator
+  locket-tpm      TPM 2.0 sealed key slots (tss-esapi)
+  locket-fido     FIDO2: hmac-secret key slots and assertions (ctap-hid-fido2)
+  locket-import   importers: browser CSV, .env trees, SSH keys, cloud CLIs, TOTP exports, pass, KeePass
+  locket-ipc      the unlock-socket protocol (no deps; linked into PAM)
+  locket-pam      pam_locket.so — unlocks the vault at login
+  locket-nmh      native messaging host for the browser extension
 extension/         the browser extension itself (Chrome/Firefox, MV3)
 res/               desktop entry, systemd unit, .portal file, PAM notes
-scripts/           passman-setup (install/uninstall/status) and the keyring re-import
+scripts/           locket-setup (install/uninstall/status) and the keyring re-import
 ```
 
-While `passmand` is running it holds the only unlocked copy of the
+While `locketd` is running it holds the only unlocked copy of the
 data-encryption key, and the GUI, the browser host and every `libsecret` client
 go through it — so the vault is unlocked once per session rather than once per
 application.
 
-`passman-cli` is the exception, on purpose: it opens the vault file itself and
+`locket-cli` is the exception, on purpose: it opens the vault file itself and
 never talks to the daemon, so it still works when the daemon will not start.
 The GUI does the same as a fallback when no daemon is on the bus.
 
@@ -134,7 +134,7 @@ passphrase, so a dead motherboard is not a dead vault. `Vault::remove_slot`
 refuses to remove the last one.
 
 `SlotOpener` is the seam: a factor only has to produce 32 bytes, which is why
-`passman-core` has no hardware dependencies.
+`locket-core` has no hardware dependencies.
 
 ### Vault format
 
@@ -168,7 +168,7 @@ index, the next time the vault is saved.
 ### Secret Service transport
 
 `libsecret` negotiates `dh-ietf1024-sha256-aes128-cbc-pkcs7` before falling
-back to `plain`, so passman implements it: Diffie-Hellman over the RFC 2409
+back to `plain`, so locket implements it: Diffie-Hellman over the RFC 2409
 Second Oakley Group, HKDF-SHA256 to a 128-bit key, AES-128-CBC/PKCS#7. The
 1024-bit group is weak by 2026 standards but is fixed by the wire format; it
 protects secrets in transit on the session bus only, never the vault at rest.
@@ -188,19 +188,19 @@ Two compatibility details that are not in the spec but are required in practice:
 cargo build
 
 # A vault with representative items, passphrase "hunter2".
-cargo run -p passman-core --example seed -- /tmp/dev.vault hunter2
+cargo run -p locket-core --example seed -- /tmp/dev.vault hunter2
 
 # The GUI.
-PASSMAN_VAULT=/tmp/dev.vault ./target/debug/passman
+LOCKET_VAULT=/tmp/dev.vault ./target/debug/locket
 ```
 
-The daemon defaults to `org.passman.secrets` so that starting it never silently
+The daemon defaults to `org.locket.secrets` so that starting it never silently
 displaces a running gnome-keyring. To exercise it as a real drop-in, give it a
 private bus:
 
 ```sh
 PW=hunter2 dbus-run-session -- bash -c '
-  ./target/debug/passmand --vault /tmp/dev.vault --replace-keyring --passphrase-env PW &
+  ./target/debug/locketd --vault /tmp/dev.vault --replace-keyring --passphrase-env PW &
   sleep 1
   printf "s3cret" | secret-tool store --label=Demo service example.com username ada
   secret-tool lookup service example.com username ada
@@ -240,7 +240,7 @@ conversion used to destroy silently.
 End-to-end through `xdg-desktop-portal` with a real sandboxed application
 (Authenticator, a Flatpak that encrypts its database with a portal-derived
 key). The app requested its secret over `org.freedesktop.portal.Secret`, the
-portal routed it to passman's backend, and the app's own log confirms `oo7`
+portal routed it to locket's backend, and the app's own log confirms `oo7`
 took the sandboxed file-backend path and loaded its keyring. Restarting it
 decrypted the keyring written under the previous run's key, which is the
 property that matters: an app whose derived key moved would lose everything
@@ -250,12 +250,12 @@ it had stored.
 
 Implemented: the vault and its cryptography, key slots (passphrase, TPM 2.0,
 FIDO2), the Secret Service (Service/Collection/Item/Session and Prompt
-objects), `org.passman.Manager1` for lock state, the Secret portal backend, the
+objects), `org.locket.Manager1` for lock state, the Secret portal backend, the
 SSH agent, the daemon, the CLI, eight importers, the PAM module, the browser
 extension and its native messaging host, the panel applet, the installer, and a
 GUI that creates, edits, deletes, generates, imports and enrols factors.
 
-**SSH agent** (`passmand --ssh-agent`) serves vault items of kind `SshKey`,
+**SSH agent** (`locketd --ssh-agent`) serves vault items of kind `SshKey`,
 including security-key (`sk-`) identities — see
 [Security keys over SSH](#security-keys-over-ssh). Verified with real OpenSSH:
 `ssh-add -l` lists the keys with matching fingerprints, `ssh-keygen -Y sign`
@@ -275,7 +275,7 @@ RSA keys sign under the hash the client asks for — `rsa-sha2-256`,
 `rsa-sha2-512`, or `ssh-rsa` when a client explicitly wants the old one.
 OpenSSH rejects a signature that comes back under a different name than it
 requested, and `ssh-key` cannot choose a hash for a key loaded from a file at
-all, so passman does that part itself.
+all, so locket does that part itself.
 
 **Certificates.** A key with an OpenSSH certificate is advertised twice, the
 certificate first, exactly as `ssh-add` does — a host configured for
@@ -316,11 +316,11 @@ like any other field:
 | `confirm-each-use` | `yes` to require a confirmation for every signature |
 | `token-pin` | The security key's PIN, for a `verify-required` `sk-` key |
 
-**Secret portal** (`passmand --portal`) implements
+**Secret portal** (`locketd --portal`) implements
 `org.freedesktop.impl.portal.Secret`. App secrets are *derived*, not stored:
 `HKDF-SHA256(portal_master, info = "org.freedesktop.portal.Secret\0" || app_id)`,
 so they are reproducible from a vault backup and no two apps can collide.
-Install `res/passman.portal` into `/usr/share/xdg-desktop-portal/portals/` to
+Install `res/locket.portal` into `/usr/share/xdg-desktop-portal/portals/` to
 make xdg-desktop-portal route to it.
 
 Next:
@@ -370,10 +370,10 @@ have imported whatever their current keyring holds.
 ## Installing as your secret store
 
 ```sh
-scripts/passman-setup            # build, install, and report what is left to do
-scripts/passman-setup --pam      # also unlock the vault at login (needs root)
-scripts/passman-setup --status   # who currently owns what
-scripts/passman-setup --uninstall
+scripts/locket-setup            # build, install, and report what is left to do
+scripts/locket-setup --pam      # also unlock the vault at login (needs root)
+scripts/locket-setup --status   # who currently owns what
+scripts/locket-setup --uninstall
 ```
 
 Three properties it is built around, because this replaces authentication
@@ -385,7 +385,7 @@ empty vault, so the script counts both stores and refuses to switch until the
 import has happened:
 
 ```
-gnome-keyring holds 27 item(s); the passman vault holds 0
+gnome-keyring holds 27 item(s); the locket vault holds 0
 ! Switching now would point every application at an empty store.
 ```
 
@@ -410,7 +410,7 @@ silent no-op:
 * **D-Bus delegates activation to systemd** when the service file carries
   `SystemdService=`, which means the *unit's* `ExecStart` is what runs and the
   `Exec=` line is ignored. The unit must therefore pass `--replace-keyring`, or
-  the daemon comes up on `org.passman.secrets` and **nothing** owns
+  the daemon comes up on `org.locket.secrets` and **nothing** owns
   `org.freedesktop.secrets`. The installer refuses to write a unit missing that
   flag.
 
@@ -423,39 +423,39 @@ why replacing it is probably unnecessary.
 ## Migrating off gnome-keyring
 
 ```sh
-passman-cli import --dry-run          # see what would come across
-passman-cli import                    # from org.freedesktop.secrets
-passman-cli import --from org.passman.secrets --into Imported
-passman-cli import --replace          # overwrite rather than skip duplicates
+locket-cli import --dry-run          # see what would come across
+locket-cli import                    # from org.freedesktop.secrets
+locket-cli import --from org.locket.secrets --into Imported
+locket-cli import --replace          # overwrite rather than skip duplicates
 ```
 
 There are importers for the other common escape routes too:
 
 ```sh
-passman-cli import-csv chrome-passwords.csv     # Chrome, Edge, Brave, Firefox,
+locket-cli import-csv chrome-passwords.csv     # Chrome, Edge, Brave, Firefox,
                                                 # Safari, Bitwarden, 1Password
-passman-cli import-pass                         # ~/.password-store
-passman-cli import-keepass secrets.kdbx
-passman-cli import-env ~/GitHub                 # .env files across a tree
-passman-cli import-ssh                          # ~/.ssh private keys
-passman-cli import-cloud                        # aws, gcloud, az, gh, docker, npm
-passman-cli import-totp aegis-export.json       # otpauth:// URIs, Aegis, andOTP
+locket-cli import-pass                         # ~/.password-store
+locket-cli import-keepass secrets.kdbx
+locket-cli import-env ~/GitHub                 # .env files across a tree
+locket-cli import-ssh                          # ~/.ssh private keys
+locket-cli import-cloud                        # aws, gcloud, az, gh, docker, npm
+locket-cli import-totp aegis-export.json       # otpauth:// URIs, Aegis, andOTP
 ```
 
 And the way out, because a manager you cannot leave is a trap:
 
 ```sh
-passman-cli export everything.json --i-understand-this-is-plaintext
-passman-cli passwd                              # change the vault passphrase
+locket-cli export everything.json --i-understand-this-is-plaintext
+locket-cli passwd                              # change the vault passphrase
 ```
 
 The CLI edits too, so the documented recovery tool can actually repair things
 when the daemon will not start:
 
 ```sh
-passman-cli edit github --set username=ada --secret --generate
-passman-cli edit github --label "GitHub (work)" --unset old-field --favorite true
-passman-cli rm gitlab
+locket-cli edit github --set username=ada --secret --generate
+locket-cli edit github --label "GitHub (work)" --unset old-field --favorite true
+locket-cli rm gitlab
 ```
 
 An ambiguous query lists the candidates and stops rather than guessing, since
@@ -482,7 +482,7 @@ stays prose instead of becoming a field called `note to self`.
 
 The Secret Service importer is a *client*, not a file parser: gnome-keyring's
 on-disk format is undocumented and version-specific, but its D-Bus surface is a
-standard passman already implements the other half of. The same code therefore
+standard locket already implements the other half of. The same code therefore
 imports from KWallet or anything else conforming.
 
 It is read-only against the source and idempotent against the target — an item
@@ -503,17 +503,17 @@ anything referring to it still resolves, and counts replacements separately
 from new items.
 
 ```sh
-scripts/passman-reimport-keyring --dry-run
-scripts/passman-reimport-keyring
+scripts/locket-reimport-keyring --dry-run
+scripts/locket-reimport-keyring
 ```
 
 That script exists because the obvious way to read gnome-keyring again — stop
-passman, start gnome-keyring, import, swap back — takes `org.freedesktop.secrets`
+locket, start gnome-keyring, import, swap back — takes `org.freedesktop.secrets`
 away from every running application for the duration, and they do not all cope:
 some cache the name owner, some quietly fall back to storing secrets in the
 clear. So it runs gnome-keyring on a *private* bus against the same
 `~/.local/share/keyrings` files and imports from that, while your session keeps
-passman throughout.
+locket throughout.
 
 It checks that the keyring actually *unlocked* rather than that gnome-keyring
 started, because gnome-keyring starts happily on a wrong password and simply
@@ -525,18 +525,18 @@ label, an `a{ss}` attribute map and a schema string — it has no concept of ite
 *kind*. Logins, notes and Wi-Fi passwords are recovered because they have
 recognisable schema or attribute signatures; an SSH key or a payment card
 arrives as a generic application secret and needs retyping in the UI. That is a
-limit of the source format, not of the importer, and it is why moving a passman
+limit of the source format, not of the importer, and it is why moving a locket
 vault between machines should be a file copy rather than an import.
 
 ## Unlocking on demand
 
 The Secret Service spec has no way to *unlock* a service — its `Prompt` objects
 say "ask the user" without saying how, because on GNOME the answer is a
-gnome-keyring-specific dialog. `org.passman.Manager1` is that missing half:
+gnome-keyring-specific dialog. `org.locket.Manager1` is that missing half:
 `Unlock(passphrase) -> bool`, `Lock()`, and `Locked`/`ItemCount`/`VaultPath`
 properties, plus an `UnlockRequested` signal.
 
-A locked passman vault cannot have its *items* enumerated — labels and
+A locked locket vault cannot have its *items* enumerated — labels and
 attributes live inside the sealed body, which is the point, but it means
 gnome-keyring's trick of listing locked items is unavailable. Returning "no
 matches" would be a lie clients believe, reporting a secret as *missing* rather
@@ -561,14 +561,14 @@ releases the pending call, and the client gets its secret. A wrong passphrase
 returns `false` rather than a D-Bus error, since a typo is an expected outcome
 and not a fault.
 
-Also verified across two real processes on a live COSMIC session: `passmand`
+Also verified across two real processes on a live COSMIC session: `locketd`
 logs *"asked the frontend to unlock"*, the GUI logs *"daemon asked for an
 unlock"*, and the unlock screen appears reading "An application asked for a
 secret from your vault."
 
 ## Unlocking at login
 
-`pam_passman.so` takes the password you have already typed at the login screen
+`pam_locket.so` takes the password you have already typed at the login screen
 and hands it to the daemon. When that password is also your vault passphrase,
 logging in unlocks the vault and every `libsecret` application finds its
 secrets without a second prompt. See [res/pam-install.md](res/pam-install.md).
@@ -587,15 +587,15 @@ the old and the new password, and the daemon re-wraps the vault key under the
 new one — after proving the old one opens the vault, so this cannot be used to
 change a passphrase nobody knew.
 
-The passphrase reaches the daemon over a socket in `/run/user/<uid>/passman/`,
+The passphrase reaches the daemon over a socket in `/run/user/<uid>/locket/`,
 a directory the kernel already restricts to that user (0700), with the socket
 itself 0600. The path is derived from the uid rather than `$XDG_RUNTIME_DIR`,
 because a PAM module runs as root in a process whose environment belongs to
-nobody. `passman-ipc` carries this protocol and has no dependencies beyond
+nobody. `locket-ipc` carries this protocol and has no dependencies beyond
 `zeroize` — it is linked into a module that loads on every login, so pulling in
 an async runtime or a D-Bus client there would be irresponsible.
 
-`passmand --locked` starts without a passphrase and waits, which is what the
+`locketd --locked` starts without a passphrase and waits, which is what the
 login case needs: at boot nobody has typed anything yet.
 
 Verified end to end with `pamtester` against a throwaway user, on a stack that
@@ -616,14 +616,14 @@ not a migration, it is a gamble.
 
 | Source | GUI | CLI |
 |---|---|---|
-| Browser / manager `.csv` | Browser or password manager export | `passman-cli import-csv FILE` |
-| Project `.env` files | Project .env files | `passman-cli import-env DIR` |
-| SSH private keys | SSH private keys | `passman-cli import-ssh` |
-| Cloud CLI credentials | Cloud CLI credentials | `passman-cli import-cloud` |
-| Authenticator export | Authenticator export (TOTP) | `passman-cli import-totp FILE` |
-| `pass` store | pass (password-store) | `passman-cli import-pass` |
-| KeePass `.kdbx` | KeePass database | `passman-cli import-keepass FILE` |
-| Running keyring | Running keyring | `passman-cli import` |
+| Browser / manager `.csv` | Browser or password manager export | `locket-cli import-csv FILE` |
+| Project `.env` files | Project .env files | `locket-cli import-env DIR` |
+| SSH private keys | SSH private keys | `locket-cli import-ssh` |
+| Cloud CLI credentials | Cloud CLI credentials | `locket-cli import-cloud` |
+| Authenticator export | Authenticator export (TOTP) | `locket-cli import-totp FILE` |
+| `pass` store | pass (password-store) | `locket-cli import-pass` |
+| KeePass `.kdbx` | KeePass database | `locket-cli import-keepass FILE` |
+| Running keyring | Running keyring | `locket-cli import` |
 
 ### Project `.env` files
 
@@ -637,7 +637,7 @@ which puts the value in the Secret Service secret itself, so
 `--dry-run` reads the files but never the vault, so it needs no passphrase:
 
 ```console
-$ passman-cli import-env ~/GitHub --dry-run
+$ locket-cli import-env ~/GitHub --dry-run
 ...
 191 file(s), 2512 variable(s), 991 credential(s) under /home/you/GitHub
 ```
@@ -650,14 +650,14 @@ credential in plaintext metadata.
 ### SSH private keys
 
 Copies the keys from `~/.ssh` into `ItemKind::SshKey` items, which is the
-shape passman's own SSH agent already reads. Keys are found by their PEM
+shape locket's own SSH agent already reads. Keys are found by their PEM
 banner rather than the `id_*` naming convention, so `deploy-key-prod` is not
 missed. The private key goes in the `private-key` field and the item's secret
 is reserved for the key's *passphrase*, which is what an encrypted key needs
 to be usable.
 
 Your key files stay exactly where they are; OpenSSH keeps reading them.
-Confirm `ssh-add -l` lists them through passman's agent before removing
+Confirm `ssh-add -l` lists them through locket's agent before removing
 anything.
 
 A security-key file — `sk-ssh-ed25519@openssh.com` or
@@ -665,7 +665,7 @@ A security-key file — `sk-ssh-ed25519@openssh.com` or
 not the same kind of thing and the import says so:
 
 ```console
-$ passman-cli import-ssh
+$ locket-cli import-ssh
 imported 2 item(s); 0 already present, 0 unreadable from /home/you/.ssh
 
 1 of these sign on a security key: id_ed25519_sk. The files hold credential
@@ -686,7 +686,7 @@ they are not project-scoped: one of them authorises everything the account
 behind it can do.
 
 ```console
-$ passman-cli import-cloud --dry-run
+$ locket-cli import-cloud --dry-run
 Google Cloud CLI     /home/you/.config/gcloud/credentials.db
 GitHub CLI           /home/you/.config/gh/hosts.yml
 ```
@@ -699,7 +699,7 @@ contributing nothing. Only the refresh token is kept; access tokens expire
 within the hour and are not worth storing.
 
 Importing does not make the originals safe. Rotate them, or remove them once
-the tools read from passman.
+the tools read from locket.
 
 ### Authenticator exports
 
@@ -718,7 +718,7 @@ the seed in any readable form.
 A sandboxed application cannot reach `org.freedesktop.secrets` directly. It
 asks `org.freedesktop.portal.Secret` for a per-application key instead, and
 xdg-desktop-portal forwards that to whichever *backend* the desktop prefers.
-passman implements that backend (`passmand --portal`), but being implemented
+locket implements that backend (`locketd --portal`), but being implemented
 is not enough — two separate things have to line up, and neither does by
 default:
 
@@ -737,21 +737,21 @@ default:
 
    and a backend that is merely present but unlisted is never chosen. Worse,
    the fallback is a D-Bus-activatable gnome-keyring, so a Flatpak app asking
-   for a secret will *start* the daemon passman just replaced, and the two then
+   for a secret will *start* the daemon locket just replaced, and the two then
    contend for `org.freedesktop.secrets`.
 
-`passman-setup` does both: it installs the `.portal` file system-wide and
-writes a user-level `portals.conf` preferring passman. Because these files are
+`locket-setup` does both: it installs the `.portal` file system-wide and
+writes a user-level `portals.conf` preferring locket. Because these files are
 not merged across directories — the first one found wins outright — the user
 copy is derived from the desktop's own file so the rest of its preferences
 survive:
 
 ```console
-$ passman-setup            # includes the portal step; will ask for sudo
-$ passman-setup --status
+$ locket-setup            # includes the portal step; will ask for sudo
+$ locket-setup --status
 :: Flatpak apps (Secret portal)
  ✓ portal backend installed
- ✓ Secret portal routed to passman (via ~/.config/xdg-desktop-portal/cosmic-portals.conf)
+ ✓ Secret portal routed to locket (via ~/.config/xdg-desktop-portal/cosmic-portals.conf)
 ```
 
 If the portal step is skipped, everything else still works — only Flatpak
@@ -782,7 +782,7 @@ machine this was developed against:
   (`~/.pki/nssdb`, `cert9.db`), never in gnome-keyring;
 * nothing outside its own `.module` file references it.
 
-So a passman PKCS#11 provider would be a module nothing loads: a large C ABI
+So a locket PKCS#11 provider would be a module nothing loads: a large C ABI
 surface — around 68 function pointers — with no caller. It is not written.
 
 It becomes worth revisiting if you install one of those two programs, or want
@@ -794,7 +794,7 @@ prefers.
 
 ```sh
 # load extension/ unpacked, then pass the id chrome://extensions shows you
-scripts/passman-setup --browser <extension-id>
+scripts/locket-setup --browser <extension-id>
 ```
 
 Chrome and Firefox get separate manifests — see
@@ -819,7 +819,7 @@ hostile. So the host never exposes the vault wholesale:
 * A secret that is not text is refused rather than converted lossily — some
   genuinely are binary, and none of those belong in a login form.
 * Nothing unlocks the vault. A locked vault answers `locked` and stops; the
-  passphrase is typed into passman's own window, never into a web page.
+  passphrase is typed into locket's own window, never into a web page.
 * Filling happens only on an explicit click in the popup, never automatically
   on page load — automatic autofill is how a password manager becomes a
   credential-harvesting bug on a hostile page.
@@ -836,7 +836,7 @@ anything.
 
 ## Panel applet
 
-`passman-applet` shows lock state in the COSMIC panel: a secure icon when the
+`locket-applet` shows lock state in the COSMIC panel: a secure icon when the
 vault is open, an insecure one when it is not, and a neutral one when no daemon
 is running — it does not claim "locked" for a vault it cannot see.
 
@@ -847,21 +847,21 @@ are trained to expect system prompts, which is the shape a spoofed prompt would
 take. Locking is safe to expose because a fake "lock" button costs nothing.
 
 The applet and the GUI share one `ManagerProxy` definition in
-`passman-secret::client`; a drifting copy is the kind of bug that surfaces as
+`locket-secret::client`; a drifting copy is the kind of bug that surfaces as
 "the applet says locked but the window says unlocked".
 
 Opening the window from the panel asks the compositor for an XDG activation
 token first. Without one, a window launched from a panel button comes up
-unfocused behind it — and if passman is already running there is nothing to
+unfocused behind it — and if locket is already running there is nothing to
 raise it with. The launch itself goes through `spawn_desktop_exec`, which
 double-forks it out of the panel process and into its own systemd scope, so
 restarting the panel does not take the vault window with it.
 
 Clicking the button twice does not give you two vault windows: a second
-`passman` hands its activation over D-Bus to the one already running and exits.
+`locket` hands its activation over D-Bus to the one already running and exits.
 Two windows would each hold their own vault handle, so locking one would leave
 the other unlocked. Set `COSMIC_SINGLE_INSTANCE=0` to opt out — needed if you
-want two vaults side by side with `PASSMAN_VAULT`, since the hand-off carries
+want two vaults side by side with `LOCKET_VAULT`, since the hand-off carries
 no arguments.
 
 ## When the vault locks
@@ -873,12 +873,12 @@ than a button:
   the window would look locked while every `libsecret` client carried on
   reading secrets.
 * **Idle**: the frontend has a 15-minute default for its own window, and
-  `passmand --auto-lock SECONDS` covers the session, because closing the window
+  `locketd --auto-lock SECONDS` covers the session, because closing the window
   is not the same as ending the session. Both Secret Service traffic and SSH
   agent requests count as use — being locked out mid-`ssh` because no secret
   had been read would be its own bug. The installed unit passes
   `--auto-lock 900`.
-* **The session locks**, or the machine suspends. `passmand` watches logind for
+* **The session locks**, or the machine suspends. `locketd` watches logind for
   both `Lock` and the `LockedHint` a screen locker sets, plus
   `PrepareForSleep`, because different lockers announce themselves differently
   and a locked screen with a readable vault behind it is not a locked screen.
@@ -895,7 +895,7 @@ not an exotic one. Saving is done under an advisory lock on a sibling
 `ChangedOnDisk` rather than overwritten:
 
 * the daemon reloads before it writes, and after an external write it is told
-  to catch up by whoever wrote it (`org.passman.Manager1.Reload`);
+  to catch up by whoever wrote it (`org.locket.Manager1.Reload`);
 * the frontend reloads before it edits, polls for external changes while it is
   open, and calls `Reload` after saving so the daemon is never left serving
   what it read ten minutes ago.
@@ -938,20 +938,20 @@ passphrase                 -> still opens it
 
 ## Security keys (FIDO2)
 
-`passman-fido` enrols a slot whose key comes from a token's `hmac-secret`
+`locket-fido` enrols a slot whose key comes from a token's `hmac-secret`
 extension. The distinction from a fingerprint reader matters: `fprintd` returns
 a *verdict*, so a daemon must already hold the key and merely gates releasing
 it. A FIDO2 token given a salt returns `HMAC-SHA256(credential_secret, salt)` —
 32 bytes that exist nowhere but on the device. The vault key therefore cannot
 be reconstructed from a stolen disk image at all.
 
-Credentials are created under the relying-party id `passman.local`, which is
+Credentials are created under the relying-party id `locket.local`, which is
 deliberately not a real domain: `hmac-secret` is scoped per (rp_id, credential),
-so a passman credential cannot be exercised by a website.
+so a locket credential cannot be exercised by a website.
 
 **Not verified on hardware** — no FIDO2 token is attached to this machine. The
-round-trip tests are `#[ignore]`d behind `PASSMAN_FIDO_TESTS=1` (plus
-`PASSMAN_FIDO_PIN` if your token has one); they need a physical touch.
+round-trip tests are `#[ignore]`d behind `LOCKET_FIDO_TESTS=1` (plus
+`LOCKET_FIDO_PIN` if your token has one); they need a physical touch.
 
 ## Security keys over SSH
 
@@ -974,7 +974,7 @@ assumed:
 
 * **The trailer's position.** `ssh_key::Signature` keeps flags and counter
   inside its own byte array and splits them back out only for Ed25519, not for
-  ECDSA — so passman writes the blob itself, and the tests hand what it wrote
+  ECDSA — so locket writes the blob itself, and the tests hand what it wrote
   back to `ssh-key`'s decoder and verifier to prove the two agree.
 * **ECDSA integer encoding.** A token returns ES256 signatures in ASN.1 DER;
   SSH wants `mpint r ‖ mpint s`. A component with its high bit set needs a
@@ -1027,11 +1027,11 @@ forge. A short PIN can do that when it is not acting as a password but as the
 and what makes it viable is the chip refusing further attempts after a handful
 of wrong ones.
 
-`passman-tpm` implements that: a random 32-byte secret sealed to the TPM under
+`locket-tpm` implements that: a random 32-byte secret sealed to the TPM under
 an `authValue`, enrolled as a key slot. One detail is load-bearing —
 `tss-esapi`'s own sealing example builds the object with `no_da(true)`, which
 **exempts it from dictionary-attack lockout**. That would reduce the PIN to a
-~20-bit password with unlimited guesses. `passman-tpm` clears `noDA` whenever a
+~20-bit password with unlimited guesses. `locket-tpm` clears `noDA` whenever a
 PIN is set, and there is a test asserting it.
 
 PCR binding is deliberately *not* used: binding to firmware measurements means
@@ -1043,13 +1043,13 @@ security here.
 real vault all pass, and the chip's dictionary-attack counter incremented
 exactly once per wrong PIN, which is the property the whole design rests on.
 
-The tests are `#[ignore]`d behind `PASSMAN_TPM_TESTS=1` and a TCTI:
+The tests are `#[ignore]`d behind `LOCKET_TPM_TESTS=1` and a TCTI:
 
 ```sh
 swtpm socket --tpm2 --tpmstate dir=/tmp/tpm --ctrl type=tcp,port=2322 \
   --server type=tcp,port=2321 --flags not-need-init,startup-clear &
-TCTI="swtpm:host=localhost,port=2321" PASSMAN_TPM_TESTS=1 \
-  cargo test -p passman-tpm -- --ignored
+TCTI="swtpm:host=localhost,port=2321" LOCKET_TPM_TESTS=1 \
+  cargo test -p locket-tpm -- --ignored
 ```
 
 The lockout claim is demonstrated by `examples/da_probe.rs`. With the
