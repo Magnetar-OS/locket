@@ -19,8 +19,10 @@ Each of those has been exercised against the software that actually calls it —
 section covering each piece.
 
 It runs on one machine, its author's, as that machine's only secret store. It
-is not packaged for any distribution, has no other users, and has never been
-tried against a FIDO2 token. See [Roadmap](#roadmap).
+has no other users, has never been tried against a FIDO2 token, and has been
+reviewed by nobody — see [SECURITY.md](SECURITY.md) before trusting it with
+anything you cannot afford to lose. There is an Arch package under
+`packaging/`; no distribution ships it. See [Roadmap](#roadmap).
 
 ## Why replace gnome-keyring rather than wrap it
 
@@ -327,13 +329,43 @@ Next:
    `sk-` support are implemented and unit-tested, but every path that talks to
    a real token needs a physical touch and no token has been attached to this
    machine. Until that happens, treat the hardware half as untested.
-2. **Packaging.** `passman-setup` builds from a git checkout with `cargo`,
-   which is fine for the person who wrote it and not for anybody else.
+2. **Packaging beyond Arch.** `packaging/arch/PKGBUILD` builds a package;
+   Debian, Fedora and Flatpak do not exist. Flatpak is the awkward one: a
+   sandboxed application cannot own `org.freedesktop.secrets` for the session
+   or install a PAM module, so at best it would ship the frontend alone.
 3. **PAM for `sudo`** — a *different* module from the session one, and still
    gated on the reasoning in [On authorising `sudo`](#on-authorising-sudo).
 4. **PKCS#11**, only if a caller turns up. See
    [Why there is no PKCS#11 module](#why-there-is-no-pkcs11-module) for why
    writing one now would be a module nothing loads.
+
+## Building
+
+The toolchain is pinned in `rust-toolchain.toml`, so `rustup` picks the right
+one on its own. The system libraries are not optional — these are what the
+binaries actually link against, read off `ldd` rather than guessed:
+
+| Provides | Arch | Debian/Ubuntu |
+|---|---|---|
+| TPM key slots | `tpm2-tss` | `libtss2-dev` |
+| Security keys (hidapi's Linux backend) | `systemd-libs` | `libudev-dev` |
+| The GUI's keyboard handling | `libxkbcommon` | `libxkbcommon-dev`, `libwayland-dev` |
+| Everything | `openssl`, `zlib`, `zstd`, `brotli`, `pkgconf` | `libssl-dev`, `pkg-config` |
+| The PAM module | `pam` | `libpam0g-dev` |
+
+```sh
+cargo build --release          # ~4 minutes cold, ~75 MB of binaries
+cargo test --workspace         # no hardware needed; TPM and FIDO2 tests are #[ignore]d
+```
+
+Both hardware factors are cargo features (`tpm`, `fido`, on by default).
+Without them neither library is needed, the GUI still builds, and it says the
+factor is unavailable in this build rather than pretending otherwise.
+
+`packaging/arch/PKGBUILD` builds an Arch package. It installs the pieces and
+stops there: claiming `org.freedesktop.secrets`, enabling the unit and editing
+a PAM stack are decisions for the person using the machine, taken after they
+have imported whatever their current keyring holds.
 
 ## Installing as your secret store
 

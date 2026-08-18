@@ -1,0 +1,40 @@
+post_install() {
+  cat <<'MSG'
+
+passman is installed but not yet serving anything. It does not take over your
+session's secret store on its own — that would point every application at an
+empty vault.
+
+  1. Create a vault and import what your current keyring holds:
+       passman-cli init
+       passman-cli import
+
+  2. Take over org.freedesktop.secrets for your user:
+       systemctl --user enable --now passman-daemon.service
+
+     The unit starts locked and waits. To have it unlocked at login, add
+     pam_passman.so to your login stack — see
+     /usr/share/doc/passman-git/pam-install.md
+
+  3. Check what is actually wired up at any time from the app's Settings page.
+
+Nothing here has been reviewed by anyone but its author. Read
+/usr/share/doc/passman-git/SECURITY.md before trusting it with anything you
+cannot afford to lose.
+
+MSG
+}
+
+post_upgrade() {
+  # The daemon holds the vault key in memory; a new binary is only in use once
+  # it restarts, and restarting it locks the vault.
+  cat <<'MSG'
+
+passman was upgraded. Restart the daemon when convenient:
+
+    systemctl --user restart passman-daemon.service
+
+It starts locked, so you will be asked for your passphrase again.
+
+MSG
+}

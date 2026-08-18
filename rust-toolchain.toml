@@ -1,0 +1,9 @@
+# Pins the toolchain the workspace is developed and released against, so a
+# contributor and CI compile with the same rustc as the author. Matches
+# `rust-version` in Cargo.toml; raise both together.
+#
+# `mise.toml` used to do this job. rustup reads this file with no extra tool
+# installed, which is one less thing to have.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

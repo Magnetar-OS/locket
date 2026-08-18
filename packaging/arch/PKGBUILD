@@ -1,0 +1,106 @@
+# Maintainer: Dominikos Pritis <hey@myroomie.gr>
+#
+# A -git package because nothing is tagged yet. When there is a release, this
+# becomes `passman` with a fixed source tarball and no pkgver().
+#
+# The package installs the pieces and stops there. It does not claim
+# org.freedesktop.secrets, enable the user unit, or edit any PAM stack: taking
+# over the session's secret store is a decision the person using the machine
+# makes, after they have imported what their current keyring is holding. See
+# the post-install message.
+pkgname=passman-git
+pkgver=0.1.0.r0.gHEAD
+pkgrel=1
+pkgdesc="Password and secrets manager for COSMIC: Secret Service, Secret portal and SSH agent"
+arch=('x86_64' 'aarch64')
+url="https://github.com/idominikos/passman"
+license=('GPL-3.0-or-later')
+# From what the release binaries actually link against, not from guesswork:
+#   libtss2-*      tpm2-tss     TPM-sealed key slots
+#   libudev        systemd-libs hidapi's Linux backend, for FIDO2 tokens
+#   libxkbcommon   libcosmic
+#   libcrypto      openssl
+depends=('tpm2-tss' 'systemd-libs' 'libxkbcommon' 'openssl' 'zlib' 'zstd' 'brotli' 'pam')
+makedepends=('rust>=1.97' 'cargo' 'git' 'pkgconf')
+optdepends=(
+  'xdg-desktop-portal: per-application secrets for sandboxed Flatpak apps'
+  'sqlite: reading gcloud credentials during import'
+  'gnupg: reading a pass (password-store) tree during import'
+)
+provides=('passman')
+conflicts=('passman')
+install="$pkgname.install"
+source=("$pkgname::git+https://github.com/idominikos/passman.git")
+sha256sums=('SKIP')
+options=('!lto')  # the workspace sets its own lto in Cargo.toml
+
+pkgver() {
+  cd "$srcdir/$pkgname"
+  # 0.1.0.r<commits>.g<hash> — sorts correctly and says which commit it is.
+  printf "%s.r%s.g%s" \
+    "$(awk -F'"' '/^version/ {print $2; exit}' Cargo.toml)" \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/$pkgname"
+  # Fetch now so build() can run offline, which is what makechrootpkg expects.
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$srcdir/$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release \
+    -p passman-cosmic -p passman-daemon -p passman-cli \
+    -p passman-applet -p passman-nmh -p passman-pam
+}
+
+check() {
+  cd "$srcdir/$pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  # The hardware tests are #[ignore]d behind environment variables; everything
+  # else runs without a TPM, a token or a display.
+  cargo test --frozen --workspace --exclude passman-cosmic --exclude passman-applet
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+
+  install -Dm755 target/release/passman             "$pkgdir/usr/bin/passman"
+  install -Dm755 target/release/passmand            "$pkgdir/usr/bin/passmand"
+  install -Dm755 target/release/passman-cli         "$pkgdir/usr/bin/passman-cli"
+  install -Dm755 target/release/passman-applet      "$pkgdir/usr/bin/passman-applet"
+  install -Dm755 target/release/passman-native-host "$pkgdir/usr/bin/passman-native-host"
+
+  # PAM module. Installed, not wired: adding it to a login stack is the
+  # installer's job, with a backup and a check that sudo still works.
+  install -Dm755 target/release/libpam_passman.so "$pkgdir/usr/lib/security/pam_passman.so"
+
+  install -Dm644 res/io.github.idominikos.Passman.desktop \
+    "$pkgdir/usr/share/applications/io.github.idominikos.Passman.desktop"
+  install -Dm644 res/io.github.idominikos.PassmanApplet.desktop \
+    "$pkgdir/usr/share/applications/io.github.idominikos.PassmanApplet.desktop"
+  install -Dm644 res/io.github.idominikos.Passman.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/io.github.idominikos.Passman.metainfo.xml"
+  install -Dm644 res/icons/hicolor/scalable/apps/io.github.idominikos.Passman.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.idominikos.Passman.svg"
+  install -Dm644 res/icons/hicolor/symbolic/apps/io.github.idominikos.Passman-symbolic.svg \
+    "$pkgdir/usr/share/icons/hicolor/symbolic/apps/io.github.idominikos.Passman-symbolic.svg"
+
+  # The portal backend file has to live where xdg-desktop-portal scans, which
+  # is XDG_DATA_DIRS only — a copy under ~/.local/share is never found.
+  install -Dm644 res/passman.portal \
+    "$pkgdir/usr/share/xdg-desktop-portal/portals/passman.portal"
+
+  install -Dm644 res/passman-daemon.service \
+    "$pkgdir/usr/lib/systemd/user/passman-daemon.service"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 SECURITY.md "$pkgdir/usr/share/doc/$pkgname/SECURITY.md"
+  install -Dm644 res/pam-install.md "$pkgdir/usr/share/doc/$pkgname/pam-install.md"
+}

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Symbolic variant: one flat shape, no colour of its own. Symbolic icons are
+  recoloured by the theme to match the panel or list they sit in, so anything
+  with its own palette would fight whatever it is placed on.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path d="M8 1.5a4.5 4.5 0 0 0-2.1 8.5L4.5 14.5h7L10.1 10A4.5 4.5 0 0 0 8 1.5zm0 2.6a1.9 1.9 0 1 1 0 3.8 1.9 1.9 0 0 1 0-3.8z"
+        fill="#2e3436"/>
+</svg>

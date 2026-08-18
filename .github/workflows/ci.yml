@@ -1,0 +1,82 @@
+# Checks the build and the test suite somewhere other than the author's laptop,
+# which until now was the only machine any of this had ever run on.
+#
+# `cargo fmt --check` is deliberately absent: the tree is not rustfmt-clean and
+# making it so is a decision about house style, not something CI should force
+# by failing every pull request until someone reformats 36 files.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A build that has to go and fetch a git dependency should say so loudly
+  # rather than quietly using whatever moved under it.
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+jobs:
+  # Everything that does not need a graphical stack: the vault, the crypto, the
+  # Secret Service, the agent, the importers, PAM. This is where the tests are.
+  test:
+    name: Test (no GUI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libtss2-dev libudev-dev libssl-dev libpam0g-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Matches rust-toolchain.toml; the action reads it when told to.
+          toolchain: "1.97.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --exclude passman-cosmic --exclude passman-applet
+      - name: Test
+        run: cargo test --workspace --exclude passman-cosmic --exclude passman-applet
+      - name: Clippy
+        run: cargo clippy --workspace --exclude passman-cosmic --exclude passman-applet --all-targets -- -D warnings
+
+  # The GUI and the panel applet pull in libcosmic, and with it wayland, xkb and
+  # a font stack. Built but not tested: the tests there drive state machines,
+  # and they run in the job above's scope only when a display stack is present.
+  gui:
+    name: Build (GUI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libtss2-dev libudev-dev libssl-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p passman-cosmic -p passman-applet
+      - run: cargo test -p passman-cosmic -p passman-applet
+
+  # Cheap checks that catch the things nobody notices until a packager does.
+  packaging:
+    name: Metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y appstream desktop-file-utils shellcheck
+      - name: AppStream metainfo
+        # --no-net because the URLs it wants to reach are this repository, which
+        # a fork or a pre-publication branch will not have.
+        run: appstreamcli validate --no-net res/io.github.idominikos.Passman.metainfo.xml
+      - name: Desktop entries
+        run: desktop-file-validate res/*.desktop
+      - name: Installer script
+        run: shellcheck -S warning scripts/passman-setup scripts/passman-reimport-keyring
