@@ -21,7 +21,11 @@ license=('GPL-3.0-or-later')
 #   libxkbcommon   libcosmic
 #   libcrypto      openssl
 depends=('tpm2-tss' 'systemd-libs' 'libxkbcommon' 'openssl' 'zlib' 'zstd' 'brotli' 'pam')
-makedepends=('rust>=1.97' 'cargo' 'git' 'pkgconf')
+# Unversioned on purpose: `rustup` provides `rust` and `cargo` without a
+# version, so a versioned makedepend can never be satisfied on a machine using
+# it. The minimum is `rust-version` in Cargo.toml, and cargo says so plainly if
+# the toolchain is older.
+makedepends=('cargo' 'git' 'pkgconf')
 optdepends=(
   'xdg-desktop-portal: per-application secrets for sandboxed Flatpak apps'
   'sqlite: reading gcloud credentials during import'
