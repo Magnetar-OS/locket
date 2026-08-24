@@ -19,7 +19,7 @@ members = [
 [workspace.package]
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.97.1"
+rust-version = "1.98.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/entro314-labs/locket"
 
@@ -33,7 +33,7 @@ locket-agent = { path = "crates/locket-agent" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
-zbus = { version = "5.18", default-features = false, features = ["tokio"] }
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 # --- Crypto ----------------------------------------------------------------
 # HELD BACK DELIBERATELY — do not `cargo upgrade --incompatible` these.

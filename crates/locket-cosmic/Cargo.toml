@@ -34,9 +34,19 @@ serde.workspace = true
 uuid.workspace = true
 dirs.workspace = true
 
+# --- localization ---
+i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
+i18n-embed-fl = "0.10"
+rust-embed = "8.12"
+
 [dependencies.libcosmic]
+# No `rev`: every COSMIC application tracks the default branch and pins the
+# exact commit in `Cargo.lock` instead. A `rev` here would also desynchronise
+# the tree — libcosmic's own `cosmic-panel-config` and `cosmic-settings-config`
+# follow the branch, so a pinned libcosmic makes cargo build two copies of
+# `cosmic-config`, `iced_core` and `iced_futures`. Update deliberately with
+# `cargo update -p libcosmic`.
 git = "https://github.com/pop-os/libcosmic"
-rev = "43a50cb6f5af18fa6cbea535fb46460a3c5cd573"
 default-features = false
 features = [
     "winit",
@@ -63,10 +73,6 @@ features = [
 # plain ASCII — most of a vault — on the cheap path. Enabling it only removes
 # that second half.
 
-[dependencies.cosmic-config]
-git = "https://github.com/pop-os/libcosmic"
-rev = "43a50cb6f5af18fa6cbea535fb46460a3c5cd573"
-features = ["macro"]
 
 [dev-dependencies]
 tempfile = "3"

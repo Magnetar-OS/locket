@@ -5,5 +5,5 @@
 # `mise.toml` used to do this job. rustup reads this file with no extra tool
 # installed, which is one less thing to have.
 [toolchain]
-channel = "1.97.1"
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]
