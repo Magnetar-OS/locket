@@ -14,6 +14,7 @@
 //!   device-wide — the screen says so, because someone choosing a 4-digit PIN
 //!   deserves to know what is holding it up.
 
+use crate::fl;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -28,10 +29,10 @@ pub enum Factor {
 }
 
 impl Factor {
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Factor::TpmPin => "TPM PIN",
-            Factor::SecurityKey => "Security key",
+            Factor::TpmPin => fl!("factor-tpm-pin"),
+            Factor::SecurityKey => fl!("factor-security-key"),
         }
     }
 
@@ -47,29 +48,35 @@ impl Factor {
 /// Human description of a slot, for the list.
 pub fn describe(factor: &SlotFactor) -> String {
     match factor {
-        SlotFactor::Passphrase { params, .. } => format!(
-            "Argon2id · {} MiB · {} passes",
-            params.m_cost / 1024,
-            params.t_cost
-        ),
+        SlotFactor::Passphrase { params, .. } => {
+            let memory = params.m_cost / 1024;
+            let passes = params.t_cost;
+            fl!("slot-passphrase", memory = memory, passes = passes)
+        }
         SlotFactor::Tpm2 {
             with_pin, parent, ..
-        } => format!(
-            "Sealed to this machine's TPM{} · {}",
-            if *with_pin { ", released by PIN" } else { "" },
-            match parent {
+        } => fl!(
+            "slot-tpm",
+            pin = if *with_pin {
+                fl!("slot-tpm-with-pin")
+            } else {
+                String::new()
+            },
+            // Key-hierarchy names, not prose: the same two words in every
+            // language, and the same two the TPM specification uses.
+            parent = match parent {
                 locket_core::slots::TpmParent::EccP256 => "P-256",
                 locket_core::slots::TpmParent::Rsa2048 => "RSA-2048",
             }
         ),
         SlotFactor::Fido2 {
             user_verification, ..
-        } => format!(
-            "Hardware token{}",
-            if *user_verification {
-                ", with user verification"
+        } => fl!(
+            "slot-fido",
+            verification = if *user_verification {
+                fl!("slot-fido-uv")
             } else {
-                ", presence only"
+                fl!("slot-fido-presence")
             }
         ),
     }
@@ -106,7 +113,7 @@ pub fn enroll_tpm(vault: &mut Vault, pin: &str) -> Result<Uuid, String> {
 
 #[cfg(not(feature = "tpm"))]
 pub fn enroll_tpm(_vault: &mut Vault, _pin: &str) -> Result<Uuid, String> {
-    Err("this build has no TPM support".into())
+    Err(fl!("error-no-tpm-support"))
 }
 
 /// Enrol a FIDO2 slot. Blocking: needs a touch.
@@ -121,7 +128,7 @@ pub fn enroll_fido(vault: &mut Vault, pin: &str) -> Result<Uuid, String> {
 
 #[cfg(not(feature = "fido"))]
 pub fn enroll_fido(_vault: &mut Vault, _pin: &str) -> Result<Uuid, String> {
-    Err("this build has no security-key support".into())
+    Err(fl!("error-no-fido-support"))
 }
 
 #[derive(Clone, Debug)]
@@ -147,12 +154,8 @@ impl Security {
         let mut column = widget::column::with_capacity(12).spacing(spacing.space_s);
 
         column = column
-            .push(widget::text::title3("Unlock factors"))
-            .push(widget::text::body(
-                "Any one of these opens the vault. Hardware factors are added \
-                 alongside your passphrase, never instead of it — so losing a \
-                 device does not lose the vault.",
-            ));
+            .push(widget::text::title3(fl!("security-title")))
+            .push(widget::text::body(fl!("security-blurb")));
 
         // Errors and notices persist until dismissed: an enrolment failure is
         // worth reading, and a toast would be gone before a user looks up from
@@ -172,7 +175,10 @@ impl Security {
                     .spacing(spacing.space_s)
                     .align_y(Alignment::Center)
                     .push(body.width(Length::Fill))
-                    .push(widget::button::standard("Dismiss").on_press(Message::Dismiss)),
+                    .push(
+                        widget::button::standard(fl!("security-dismiss"))
+                            .on_press(Message::Dismiss),
+                    ),
             );
         }
 
@@ -181,9 +187,9 @@ impl Security {
             // The vault is moved into the worker while a factor is being
             // enrolled, so "locked" would be a lie during a touch prompt.
             let message = match self.busy {
-                Some(Factor::TpmPin) => "Sealing a key to the TPM…",
-                Some(Factor::SecurityKey) => "Waiting for you to touch your security key…",
-                None => "Unlock the vault to manage factors.",
+                Some(Factor::TpmPin) => fl!("security-sealing"),
+                Some(Factor::SecurityKey) => fl!("security-touch-key"),
+                None => fl!("security-locked"),
             };
             return column.push(widget::text::body(message)).into();
         };
@@ -202,10 +208,11 @@ impl Security {
                 )
                 .push(if last_passphrase || vault.slots().len() == 1 {
                     // Explain the greyed-out button rather than just disabling it.
-                    Element::from(widget::text::caption("Required"))
+                    Element::from(widget::text::caption(fl!("security-required")))
                 } else {
                     Element::from(
-                        widget::button::destructive("Remove").on_press(Message::Remove(slot.id)),
+                        widget::button::destructive(fl!("security-remove"))
+                            .on_press(Message::Remove(slot.id)),
                     )
                 });
             list = list.add(row);
@@ -215,10 +222,10 @@ impl Security {
         // -- add a factor ---------------------------------------------------
         column = column
             .push(widget::divider::horizontal::default())
-            .push(widget::text::caption_heading("Add a factor"));
+            .push(widget::text::caption_heading(fl!("security-add-heading")));
 
         column = column.push(
-            widget::text_input::secure_input("PIN (optional)", &self.pin, None, true)
+            widget::text_input::secure_input(fl!("security-pin-placeholder"), &self.pin, None, true)
                 .on_input(Message::PinChanged),
         );
 
@@ -227,11 +234,11 @@ impl Security {
             let busy = self.busy == Some(factor);
             let label = if busy {
                 match factor {
-                    Factor::TpmPin => "Sealing…".to_owned(),
-                    Factor::SecurityKey => "Touch your key…".to_owned(),
+                    Factor::TpmPin => fl!("security-sealing-short"),
+                    Factor::SecurityKey => fl!("security-touch-short"),
                 }
             } else {
-                format!("Add {}", factor.label())
+                fl!("security-add-factor", factor = factor.label())
             };
             let button = widget::button::standard(label);
             buttons = buttons.push(if busy || !factor.compiled_in() {
@@ -243,19 +250,11 @@ impl Security {
         column = column.push(buttons);
 
         if !Factor::TpmPin.compiled_in() || !Factor::SecurityKey.compiled_in() {
-            column = column.push(widget::text::caption(
-                "Some factors are unavailable because this build was compiled \
-                 without support for them.",
-            ));
+            column = column.push(widget::text::caption(fl!("security-build-missing")));
         }
 
         // The honest caveat, where someone choosing a PIN will read it.
-        column = column.push(widget::text::caption(
-            "A TPM PIN is protected by the chip's lockout, not by its length — \
-             which is what makes a short PIN safe. That lockout is device-wide: \
-             repeated wrong PINs can lock out anything else using the TPM, \
-             including disk unlock, until it recovers.",
-        ));
+        column = column.push(widget::text::caption(fl!("security-tpm-caveat")));
 
         widget::scrollable(widget::container(column).padding(spacing.space_s))
             .height(Length::Fill)
@@ -327,29 +326,40 @@ mod tests {
         assert!(!is_last_passphrase(&v, first));
     }
 
+    /// Fluent wraps every interpolated value in bidi isolation marks
+    /// (U+2068 … U+2069) so a number keeps its direction inside an RTL
+    /// sentence. They are invisible on screen; they are not invisible to
+    /// `contains`.
+    fn without_isolates(s: &str) -> String {
+        s.chars().filter(|c| !matches!(c, '\u{2068}' | '\u{2069}')).collect()
+    }
+
     #[test]
     fn descriptions_say_what_the_factor_actually_is() {
-        let pass = describe(&SlotFactor::Passphrase {
+        let pass = without_isolates(&describe(&SlotFactor::Passphrase {
             params: KdfParams::default(),
             salt: String::new(),
-        });
-        assert!(pass.contains("Argon2id") && pass.contains("64 MiB"));
+        }));
+        assert!(
+            pass.contains("Argon2id") && pass.contains("64 MiB"),
+            "{pass}"
+        );
 
-        let tpm = describe(&SlotFactor::Tpm2 {
+        let tpm = without_isolates(&describe(&SlotFactor::Tpm2 {
             sealed: String::new(),
             parent: locket_core::slots::TpmParent::EccP256,
             pcrs: vec![],
             with_pin: true,
-        });
-        assert!(tpm.contains("PIN") && tpm.contains("P-256"));
+        }));
+        assert!(tpm.contains("PIN") && tpm.contains("P-256"), "{tpm}");
 
-        let fido = describe(&SlotFactor::Fido2 {
+        let fido = without_isolates(&describe(&SlotFactor::Fido2 {
             credential_id: String::new(),
             salt: String::new(),
             rp_id: "locket.local".into(),
             user_verification: false,
-        });
-        assert!(fido.contains("presence only"));
+        }));
+        assert!(fido.contains("presence only"), "{fido}");
     }
 
     #[test]

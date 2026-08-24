@@ -348,20 +348,20 @@ install_files() {
 
     say "Installing desktop entries"
     run mkdir -p "$DESKTOP_DIR"
-    run install -m 644 "$REPO/res/io.github.idominikos.Locket.desktop" "$DESKTOP_DIR/"
-    run install -m 644 "$REPO/res/io.github.idominikos.LocketApplet.desktop" "$DESKTOP_DIR/"
+    run install -m 644 "$REPO/res/io.github.entro314labs.Locket.desktop" "$DESKTOP_DIR/"
+    run install -m 644 "$REPO/res/io.github.entro314labs.LocketApplet.desktop" "$DESKTOP_DIR/"
 
     # Without these the desktop entries name an icon nothing provides, and the
     # app shows up as a blank square in the launcher, the dock and alt-tab.
     say "Installing icons and metadata"
     run mkdir -p "$ICON_DIR/scalable/apps" "$ICON_DIR/symbolic/apps" "$METAINFO_DIR"
     run install -m 644 \
-        "$REPO/res/icons/hicolor/scalable/apps/io.github.idominikos.Locket.svg" \
+        "$REPO/res/icons/hicolor/scalable/apps/io.github.entro314labs.Locket.svg" \
         "$ICON_DIR/scalable/apps/"
     run install -m 644 \
-        "$REPO/res/icons/hicolor/symbolic/apps/io.github.idominikos.Locket-symbolic.svg" \
+        "$REPO/res/icons/hicolor/symbolic/apps/io.github.entro314labs.Locket-symbolic.svg" \
         "$ICON_DIR/symbolic/apps/"
-    run install -m 644 "$REPO/res/io.github.idominikos.Locket.metainfo.xml" "$METAINFO_DIR/"
+    run install -m 644 "$REPO/res/io.github.entro314labs.Locket.metainfo.xml" "$METAINFO_DIR/"
     # The icon cache is what the shell actually reads; a new icon in an
     # uncached theme directory is an icon nothing finds.
     if command -v gtk-update-icon-cache >/dev/null 2>&1; then
@@ -383,14 +383,14 @@ install_files() {
                  "$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts" \
                  "$HOME/.mozilla/native-messaging-hosts"; do
             if [ "$DRY" = 1 ]; then
-                printf '   would write %s/io.github.idominikos.locket.json\n' "$d"
+                printf '   would write %s/io.github.entro314labs.locket.json\n' "$d"
                 continue
             fi
             mkdir -p "$d"
             sed -e "s|@HOST_PATH@|$BIN_DIR/locket-native-host|" \
                 -e "s|@EXTENSION_ID@|$EXT_ID|" \
                 "$REPO/res/native-messaging-host.json.in" \
-                > "$d/io.github.idominikos.locket.json"
+                > "$d/io.github.entro314labs.locket.json"
         done
         ok "native messaging host installed"
     fi
@@ -617,11 +617,11 @@ do_uninstall() {
     fi
 
     say "Removing desktop entries, icons and metadata"
-    run rm -f "$DESKTOP_DIR/io.github.idominikos.Locket.desktop"
-    run rm -f "$DESKTOP_DIR/io.github.idominikos.LocketApplet.desktop"
-    run rm -f "$ICON_DIR/scalable/apps/io.github.idominikos.Locket.svg"
-    run rm -f "$ICON_DIR/symbolic/apps/io.github.idominikos.Locket-symbolic.svg"
-    run rm -f "$METAINFO_DIR/io.github.idominikos.Locket.metainfo.xml"
+    run rm -f "$DESKTOP_DIR/io.github.entro314labs.Locket.desktop"
+    run rm -f "$DESKTOP_DIR/io.github.entro314labs.LocketApplet.desktop"
+    run rm -f "$ICON_DIR/scalable/apps/io.github.entro314labs.Locket.svg"
+    run rm -f "$ICON_DIR/symbolic/apps/io.github.entro314labs.Locket-symbolic.svg"
+    run rm -f "$METAINFO_DIR/io.github.entro314labs.Locket.metainfo.xml"
 
     warn "Binaries left in $BIN_DIR; remove them by hand if you want them gone."
     warn "Your vault at $VAULT is untouched."

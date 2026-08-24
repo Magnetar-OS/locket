@@ -11,7 +11,7 @@ Nothing has been released yet, so everything so far sits under Unreleased.
 The project is now **Locket**. Everything moved with it: the binaries
 (`locket`, `locketd`, `locket-cli`, `locket-applet`, `locket-native-host`,
 `pam_locket.so`), the crates, the application id
-(`io.github.idominikos.Locket`), the development bus name
+(`io.github.entro314labs.Locket`), the development bus name
 (`org.locket.secrets`), the manager interface (`org.locket.Manager1` at
 `/org/locket/Manager`), the portal backend, the systemd unit and the scripts.
 `org.freedesktop.secrets` is untouched — that name belongs to the
@@ -45,8 +45,40 @@ The PAM line matters more than it looks: the unlock socket moved to
 login and keep finding nothing there — the exact silent failure this release
 spent its time removing elsewhere.
 
+**The application id moved to the namespace the rest of the suite uses**:
+`io.github.entro314labs.Locket`, with `io.github.entro314labs.LocketApplet` for
+the panel indicator, `io.github.entro314labs.locket` for the browser's native
+messaging host and `locket@entro314labs.github.io` for the Firefox extension.
+Slate, Circle and Envelope are all `io.github.entro314labs.*`; Locket was the
+one that was not, while its own `Cargo.toml` pointed at that organisation.
+
+Settings are carried across again, from both older ids, and the keys inside the
+store were renamed with them — `auto-lock-seconds` is now `auto_lock_seconds`,
+because `cosmic-config`'s derive names each key after its field. Copied, not
+moved, so an older build still finds its own.
+
+An installed copy of a previous build leaves files behind under the old id:
+
+```sh
+rm -f ~/.local/share/applications/io.github.idominikos.Locket*.desktop
+rm -f ~/.local/share/icons/hicolor/*/apps/io.github.idominikos.Locket*.svg
+rm -f ~/.local/share/metainfo/io.github.idominikos.Locket.metainfo.xml
+scripts/locket-setup            # reinstalls under the new id
+```
+
 ### Fixed
 
+- **Keyboard shortcuts did nothing on a non-Latin layout.** Ctrl+N, Ctrl+L and
+  Ctrl+F were matched against `Key::Character("n")`, which a Greek or Cyrillic
+  layout never produces. They go through libcosmic's `KeyBind` now, which falls
+  back to the physical key — and which compares the whole modifier set, so
+  Ctrl+Shift+N no longer creates an item either.
+- **Payment cards had no icon.** `credit-card-symbolic` is in no icon theme
+  COSMIC falls back through; the name COSMIC and Pop both ship is
+  `payment-card-symbolic`.
+- **The AppStream metadata failed validation** and named a repository that does
+  not exist, which also meant `makepkg` could not clone the source. The release
+  it advertised (0.1.0) disagreed with the version the About page shows.
 - **RSA keys could not sign at all through the SSH agent.** A key loaded from
   a file carries no hash choice, and in that state `ssh-key` refused. The hash
   now comes from the client's sign-request flags, which were previously parsed
@@ -73,6 +105,16 @@ spent its time removing elsewhere.
 
 ### Added
 
+- **The interface is translatable.** Every string the GUI and the panel applet
+  show now comes from a fluent catalogue (`crates/*/i18n/`), selected from the
+  languages the desktop asks for. `fl!()` checks ids at compile time, so a typo
+  is a build error rather than a label reading `some-id`.
+- **A menu bar**, with the shortcuts printed beside the actions they run —
+  which is the only place anyone was ever going to find out that Ctrl+N exists.
+- **A `justfile`**, the shape every COSMIC application ships: `build-release`,
+  `install` with `rootdir`/`prefix`, `validate-metadata`, `vendor`. The
+  interactive installer (`scripts/locket-setup`) is unchanged and still the way
+  to take over the session's secret store.
 - **Security keys over SSH** — `sk-ssh-ed25519` and `sk-ecdsa-sha2-nistp256`
   identities, signed by driving a FIDO2 assertion per signature.
 - **SSH certificates** — advertised alongside the key they belong to, since a
@@ -94,6 +136,20 @@ spent its time removing elsewhere.
 
 ### Changed
 
+- **libcosmic is no longer pinned to a revision.** Every COSMIC application
+  tracks the default branch and pins the commit in `Cargo.lock`; a `rev` on top
+  of that bought nothing and cost a split dependency tree, because libcosmic's
+  own `cosmic-panel-config` and `cosmic-settings-config` follow the branch — so
+  two copies of `cosmic-config`, `iced_core` and `iced_futures` were being
+  compiled. The separate `cosmic-config` dependency is gone with it;
+  `cosmic::cosmic_config` is the same crate, re-exported.
+- Settings use `cosmic-config`'s `CosmicConfigEntry` derive and libcosmic's
+  `watch_config`, replacing a hand-written store, watcher and key filter that
+  did the same thing.
+- Ctrl+F is handled once. libcosmic's keyboard navigation already delivers it
+  as `on_search`; the second listener has been removed.
+- The About page loads its icon from the binary rather than from the icon
+  theme, so it is there in an uninstalled build too.
 - `Vault::save` refuses to overwrite a file that changed since it was read.
   Use `reload` to pick the other writer up, or `save_force` to mean it.
 - `locketd` gained `--auto-lock` and `--no-lock-on-idle-session`; the

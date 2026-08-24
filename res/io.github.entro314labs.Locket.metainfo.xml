@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Copyright 2026 Dominikos Pritis -->
 <component type="desktop-application">
-  <id>io.github.idominikos.Locket</id>
+  <id>io.github.entro314labs.Locket</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
 
@@ -31,14 +31,29 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">io.github.idominikos.Locket.desktop</launchable>
+  <launchable type="desktop-id">io.github.entro314labs.Locket.desktop</launchable>
 
   <provides>
+    <!-- How a COSMIC application says so; the store and the app library filter
+         on it. -->
+    <id>com.system76.CosmicApplication</id>
     <binary>locket</binary>
     <binary>locketd</binary>
     <binary>locket-cli</binary>
     <dbus type="session">org.freedesktop.secrets</dbus>
   </provides>
+
+  <!-- The narrowest window the interface still works in, and what it can be
+       driven with. Software centres show both. -->
+  <requires>
+    <display_length compare="ge">560</display_length>
+  </requires>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>touch</control>
+  </supports>
 
   <categories>
     <category>Utility</category>
@@ -55,18 +70,27 @@
     <keyword>credential</keyword>
   </keywords>
 
-  <url type="homepage">https://github.com/idominikos/locket</url>
-  <url type="bugtracker">https://github.com/idominikos/locket/issues</url>
-  <url type="vcs-browser">https://github.com/idominikos/locket</url>
+  <url type="homepage">https://github.com/entro314-labs/locket</url>
+  <url type="bugtracker">https://github.com/entro314-labs/locket/issues</url>
+  <url type="vcs-browser">https://github.com/entro314-labs/locket</url>
 
-  <developer id="io.github.idominikos">
+  <developer id="io.github.entro314labs">
     <name>Dominikos Pritis</name>
   </developer>
 
   <content_rating type="oars-1.1"/>
 
+  <!-- The tint a software centre paints behind the icon. -->
+  <branding>
+    <color type="primary" scheme_preference="light">#e5dff4</color>
+    <color type="primary" scheme_preference="dark">#2c1f4a</color>
+  </branding>
+
   <releases>
-    <release version="0.1.0" type="development" date="2026-08-17">
+    <!-- Kept in step with `version` in Cargo.toml: the About page reads the
+         crate's version, and two numbers that disagree are a bug report nobody
+         can act on. -->
+    <release version="1.0.0" type="development" date="2026-08-24">
       <description>
         <p>Not released. The version the repository carries while it is still developed against a single machine.</p>
       </description>

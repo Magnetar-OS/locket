@@ -10,9 +10,10 @@ use std::sync::{Arc, Mutex};
 
 use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
+use cosmic::iced::keyboard::{Key, Modifiers, key::Physical};
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::prelude::*;
-use cosmic::widget::{self, nav_bar};
+use cosmic::widget::{self, menu, nav_bar};
 use locket_core::{
     Totp, Vault,
     crypto::KdfParams,
@@ -24,11 +25,20 @@ use uuid::Uuid;
 use std::sync::LazyLock;
 
 use crate::config::{self, Settings};
+use crate::fl;
+use crate::labels;
 use crate::daemon::{self, DaemonEvent};
 use crate::import;
 use crate::preferences::{self, Status};
 use crate::editor::{Editor, EditorMessage, Outcome};
 use crate::security::{self, Security};
+
+/// The application icon, for the About page.
+///
+/// Embedded rather than looked up by name so it is there in an uninstalled
+/// build, where nothing has been written into an icon theme yet.
+const APP_ICON: &[u8] =
+    include_bytes!("../../../res/icons/hicolor/scalable/apps/io.github.entro314labs.Locket.svg");
 
 /// Id of the search box, so a shortcut can focus it.
 static SEARCH_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("locket-search"));
@@ -56,11 +66,13 @@ pub enum Category {
 impl Category {
     fn label(self) -> String {
         match self {
-            Category::All => "All Items".to_owned(),
-            Category::Favorites => "Favorites".to_owned(),
-            Category::Security => "Security".to_owned(),
-            Category::Settings => "Settings".to_owned(),
-            Category::Kind(k) => format!("{}s", k.label()),
+            Category::All => fl!("category-all"),
+            Category::Favorites => fl!("category-favorites"),
+            Category::Security => fl!("category-security"),
+            Category::Settings => fl!("category-settings"),
+            // A category is the plural of its kind, and the plural is its own
+            // string: appending an "s" only ever worked in English.
+            Category::Kind(k) => labels::kind_plural(k),
         }
     }
 
@@ -100,7 +112,7 @@ pub enum Message {
     ToggleReveal(String),
     /// Show or hide the `otpauth://` QR for a one-time-code field.
     ToggleQr(String),
-    CopyValue(&'static str, String),
+    CopyValue(String, String),
     ClearClipboard,
     /// What the clipboard held when the clear timer fired.
     ClipboardChecked(Option<String>),
@@ -128,6 +140,10 @@ pub enum Message {
     Security(security::Message),
     /// Move focus to the search box.
     FocusSearch,
+    /// A key was pressed while no widget wanted it.
+    Key(Modifiers, Physical, Key),
+    /// Show the About section, which lives at the foot of Settings.
+    OpenAbout,
     FocusPassphrase,
     /// The idle timer fired; lock if nothing has happened for long enough.
     IdleCheck,
@@ -167,9 +183,65 @@ impl cosmic::app::CosmicFlags for Flags {
     type Args = Vec<String>;
 }
 
+/// What the menu bar and the keyboard can ask for.
+///
+/// Actions rather than messages because `menu::items` looks an action up in
+/// the key-bind table to print its shortcut beside the item — which is the
+/// only way anybody discovers a shortcut exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MenuAction {
+    NewItem,
+    Import,
+    Lock,
+    Search,
+    About,
+}
+
+impl menu::action::MenuAction for MenuAction {
+    type Message = Message;
+
+    fn message(&self) -> Self::Message {
+        match self {
+            MenuAction::NewItem => Message::NewItem,
+            MenuAction::Import => Message::OpenImport,
+            MenuAction::Lock => Message::Lock,
+            MenuAction::Search => Message::FocusSearch,
+            MenuAction::About => Message::OpenAbout,
+        }
+    }
+}
+
+/// The shortcuts, in one table.
+///
+/// `KeyBind::matches` compares the whole modifier set and falls back to the
+/// physical key, so Ctrl+N is Ctrl+N on a Greek or Cyrillic layout too — where
+/// matching `Key::Character("n")` by hand matches nothing at all.
+fn key_binds() -> std::collections::HashMap<menu::KeyBind, MenuAction> {
+    use menu::key_bind::{KeyBind, Modifier};
+
+    let mut binds = std::collections::HashMap::new();
+    let mut bind = |modifiers: Vec<Modifier>, key: &str, action| {
+        binds.insert(
+            KeyBind {
+                modifiers,
+                key: Key::Character(key.into()),
+            },
+            action,
+        );
+    };
+    bind(vec![Modifier::Ctrl], "n", MenuAction::NewItem);
+    bind(vec![Modifier::Ctrl], "i", MenuAction::Import);
+    bind(vec![Modifier::Ctrl], "l", MenuAction::Lock);
+    // Ctrl+F is also delivered by libcosmic's own keyboard navigation, which
+    // calls `on_search`; it is in the table so the menu can print it.
+    bind(vec![Modifier::Ctrl], "f", MenuAction::Search);
+    binds
+}
+
 pub struct App {
     core: Core,
     nav: nav_bar::Model,
+    key_binds: std::collections::HashMap<menu::KeyBind, MenuAction>,
     vault_path: PathBuf,
     vault_exists: bool,
     vault: Option<Vault>,
@@ -191,7 +263,7 @@ pub struct App {
     /// The backing store the preferences screen writes through. `None` when
     /// `cosmic-config` is unavailable, which leaves settings usable for the
     /// session but not persisted.
-    config: Option<cosmic_config::Config>,
+    config: Option<cosmic::cosmic_config::Config>,
     toasts: widget::Toasts<Message>,
 
     /// `Some` while the item editor is open.
@@ -262,7 +334,7 @@ impl App {
                 tracing::warn!("could not reload the changed vault: {e}");
                 self.vault = None;
                 self.screen = Screen::Locked;
-                self.error = Some("The vault was changed elsewhere. Unlock it again.".into());
+                self.error = Some(fl!("error-changed-elsewhere"));
                 false
             }
         }
@@ -282,12 +354,8 @@ impl App {
                 daemon::reload().await;
                 Message::Tick
             })),
-            Err(locket_core::Error::ChangedOnDisk { .. }) => Err(
-                "Another locket process wrote the vault a moment ago. Nothing was \
-                 overwritten — try that again."
-                    .to_owned(),
-            ),
-            Err(e) => Err(format!("Could not save: {e}")),
+            Err(locket_core::Error::ChangedOnDisk { .. }) => Err(fl!("error-save-conflict")),
+            Err(e) => Err(fl!("error-save-failed", error = e.to_string())),
         }
     }
 
@@ -343,18 +411,16 @@ impl App {
         let creating = !self.vault_exists;
 
         let heading = if creating {
-            "Create your vault"
+            fl!("unlock-create-title")
         } else {
-            "Unlock locket"
+            fl!("unlock-title")
         };
         let blurb = if creating {
-            "Choose a strong passphrase. It is the only thing protecting your \
-             secrets, and it cannot be recovered if you forget it."
+            fl!("unlock-create-blurb")
         } else if self.unlock_requested_by_app {
-            "An application asked for a secret from your vault. Unlock to let \
-             it through."
+            fl!("unlock-app-blurb")
         } else {
-            "Enter your passphrase to unlock the vault."
+            fl!("unlock-blurb")
         };
 
         let mut form = widget::column::with_capacity(6)
@@ -371,7 +437,11 @@ impl App {
                 // looking, so a word still sitting there after you have
                 // clicked in reads as content the field will not let go of.
                 widget::text_input::secure_input(
-                    if self.passphrase_focused { "" } else { "Passphrase" },
+                    if self.passphrase_focused {
+                        String::new()
+                    } else {
+                        fl!("unlock-passphrase")
+                    },
                     &self.passphrase,
                     Some(Message::ToggleShowPassphrase),
                     !self.show_passphrase,
@@ -387,9 +457,9 @@ impl App {
             form = form.push(
                 widget::text_input::secure_input(
                     if self.confirm_focused {
-                        ""
+                        String::new()
                     } else {
-                        "Confirm passphrase"
+                        fl!("unlock-confirm")
                     },
                     &self.confirm,
                     Some(Message::ToggleShowPassphrase),
@@ -410,11 +480,11 @@ impl App {
 
         let busy = self.screen == Screen::Unlocking;
         let action = widget::button::suggested(if creating {
-            "Create vault"
+            fl!("unlock-create-button")
         } else if busy {
-            "Unlocking…"
+            fl!("unlock-working")
         } else {
-            "Unlock"
+            fl!("unlock-button")
         });
         form = form.push(if busy {
             action.into()
@@ -437,7 +507,10 @@ impl App {
         let category = self.category();
         // Say what is being searched. "Search secrets" on a filtered category
         // implies it searches everything, which it does not.
-        let search = widget::search_input(format!("Search {}", category.label()), &self.search)
+        let search = widget::search_input(
+            fl!("search-placeholder", category = category.label()),
+            &self.search,
+        )
             .id(SEARCH_ID.clone())
             .on_input(Message::SearchChanged)
             .on_clear(Message::SearchChanged(String::new()));
@@ -456,23 +529,23 @@ impl App {
             let (icon, headline, detail) = if searching {
                 (
                     "system-search-symbolic",
-                    format!("No match for “{}”", self.search),
+                    fl!("empty-no-match", query = self.search.clone()),
                     match category {
-                        Category::All => "Nothing in the vault matches.".to_owned(),
-                        other => format!("Nothing in {} matches. Try All Items.", other.label()),
+                        Category::All => fl!("empty-no-match-all"),
+                        other => fl!("empty-no-match-category", category = other.label()),
                     },
                 )
             } else if total == 0 {
                 (
                     "dialog-password-symbolic",
-                    "Your vault is empty".to_owned(),
-                    "Add something, or import from another password manager.".to_owned(),
+                    fl!("empty-vault"),
+                    fl!("empty-vault-detail"),
                 )
             } else {
                 (
                     category.icon_name(),
-                    format!("No {} yet", category.label().to_lowercase()),
-                    format!("The vault holds {total} item(s) in other categories."),
+                    fl!("empty-category", category = category.label().to_lowercase()),
+                    fl!("empty-category-detail", count = total),
                 )
             };
 
@@ -485,12 +558,12 @@ impl App {
 
             if searching {
                 empty = empty.push(
-                    widget::button::standard("Clear search")
+                    widget::button::standard(fl!("clear-search"))
                         .on_press(Message::SearchChanged(String::new())),
                 );
             } else if category != Category::Security {
                 empty = empty
-                    .push(widget::button::suggested("New item").on_press(Message::NewItem));
+                    .push(widget::button::suggested(fl!("new-item")).on_press(Message::NewItem));
             }
 
             widget::container(empty)
@@ -581,16 +654,22 @@ impl App {
         let mut controls = widget::row::with_capacity(2).spacing(spacing.space_xxs);
         if sensitive {
             controls = controls.push(
-                widget::button::standard(if revealed { "Hide" } else { "Reveal" })
+                widget::button::standard(if revealed {
+                    fl!("detail-hide")
+                } else {
+                    fl!("detail-reveal")
+                })
                     .on_press(Message::ToggleReveal(name.clone())),
             );
         }
+        let what = if sensitive {
+            fl!("copied-kind-secret")
+        } else {
+            fl!("copied-kind-value")
+        };
         controls = controls.push(
-            widget::button::standard("Copy")
-                .on_press(Message::CopyValue(
-                    if sensitive { "Secret" } else { "Value" },
-                    value.to_owned(),
-                )),
+            widget::button::standard(fl!("detail-copy"))
+                .on_press(Message::CopyValue(what, value.to_owned())),
         );
 
         widget::column::with_capacity(3)
@@ -625,24 +704,24 @@ impl App {
                 .push(
                     widget::column::with_capacity(2)
                         .push(widget::text::title4(item.label.clone()))
-                        .push(widget::text::caption(item.kind.label())),
+                        .push(widget::text::caption(labels::kind(item.kind))),
                 ),
         );
 
         column = column.push(
             widget::row::with_capacity(3)
                 .spacing(spacing.space_xxs)
-                .push(widget::button::standard("Edit").on_press(Message::EditSelected))
+                .push(widget::button::standard(fl!("detail-edit")).on_press(Message::EditSelected))
                 .push(
                     widget::button::standard(if item.favorite {
-                        "Unfavorite"
+                        fl!("detail-unfavorite")
                     } else {
-                        "Favorite"
+                        fl!("detail-favorite")
                     })
                     .on_press(Message::ToggleFavorite(item.id)),
                 )
                 .push(
-                    widget::button::destructive("Delete")
+                    widget::button::destructive(fl!("detail-delete"))
                         .on_press(Message::RequestDelete(item.id)),
                 ),
         );
@@ -652,7 +731,7 @@ impl App {
         if !item.secret.is_empty() {
             column = column.push(self.field_row(
                 "__secret".to_owned(),
-                "Password".to_owned(),
+                fl!("detail-password"),
                 item.secret.expose(),
                 FieldKind::Secret,
             ));
@@ -667,7 +746,7 @@ impl App {
                     Ok((code, remaining, period)) => {
                         column = column.push(self.field_row(
                             field.name.clone(),
-                            "One-time code".to_owned(),
+                            fl!("detail-otp"),
                             &code,
                             FieldKind::Text,
                         ));
@@ -685,9 +764,9 @@ impl App {
                         // the caption goes red: the bar alone reads as "some
                         // left" right up until it is gone.
                         let caption = widget::text::caption(if remaining == 1 {
-                            "expires in 1 second".to_owned()
+                            fl!("detail-expires-one")
                         } else {
-                            format!("expires in {remaining} seconds")
+                            fl!("detail-expires", seconds = remaining)
                         });
                         let caption = if remaining <= 5 {
                             caption.class(cosmic::theme::Text::Color(
@@ -712,9 +791,9 @@ impl App {
                             .is_some_and(|(shown, _)| *shown == field.name);
                         column = column.push(
                             widget::button::standard(if showing {
-                                "Hide QR code"
+                                fl!("qr-hide")
                             } else {
-                                "Show QR code"
+                                fl!("qr-show")
                             })
                             .on_press(Message::ToggleQr(field.name.clone())),
                         );
@@ -728,19 +807,16 @@ impl App {
                                     .width(Length::Fill)
                                     .push(widget::qr_code::QRCode::new(data).cell_size(5.0))
                                     .push(
-                                        widget::text::caption(
-                                            "Scan to add this account to an authenticator \
-                                             app. Anyone who photographs this can generate \
-                                             your codes.",
-                                        )
-                                        .center(),
+                                        widget::text::caption(fl!("qr-caption")).center(),
                                     ),
                             );
                         }
                     }
                     Err(e) => {
-                        column = column
-                            .push(widget::text::caption(format!("Invalid TOTP seed: {e}")));
+                        column = column.push(widget::text::caption(fl!(
+                            "invalid-totp",
+                            error = e.to_string()
+                        )));
                     }
                 }
                 continue;
@@ -757,7 +833,7 @@ impl App {
         if !item.attributes.is_empty() {
             let mut attrs = widget::column::with_capacity(item.attributes.len() + 1)
                 .spacing(spacing.space_xxxs)
-                .push(widget::text::caption_heading("Secret Service attributes"));
+                .push(widget::text::caption_heading(fl!("detail-attributes")));
             for (k, v) in &item.attributes {
                 attrs = attrs.push(widget::text::caption(format!("{k} = {v}")));
             }
@@ -773,7 +849,7 @@ impl cosmic::Application for App {
     type Flags = Flags;
     type Message = Message;
 
-    const APP_ID: &'static str = "io.github.idominikos.Locket";
+    const APP_ID: &'static str = "io.github.entro314labs.Locket";
 
     fn core(&self) -> &Core {
         &self.core
@@ -813,6 +889,7 @@ impl cosmic::Application for App {
         let app = App {
             core,
             nav,
+            key_binds: key_binds(),
             vault_path: flags.vault_path,
             vault_exists,
             vault: None,
@@ -916,11 +993,11 @@ impl cosmic::Application for App {
                 }
                 let creating = !self.vault_exists;
                 if self.passphrase.is_empty() {
-                    self.error = Some("Enter a passphrase.".into());
+                    self.error = Some(fl!("error-enter-passphrase"));
                     return Task::none();
                 }
                 if creating && self.passphrase != self.confirm {
-                    self.error = Some("The two passphrases do not match.".into());
+                    self.error = Some(fl!("error-passphrases-differ"));
                     return Task::none();
                 }
 
@@ -956,7 +1033,7 @@ impl cosmic::Application for App {
                         }
                         Err(e) => Message::VaultOpened(
                             Arc::new(Mutex::new(None)),
-                            Some(format!("unlock task failed: {e}")),
+                            Some(fl!("error-unlock-task", error = e.to_string())),
                         ),
                     }
                 });
@@ -974,7 +1051,7 @@ impl cosmic::Application for App {
                     }
                     None => {
                         self.screen = Screen::Locked;
-                        self.error = error.or_else(|| Some("Could not open the vault.".into()));
+                        self.error = error.or_else(|| Some(fl!("error-open-failed")));
                         self.passphrase_focused = true;
                         return widget::text_input::focus(PASSPHRASE_ID.clone());
                     }
@@ -1045,12 +1122,16 @@ impl cosmic::Application for App {
                             }
                             totp.to_uri()
                         }
-                        Err(e) => return self.toast(format!("Invalid TOTP seed: {e}")),
+                        Err(e) => {
+                            return self.toast(fl!("invalid-totp", error = e.to_string()));
+                        }
                     }
                 };
                 match widget::qr_code::Data::new(uri) {
                     Ok(data) => self.qr = Some((name, data)),
-                    Err(e) => return self.toast(format!("Could not build a QR code: {e}")),
+                    Err(e) => {
+                        return self.toast(fl!("toast-qr-failed", error = e.to_string()));
+                    }
                 }
             }
 
@@ -1061,9 +1142,9 @@ impl cosmic::Application for App {
                 self.clipboard_copy = Some(value.clone());
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(value);
                 let notice = self.toast(if clear_after > 0 {
-                    format!("{what} copied — clipboard clears in {clear_after}s")
+                    fl!("toast-copied-clearing", what = what, seconds = clear_after)
                 } else {
-                    format!("{what} copied")
+                    fl!("toast-copied", what = what)
                 });
 
                 if clear_after == 0 {
@@ -1124,9 +1205,9 @@ impl cosmic::Application for App {
                     return Task::none();
                 };
                 let notice = self.toast(if allow {
-                    format!("Allowed one signature with {key}")
+                    fl!("toast-allowed-signature", key = key)
                 } else {
-                    format!("Refused a signature with {key}")
+                    fl!("toast-refused-signature", key = key)
                 });
                 return Task::batch([
                     cosmic::task::future(async move {
@@ -1222,7 +1303,7 @@ impl cosmic::Application for App {
                         return Task::batch([
                             title,
                             saved,
-                            self.toast(format!("Saved {label}")),
+                            self.toast(fl!("toast-saved", label = label)),
                         ]);
                     }
                 }
@@ -1263,12 +1344,32 @@ impl cosmic::Application for App {
             Message::DaemonUnlocked(ok) => {
                 if ok {
                     self.unlock_requested_by_app = false;
-                    return self.toast("Unlocked for other applications too");
+                    return self.toast(fl!("toast-unlocked-others"));
                 }
             }
 
             Message::FocusSearch => {
                 return widget::text_input::focus(SEARCH_ID.clone());
+            }
+
+            Message::Key(modifiers, physical, key) => {
+                for (bind, action) in &self.key_binds {
+                    if bind.matches(modifiers, &key, Some(&physical)) {
+                        return self.update(menu::action::MenuAction::message(action));
+                    }
+                }
+            }
+
+            Message::OpenAbout => {
+                // About lives at the foot of Settings rather than in a drawer
+                // of its own; take the user there.
+                let settings = self
+                    .nav
+                    .iter()
+                    .find(|id| self.nav.data::<Category>(*id) == Some(&Category::Settings));
+                if let Some(id) = settings {
+                    return self.on_nav_select(id);
+                }
             }
 
             Message::Preferences(msg) => {
@@ -1351,7 +1452,7 @@ impl cosmic::Application for App {
                     // on disk is untouched, so re-unlocking recovers.
                     self.screen = Screen::Locked;
                     self.import = None;
-                    self.error = Some("The import task failed; unlock again.".into());
+                    self.error = Some(fl!("error-import-task"));
                     return self.update_title();
                 }
 
@@ -1362,7 +1463,7 @@ impl cosmic::Application for App {
                         // only signs with hardware present, say. One toast per
                         // note, so none of them is buried in a summary line.
                         let mut tasks = vec![self.update_title()];
-                        tasks.push(self.toast(format!("Imported {summary}")));
+                        tasks.push(self.toast(fl!("toast-imported", summary = summary.to_string())));
                         for note in &summary.notes {
                             tasks.push(self.toast(note.clone()));
                         }
@@ -1413,7 +1514,7 @@ impl cosmic::Application for App {
                         return Task::none();
                     };
                     match vault.remove_slot(id) {
-                        Ok(()) => self.security.notice = Some("Factor removed.".into()),
+                        Ok(()) => self.security.notice = Some(fl!("toast-factor-removed")),
                         Err(e) => self.security.error = Some(e.to_string()),
                     }
                 }
@@ -1456,7 +1557,7 @@ impl cosmic::Application for App {
                             // so rather than pretending it is merely locked.
                             Err(e) => Message::SecurityEnrolled(
                                 Arc::new(Mutex::new(None)),
-                                Some(format!("enrolment task failed: {e}")),
+                                Some(fl!("error-enrolment-task", error = e.to_string())),
                             ),
                         }
                     });
@@ -1469,8 +1570,7 @@ impl cosmic::Application for App {
                 match error {
                     Some(e) => self.security.error = Some(e),
                     None => {
-                        self.security.notice =
-                            Some("Factor added. Your passphrase still works.".into())
+                        self.security.notice = Some(fl!("toast-factor-added"))
                     }
                 }
                 if self.vault.is_none() {
@@ -1499,7 +1599,7 @@ impl cosmic::Application for App {
                     self.core.window.show_context = false;
                 }
                 if let Some(label) = removed {
-                    return Task::batch([saved, self.toast(format!("Deleted {label}"))]);
+                    return Task::batch([saved, self.toast(fl!("toast-deleted", label = label))]);
                 }
                 return saved;
             }
@@ -1542,6 +1642,41 @@ impl cosmic::Application for App {
         Some(context_drawer::context_drawer(self.detail_view()?, Message::CloseContext).title(title))
     }
 
+    /// The menu bar.
+    ///
+    /// The same actions the header buttons offer, but with their shortcuts
+    /// printed beside them — a shortcut nothing names is a shortcut nobody
+    /// finds. Hidden while locked, where none of it would work.
+    fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
+        if self.screen != Screen::Browsing {
+            return Vec::new();
+        }
+        let file = menu::Tree::with_children(
+            menu::root(fl!("menu-file")).apply(Element::from),
+            menu::items(
+                &self.key_binds,
+                vec![
+                    menu::Item::Button(fl!("new-item"), None, MenuAction::NewItem),
+                    menu::Item::Button(fl!("import"), None, MenuAction::Import),
+                    menu::Item::Divider,
+                    menu::Item::Button(fl!("lock"), None, MenuAction::Lock),
+                ],
+            ),
+        );
+        let view = menu::Tree::with_children(
+            menu::root(fl!("menu-view")).apply(Element::from),
+            menu::items(
+                &self.key_binds,
+                vec![
+                    menu::Item::Button(fl!("menu-search"), None, MenuAction::Search),
+                    menu::Item::Divider,
+                    menu::Item::Button(fl!("menu-about"), None, MenuAction::About),
+                ],
+            ),
+        );
+        vec![menu::bar(vec![file, view]).into()]
+    }
+
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
         if self.screen != Screen::Browsing {
             return Vec::new();
@@ -1552,19 +1687,19 @@ impl cosmic::Application for App {
         if self.editor.is_none() && self.import.is_none() {
             if !matches!(self.category(), Category::Security | Category::Settings) {
                 actions.push(
-                    widget::button::suggested("New item")
+                    widget::button::suggested(fl!("new-item"))
                         .on_press(Message::NewItem)
                         .into(),
                 );
             }
             actions.push(
-                widget::button::standard("Import")
+                widget::button::standard(fl!("import"))
                     .on_press(Message::OpenImport)
                     .into(),
             );
         }
         actions.push(
-            widget::button::standard("Lock")
+            widget::button::standard(fl!("lock"))
                 .on_press(Message::Lock)
                 .into(),
         );
@@ -1577,16 +1712,14 @@ impl cosmic::Application for App {
         if let Some((_, key)) = &self.pending_confirm {
             return Some(
                 widget::dialog()
-                    .title("Allow this SSH signature?")
-                    .body(format!(
-                        "Something on this machine is asking to authenticate with \u{201c}{key}\u{201d}.                          This key is set to ask every time, so nothing happens unless you allow it.",
-                    ))
+                    .title(fl!("dialog-ssh-title"))
+                    .body(fl!("dialog-ssh-body", key = key.clone()))
                     .primary_action(
-                        widget::button::suggested("Allow once")
+                        widget::button::suggested(fl!("dialog-allow-once"))
                             .on_press(Message::AnswerConfirm(true)),
                     )
                     .secondary_action(
-                        widget::button::destructive("Refuse")
+                        widget::button::destructive(fl!("dialog-refuse"))
                             .on_press(Message::AnswerConfirm(false)),
                     )
                     .into(),
@@ -1599,21 +1732,19 @@ impl cosmic::Application for App {
             .as_ref()
             .and_then(|v| v.item(id))
             .map(|i| i.label.clone())
-            .unwrap_or_else(|| "this item".to_owned());
+            .unwrap_or_else(|| fl!("dialog-delete-fallback-label"));
 
         Some(
             widget::dialog()
-                .title("Delete item?")
-                .body(format!(
-                    "\u{201c}{label}\u{201d} will be removed from the vault. \
-                     This cannot be undone, and any application that reads it \
-                     through the Secret Service will stop finding it."
-                ))
+                .title(fl!("dialog-delete-title"))
+                .body(fl!("dialog-delete-body", label = label))
                 .primary_action(
-                    widget::button::destructive("Delete").on_press(Message::ConfirmDelete),
+                    widget::button::destructive(fl!("dialog-delete"))
+                        .on_press(Message::ConfirmDelete),
                 )
                 .secondary_action(
-                    widget::button::standard("Cancel").on_press(Message::CancelDelete),
+                    widget::button::standard(fl!("dialog-cancel"))
+                        .on_press(Message::CancelDelete),
                 )
                 .into(),
         )
@@ -1631,6 +1762,17 @@ impl cosmic::Application for App {
     ) -> Task<Self::Message> {
         if self.screen == Screen::Locked {
             return self.update(Message::FocusPassphrase);
+        }
+        Task::none()
+    }
+
+    /// Ctrl+F, delivered by libcosmic's own keyboard navigation.
+    ///
+    /// Implementing this rather than listening for the key again means one
+    /// handler instead of two racing ones.
+    fn on_search(&mut self) -> Task<Self::Message> {
+        if self.screen == Screen::Browsing && self.editor.is_none() && self.import.is_none() {
+            return widget::text_input::focus(SEARCH_ID.clone());
         }
         Task::none()
     }
@@ -1658,35 +1800,46 @@ impl cosmic::Application for App {
     fn subscription(&self) -> Subscription<Self::Message> {
         let daemon = daemon::subscription().map(Message::Daemon);
         // The settings store is shared with the rest of the desktop, so it can
-        // change without this window doing anything.
-        let settings = config::subscription().map(Message::SettingsChanged);
+        // change without this window doing anything. libcosmic's own watcher
+        // already filters to the keys `Settings` owns and only fires when one
+        // of them actually changed.
+        let settings = self
+            .core()
+            .watch_config::<Settings>(Self::APP_ID)
+            .map(|update| {
+                for e in &update.errors {
+                    tracing::debug!("settings watch: {e}");
+                }
+                Message::SettingsChanged(update.config)
+            });
 
         // Only bind shortcuts while browsing: they would fight the passphrase
         // field on the unlock screen, and the editor owns its own typing.
         let shortcuts = if self.screen == Screen::Browsing && self.editor.is_none() {
             // `listen_raw` with an Ignored check, the way libcosmic's own
             // keyboard_nav does it: a shortcut must not fire when a widget has
-            // already consumed the key, or Ctrl+F would steal focus from a
-            // text field mid-word.
+            // already consumed the key, or Ctrl+N would fire while somebody is
+            // typing an `n` into the search box.
+            //
+            // The key travels as it arrived — logical key, physical key and
+            // modifiers — because deciding what it means is `KeyBind`'s job,
+            // and it is the part that knows about keyboard layouts.
             cosmic::iced::event::listen_raw(|event, status, _| {
                 if status != cosmic::iced::event::Status::Ignored {
                     return None;
                 }
                 let cosmic::iced::Event::Keyboard(
-                    cosmic::iced::keyboard::Event::KeyPressed { key, modifiers, .. },
+                    cosmic::iced::keyboard::Event::KeyPressed {
+                        key,
+                        physical_key,
+                        modifiers,
+                        ..
+                    },
                 ) = event
                 else {
                     return None;
                 };
-                if !modifiers.control() {
-                    return None;
-                }
-                match key.as_ref() {
-                    cosmic::iced::keyboard::Key::Character("n") => Some(Message::NewItem),
-                    cosmic::iced::keyboard::Key::Character("l") => Some(Message::Lock),
-                    cosmic::iced::keyboard::Key::Character("f") => Some(Message::FocusSearch),
-                    _ => None,
-                }
+                Some(Message::Key(modifiers, physical_key, key))
             })
         } else {
             Subscription::none()
@@ -1744,19 +1897,20 @@ fn has_totp(item: &Item) -> bool {
 fn about() -> widget::about::About {
     let repository = env!("CARGO_PKG_REPOSITORY");
     widget::about::About::default()
-        .name("locket")
-        .icon(widget::icon::from_name(
-            <App as cosmic::Application>::APP_ID,
-        ))
+        .name(fl!("app-title"))
+        // From the file rather than from the icon theme: an uninstalled build
+        // has nothing under `hicolor`, and a missing icon on the About page is
+        // the first thing anyone running `cargo run` would see.
+        .icon(widget::icon::from_svg_bytes(APP_ICON))
         .version(env!("CARGO_PKG_VERSION"))
         // The same line the desktop entry shows, so the app describes itself
         // the same way wherever you meet it.
-        .comments("Passwords, keys and secrets for the COSMIC desktop")
+        .comments(fl!("app-comment"))
         .license(env!("CARGO_PKG_LICENSE"))
         .license_url("https://www.gnu.org/licenses/gpl-3.0.html")
         .links([
-            ("Source code", repository.to_owned()),
-            ("Report an issue", format!("{repository}/issues")),
+            (fl!("about-source-code"), repository.to_owned()),
+            (fl!("about-report-issue"), format!("{repository}/issues")),
         ])
 }
 
@@ -1831,7 +1985,7 @@ impl App {
                                 // registered type on most systems, and a .csv
                                 // is reported inconsistently.
                                 dialog = dialog.filter(
-                                    FileFilter::new(label).glob(&format!("*.{ext}")),
+                                    FileFilter::new(&label).glob(&format!("*.{ext}")),
                                 );
                             }
                             dialog.open_file().await.ok()
@@ -1898,12 +2052,12 @@ impl App {
         // thing left saying where you are.
         let title = match self.screen {
             Screen::Browsing => match &self.editor {
-                Some(e) if e.is_new() => "New item — locket".to_owned(),
-                Some(_) => "Editing — locket".to_owned(),
-                None => format!("{} — locket", self.category().label()),
+                Some(e) if e.is_new() => fl!("title-new-item"),
+                Some(_) => fl!("title-editing"),
+                None => fl!("title-page", page = self.category().label()),
             },
-            Screen::Unlocking => "Unlocking… — locket".to_owned(),
-            Screen::Locked => "Locked — locket".to_owned(),
+            Screen::Unlocking => fl!("title-unlocking"),
+            Screen::Locked => fl!("title-locked"),
         };
         self.set_header_title(title.clone());
         match self.core.main_window_id() {

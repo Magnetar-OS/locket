@@ -10,6 +10,8 @@
 //! and users are trained to type into whatever appears near the panel. Locking
 //! is safe to expose because a spoofed "lock" button costs nothing.
 
+mod i18n;
+
 use cosmic::app::{Core, Task};
 use cosmic::applet::token::subscription::{
     TokenRequest, TokenUpdate, activation_token_subscription,
@@ -22,7 +24,7 @@ use cosmic::widget;
 use cosmic::{Element, iced::window};
 use locket_secret::client::Status;
 
-const ID: &str = "io.github.idominikos.LocketApplet";
+const ID: &str = "io.github.entro314labs.LocketApplet";
 
 /// The main window's binary, as the desktop entry spells it.
 const APP_EXEC: &str = "locket";
@@ -89,9 +91,9 @@ impl Applet {
 
     fn summary(&self) -> String {
         match self.status {
-            Some(s) if !s.locked => format!("Unlocked · {} items", s.items),
-            Some(_) => "Locked".to_owned(),
-            None => "locketd is not running".to_owned(),
+            Some(s) if !s.locked => fl!("summary-unlocked", items = s.items),
+            Some(_) => fl!("summary-locked"),
+            None => fl!("summary-no-daemon"),
         }
     }
 }
@@ -258,16 +260,14 @@ impl Applet {
             .push(widget::text::body(self.summary()));
 
         if !running {
-            column = column.push(widget::text::caption(
-                "Start locketd to manage secrets from here.",
-            ));
+            column = column.push(widget::text::caption(fl!("daemon-hint")));
         }
 
         column = column.push(widget::divider::horizontal::default());
 
         if unlocked {
             column = column.push(
-                widget::button::standard("Lock now")
+                widget::button::standard(fl!("lock-now"))
                     .width(Length::Fill)
                     .on_press(Message::Lock),
             );
@@ -276,10 +276,10 @@ impl Applet {
         column
             .push(
                 widget::button::standard(if unlocked {
-                    "Open locket"
+                    fl!("open-locket")
                 } else {
                     // Unlocking deliberately leaves the panel.
-                    "Unlock in locket"
+                    fl!("unlock-in-locket")
                 })
                 .width(Length::Fill)
                 .on_press(Message::OpenApp),
@@ -295,5 +295,9 @@ fn main() -> cosmic::iced::Result {
                 .unwrap_or_else(|_| "locket_applet=info".into()),
         )
         .init();
+
+    // The languages the desktop asks for, in preference order.
+    i18n::init(&i18n_embed::DesktopLanguageRequester::requested_languages());
+
     cosmic::applet::run::<Applet>(())
 }

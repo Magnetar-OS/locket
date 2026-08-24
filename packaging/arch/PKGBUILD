@@ -13,7 +13,7 @@ pkgver=0.1.0.r0.gHEAD
 pkgrel=1
 pkgdesc="Password and secrets manager for COSMIC: Secret Service, Secret portal and SSH agent"
 arch=('x86_64' 'aarch64')
-url="https://github.com/idominikos/locket"
+url="https://github.com/entro314-labs/locket"
 license=('GPL-3.0-or-later')
 # From what the release binaries actually link against, not from guesswork:
 #   libtss2-*      tpm2-tss     TPM-sealed key slots
@@ -34,7 +34,7 @@ optdepends=(
 provides=('locket')
 conflicts=('locket')
 install="$pkgname.install"
-source=("$pkgname::git+https://github.com/idominikos/locket.git")
+source=("$pkgname::git+https://github.com/entro314-labs/locket.git")
 sha256sums=('SKIP')
 options=('!lto')  # the workspace sets its own lto in Cargo.toml
 
@@ -84,16 +84,16 @@ package() {
   # installer's job, with a backup and a check that sudo still works.
   install -Dm755 target/release/libpam_locket.so "$pkgdir/usr/lib/security/pam_locket.so"
 
-  install -Dm644 res/io.github.idominikos.Locket.desktop \
-    "$pkgdir/usr/share/applications/io.github.idominikos.Locket.desktop"
-  install -Dm644 res/io.github.idominikos.LocketApplet.desktop \
-    "$pkgdir/usr/share/applications/io.github.idominikos.LocketApplet.desktop"
-  install -Dm644 res/io.github.idominikos.Locket.metainfo.xml \
-    "$pkgdir/usr/share/metainfo/io.github.idominikos.Locket.metainfo.xml"
-  install -Dm644 res/icons/hicolor/scalable/apps/io.github.idominikos.Locket.svg \
-    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.idominikos.Locket.svg"
-  install -Dm644 res/icons/hicolor/symbolic/apps/io.github.idominikos.Locket-symbolic.svg \
-    "$pkgdir/usr/share/icons/hicolor/symbolic/apps/io.github.idominikos.Locket-symbolic.svg"
+  install -Dm644 res/io.github.entro314labs.Locket.desktop \
+    "$pkgdir/usr/share/applications/io.github.entro314labs.Locket.desktop"
+  install -Dm644 res/io.github.entro314labs.LocketApplet.desktop \
+    "$pkgdir/usr/share/applications/io.github.entro314labs.LocketApplet.desktop"
+  install -Dm644 res/io.github.entro314labs.Locket.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/io.github.entro314labs.Locket.metainfo.xml"
+  install -Dm644 res/icons/hicolor/scalable/apps/io.github.entro314labs.Locket.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.entro314labs.Locket.svg"
+  install -Dm644 res/icons/hicolor/symbolic/apps/io.github.entro314labs.Locket-symbolic.svg \
+    "$pkgdir/usr/share/icons/hicolor/symbolic/apps/io.github.entro314labs.Locket-symbolic.svg"
 
   # The portal backend file has to live where xdg-desktop-portal scans, which
   # is XDG_DATA_DIRS only — a copy under ~/.local/share is never found.

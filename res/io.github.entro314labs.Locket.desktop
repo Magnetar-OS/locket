@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Locket
+GenericName=Password Manager
+Comment=Passwords, keys and secrets for the COSMIC desktop
+Exec=locket
+Icon=io.github.entro314labs.Locket
+Terminal=false
+# `Security` is an additional category whose spec-blessed partners are
+# `Settings` and `System`; pairing it with `Utility` earns a hint from
+# desktop-file-validate and is what KeePassXC and Seahorse both ship, because a
+# password manager belongs among the utilities and not in a system menu.
+Categories=Utility;Security;
+Keywords=password;secret;keyring;keychain;ssh;otp;totp;credential;
+StartupNotify=true
+StartupWMClass=io.github.entro314labs.Locket
+X-GNOME-UsesNotifications=true

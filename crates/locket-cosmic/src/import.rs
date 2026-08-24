@@ -12,11 +12,14 @@
 //! original before you have confirmed the copy is good.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use cosmic::widget;
 use cosmic::{Apply, Element};
 use locket_core::Vault;
 use locket_import::{ImportSummary, dotenv};
+
+use crate::fl;
 
 /// Where the secrets are coming from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,47 +46,16 @@ impl Source {
         Source::Keyring,
     ];
 
-    fn blurb(self) -> &'static str {
+    fn blurb(self) -> String {
         match self {
-            Source::BrowserCsv => {
-                "A .csv exported from Chrome, Edge, Brave, Firefox, Safari, \
-                 Bitwarden, 1Password or KeePassXC. Columns are matched by \
-                 name, so a renamed header still imports."
-            }
-            Source::DotEnv => {
-                "Walks a directory of projects and imports every .env file, \
-                 skipping node_modules, build output, and .env.example \
-                 templates. Your files are left where they are."
-            }
-            Source::PasswordStore => {
-                "A ~/.password-store tree. Each entry is decrypted with gpg, \
-                 so the key it was encrypted to has to be available; entries \
-                 that cannot be decrypted are counted and skipped."
-            }
-            Source::KeePass => {
-                "A .kdbx database. Groups become tags and TOTP seeds are \
-                 carried across."
-            }
-            Source::SshKeys => {
-                "Copies the private keys out of ~/.ssh into the vault, in the \
-                 shape locket's own SSH agent reads. Your key files stay \
-                 where they are; OpenSSH keeps working exactly as before."
-            }
-            Source::CloudClis => {
-                "Reads the credentials the aws, gcloud, az, gh, docker and \
-                 npm tools leave unencrypted in your home directory. Only the \
-                 stores you actually have are touched."
-            }
-            Source::Totp => {
-                "A list of otpauth:// URIs, or a plain-text Aegis or andOTP \
-                 export. Encrypted backups are refused rather than \
-                 half-read — export again without a password."
-            }
-            Source::Keyring => {
-                "Reads everything the keyring currently serving this session \
-                 will hand over. Only useful before you take the \
-                 org.freedesktop.secrets name away from it."
-            }
+            Source::BrowserCsv => fl!("source-browser-csv-blurb"),
+            Source::DotEnv => fl!("source-dotenv-blurb"),
+            Source::PasswordStore => fl!("source-pass-blurb"),
+            Source::KeePass => fl!("source-keepass-blurb"),
+            Source::SshKeys => fl!("source-ssh-blurb"),
+            Source::CloudClis => fl!("source-cloud-blurb"),
+            Source::Totp => fl!("source-totp-blurb"),
+            Source::Keyring => fl!("source-keyring-blurb"),
         }
     }
 
@@ -169,19 +141,21 @@ impl Default for Import {
     }
 }
 
-/// Parallel to [`Source::ALL`]. Kept as a `'static` table because a dropdown
-/// borrows its labels for the lifetime of the view, which a `Vec` built inside
-/// `view` cannot satisfy.
-const SOURCE_LABELS: &[&str] = &[
-    "Browser or password manager export",
-    "Project .env files",
-    "SSH private keys",
-    "Cloud CLI credentials",
-    "Authenticator export (TOTP)",
-    "pass (password-store)",
-    "KeePass database",
-    "Running keyring (gnome-keyring)",
-];
+/// Parallel to [`Source::ALL`]. Resolved once and kept for the life of the
+/// process because a dropdown borrows its labels for the lifetime of the view,
+/// which a `Vec` built inside `view` cannot satisfy.
+static SOURCE_LABELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    vec![
+        fl!("source-browser-csv"),
+        fl!("source-dotenv"),
+        fl!("source-ssh"),
+        fl!("source-cloud"),
+        fl!("source-totp"),
+        fl!("source-pass"),
+        fl!("source-keepass"),
+        fl!("source-keyring"),
+    ]
+});
 
 pub const GROUPINGS: &[dotenv::Grouping] = &[
     dotenv::Grouping::PerFile,
@@ -189,11 +163,13 @@ pub const GROUPINGS: &[dotenv::Grouping] = &[
     dotenv::Grouping::PerVariable,
 ];
 
-const GROUPING_LABELS: &[&str] = &[
-    "One item per .env file",
-    "One item per service",
-    "One item per variable",
-];
+static GROUPING_LABELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    vec![
+        fl!("grouping-per-file"),
+        fl!("grouping-per-service"),
+        fl!("grouping-per-variable"),
+    ]
+});
 
 impl Import {
     /// Whether the form has everything the chosen source needs.
@@ -220,28 +196,28 @@ impl Import {
     pub fn picker(&self) -> Picker {
         match self.source {
             Source::DotEnv => Picker::Folder {
-                title: "Choose a directory of projects",
+                title: fl!("picker-projects"),
             },
             Source::PasswordStore => Picker::Folder {
-                title: "Choose a password-store directory",
+                title: fl!("picker-password-store"),
             },
             Source::BrowserCsv => Picker::File {
-                title: "Choose an exported .csv",
-                filter: Some(("CSV export", "csv")),
+                title: fl!("picker-csv"),
+                filter: Some((fl!("picker-csv-filter"), "csv")),
             },
             Source::KeePass => Picker::File {
-                title: "Choose a .kdbx database",
-                filter: Some(("KeePass database", "kdbx")),
+                title: fl!("picker-kdbx"),
+                filter: Some((fl!("picker-kdbx-filter"), "kdbx")),
             },
             Source::SshKeys => Picker::Folder {
-                title: "Choose an SSH directory",
+                title: fl!("picker-ssh"),
             },
             Source::Totp => Picker::File {
-                title: "Choose an authenticator export",
+                title: fl!("picker-totp"),
                 filter: None,
             },
             Source::Keyring | Source::CloudClis => Picker::File {
-                title: "Choose a file",
+                title: fl!("picker-file"),
                 filter: None,
             },
         }
@@ -255,9 +231,9 @@ impl Import {
         let mut form = widget::column::with_capacity(10)
             .spacing(spacing.space_m)
             .max_width(620.0)
-            .push(widget::text::title3("Import secrets"))
+            .push(widget::text::title3(fl!("import-title")))
             .push(
-                widget::dropdown(SOURCE_LABELS, selected, Message::SourceSelected)
+                widget::dropdown(SOURCE_LABELS.as_slice(), selected, Message::SourceSelected)
                     .apply(widget::container)
                     .width(cosmic::iced::Length::Fill),
             )
@@ -266,8 +242,8 @@ impl Import {
         if self.source.wants_path() {
             let chosen = match &self.path {
                 Some(p) => p.display().to_string(),
-                None if self.source.wants_directory() => "No directory chosen".to_owned(),
-                None => "No file chosen".to_owned(),
+                None if self.source.wants_directory() => fl!("import-no-folder"),
+                None => fl!("import-no-file"),
             };
             form = form.push(
                 widget::row::with_capacity(2)
@@ -276,9 +252,9 @@ impl Import {
                     .push(widget::text::body(chosen).width(cosmic::iced::Length::Fill))
                     .push(
                         widget::button::standard(if self.source.wants_directory() {
-                            "Choose folder…"
+                            fl!("import-choose-folder")
                         } else {
-                            "Choose file…"
+                            fl!("import-choose-file")
                         })
                         .on_press(Message::Browse),
                     ),
@@ -289,8 +265,8 @@ impl Import {
             let selected = GROUPINGS.iter().position(|g| *g == self.grouping);
             form = form.push(
                 widget::settings::section().add(widget::settings::item(
-                    "Group variables",
-                    widget::dropdown(GROUPING_LABELS, selected, Message::GroupingSelected),
+                    fl!("import-group-variables"),
+                    widget::dropdown(GROUPING_LABELS.as_slice(), selected, Message::GroupingSelected),
                 )),
             );
         }
@@ -303,14 +279,14 @@ impl Import {
                     Some(Message::ToggleShowDatabasePassword),
                     !self.show_database_password,
                 )
-                .label("Database password")
+                .label(fl!("import-database-password"))
                 .on_input(Message::DatabasePasswordChanged),
             );
         }
 
         form = form.push(
-            widget::text_input("Collection", &self.collection)
-                .label("Import into")
+            widget::text_input(fl!("import-collection-placeholder"), &self.collection)
+                .label(fl!("import-into"))
                 .on_input(Message::CollectionChanged),
         );
 
@@ -322,7 +298,11 @@ impl Import {
             ));
         }
 
-        let run = widget::button::suggested(if self.busy { "Importing…" } else { "Import" });
+        let run = widget::button::suggested(if self.busy {
+            fl!("import-running")
+        } else {
+            fl!("import-run")
+        });
         let run = if self.is_runnable() {
             run.on_press(Message::Run)
         } else {
@@ -333,7 +313,7 @@ impl Import {
             widget::row::with_capacity(2)
                 .spacing(spacing.space_s)
                 .push(run)
-                .push(widget::button::standard("Cancel").on_press(Message::Cancel)),
+                .push(widget::button::standard(fl!("import-cancel")).on_press(Message::Cancel)),
         );
 
         widget::container(form)
@@ -346,11 +326,12 @@ impl Import {
 /// What kind of file dialog a source needs.
 pub enum Picker {
     File {
-        title: &'static str,
-        filter: Option<(&'static str, &'static str)>,
+        title: String,
+        /// Label and glob extension for the dialog's file filter.
+        filter: Option<(String, &'static str)>,
     },
     Folder {
-        title: &'static str,
+        title: String,
     },
 }
 
@@ -392,19 +373,19 @@ pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
 
     let summary = match job.source {
         Source::BrowserCsv => {
-            let path = path.ok_or_else(|| "no file chosen".to_owned())?;
+            let path = path.ok_or_else(|| fl!("import-error-no-file"))?;
             locket_import::csv::import_file(vault, path, into)
         }
         Source::DotEnv => {
-            let path = path.ok_or_else(|| "no directory chosen".to_owned())?;
+            let path = path.ok_or_else(|| fl!("import-error-no-folder"))?;
             locket_import::dotenv::import_dir(vault, path, job.grouping, into)
         }
         Source::PasswordStore => {
-            let path = path.ok_or_else(|| "no directory chosen".to_owned())?;
+            let path = path.ok_or_else(|| fl!("import-error-no-folder"))?;
             locket_import::pass::import_store(vault, path, "gpg", into)
         }
         Source::KeePass => {
-            let path = path.ok_or_else(|| "no database chosen".to_owned())?;
+            let path = path.ok_or_else(|| fl!("import-error-no-database"))?;
             locket_import::keepass::import_kdbx(
                 vault,
                 path,
@@ -414,20 +395,20 @@ pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
             )
         }
         Source::SshKeys => {
-            let path = path.ok_or_else(|| "no directory chosen".to_owned())?;
+            let path = path.ok_or_else(|| fl!("import-error-no-folder"))?;
             locket_import::ssh::import_dir(vault, path, into)
         }
         Source::CloudClis => {
             let home = locket_import::cloud::home()
-                .ok_or_else(|| "cannot find your home directory".to_owned())?;
+                .ok_or_else(|| fl!("import-error-no-home"))?;
             locket_import::cloud::import_home(vault, &home, "sqlite3", into)
         }
         Source::Totp => {
-            let path = path.ok_or_else(|| "no file chosen".to_owned())?;
+            let path = path.ok_or_else(|| fl!("import-error-no-file"))?;
             locket_import::totp::import_file(vault, path, into)
         }
         Source::Keyring => {
-            return Err("the keyring import does not run here".to_owned());
+            return Err(fl!("import-error-keyring-elsewhere"));
         }
     }
     .map_err(|e| e.to_string())?;

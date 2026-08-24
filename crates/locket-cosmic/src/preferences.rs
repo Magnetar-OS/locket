@@ -12,10 +12,13 @@
 //! dropped by a distribution's own tooling. None of those announce
 //! themselves; applications just quietly stop finding their secrets.
 
+use std::sync::LazyLock;
+
 use cosmic::widget;
 use cosmic::{Apply, Element};
 
 use crate::config::Settings;
+use crate::fl;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -31,23 +34,33 @@ pub enum Message {
 
 /// Auto-lock choices, in seconds. Zero is "never".
 pub const AUTO_LOCK: &[u64] = &[0, 60, 5 * 60, 15 * 60, 30 * 60, 60 * 60];
-const AUTO_LOCK_LABELS: &[&str] = &[
-    "Never",
-    "After 1 minute",
-    "After 5 minutes",
-    "After 15 minutes",
-    "After 30 minutes",
-    "After 1 hour",
-];
+
+/// The labels for those choices.
+///
+/// Built once rather than per frame, and `'static` because `dropdown` borrows
+/// the slice for as long as the element it returns. Resolved after
+/// `i18n::init`, which runs before the first view.
+static AUTO_LOCK_LABELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    vec![
+        fl!("auto-lock-never"),
+        fl!("auto-lock-1m"),
+        fl!("auto-lock-5m"),
+        fl!("auto-lock-15m"),
+        fl!("auto-lock-30m"),
+        fl!("auto-lock-1h"),
+    ]
+});
 
 /// Clipboard clear choices, in seconds. Zero leaves the secret there.
 pub const CLIPBOARD: &[u64] = &[0, 10, 30, 60];
-const CLIPBOARD_LABELS: &[&str] = &[
-    "Never — leave it on the clipboard",
-    "After 10 seconds",
-    "After 30 seconds",
-    "After 1 minute",
-];
+static CLIPBOARD_LABELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    vec![
+        fl!("clipboard-never"),
+        fl!("clipboard-10s"),
+        fl!("clipboard-30s"),
+        fl!("clipboard-1m"),
+    ]
+});
 
 /// How the desktop is currently wired up. Every field is observed, not
 /// assumed: this is the panel people will use to decide whether something is
@@ -74,7 +87,7 @@ pub struct Status {
 }
 
 /// A tick, a cross, or a warning triangle, with its explanation.
-fn row<'a>(good: bool, warn: bool, title: &'a str, detail: String) -> Element<'a, Message> {
+fn row<'a>(good: bool, warn: bool, title: String, detail: String) -> Element<'a, Message> {
     let icon = if warn {
         "dialog-warning-symbolic"
     } else if good {
@@ -104,25 +117,25 @@ pub fn view<'a>(
         .position(|s| *s == settings.clipboard_clear_seconds);
 
     let prefs = widget::settings::section()
-        .title("Security")
+        .title(fl!("settings-section-security"))
         .add(widget::settings::item(
-            "Lock the vault when idle",
-            widget::dropdown(AUTO_LOCK_LABELS, auto_lock, Message::AutoLockSelected),
+            fl!("settings-auto-lock"),
+            widget::dropdown(AUTO_LOCK_LABELS.as_slice(), auto_lock, Message::AutoLockSelected),
         ))
         .add(widget::settings::item(
-            "Clear copied secrets",
-            widget::dropdown(CLIPBOARD_LABELS, clipboard, Message::ClipboardSelected),
+            fl!("settings-clipboard"),
+            widget::dropdown(CLIPBOARD_LABELS.as_slice(), clipboard, Message::ClipboardSelected),
         ))
         .add(widget::settings::item(
-            "Hide revealed secrets when the window loses focus",
+            fl!("settings-conceal-on-blur"),
             widget::toggler(settings.conceal_on_blur).on_toggle(Message::ConcealToggled),
         ));
 
     let appearance = widget::settings::section()
-        .title("Appearance")
+        .title(fl!("settings-section-appearance"))
         .add(
-            widget::settings::item::builder("Compact list")
-                .description("Fit more items on screen by putting each one on a single line")
+            widget::settings::item::builder(fl!("settings-compact-list"))
+                .description(fl!("settings-compact-list-detail"))
                 .control(
                     widget::toggler(settings.compact_list)
                         .on_toggle(Message::CompactListToggled),
@@ -131,48 +144,35 @@ pub fn view<'a>(
 
     let integration = match status {
         None => widget::settings::section()
-            .title("Desktop integration")
+            .title(fl!("integration-title"))
             .add(widget::settings::item(
-                "Checking…",
+                fl!("integration-checking"),
                 widget::text::body(""),
             )),
         Some(s) => {
             let owner = match (&s.secrets_owner, s.secrets_is_locket) {
-                (Some(_), true) => (
-                    true,
-                    false,
-                    "locket is serving org.freedesktop.secrets".to_owned(),
-                ),
+                (Some(_), true) => (true, false, fl!("integration-secrets-ours")),
                 (Some(other), false) => (
                     false,
                     true,
-                    format!("{other} owns org.freedesktop.secrets, not locket"),
+                    fl!("integration-secrets-other", owner = other.clone()),
                 ),
-                (None, _) => (
-                    false,
-                    false,
-                    "nothing owns org.freedesktop.secrets".to_owned(),
-                ),
+                (None, _) => (false, false, fl!("integration-secrets-none")),
             };
 
             widget::settings::section()
-                .title("Desktop integration")
-                .add(row(owner.0, owner.1, "Secret Service", owner.2))
+                .title(fl!("integration-title"))
+                .add(row(owner.0, owner.1, fl!("integration-secrets"), owner.2))
                 .add(row(
                     s.portal_installed && s.portal_routed,
                     s.portal_installed && !s.portal_routed,
-                    "Flatpak apps",
+                    fl!("integration-flatpak"),
                     if !s.portal_installed {
-                        "The Secret portal backend is not installed. Run \
-                         locket-setup to install it."
-                            .to_owned()
+                        fl!("integration-flatpak-missing")
                     } else if !s.portal_routed {
-                        "The backend is installed but the desktop prefers \
-                         another one, so Flatpak apps will not use locket."
-                            .to_owned()
+                        fl!("integration-flatpak-unrouted")
                     } else {
-                        "Sandboxed applications get their secrets from locket"
-                            .to_owned()
+                        fl!("integration-flatpak-ok")
                     },
                 ))
                 .add(row(
@@ -180,28 +180,23 @@ pub fn view<'a>(
                     // Half-wired is a warning, not a failure: it works today
                     // and breaks the day you change your password.
                     s.pam_wired && !s.pam_rekeys,
-                    "Unlock at login",
+                    fl!("integration-pam"),
                     if s.pam_wired && s.pam_rekeys {
-                        "pam_locket.so is in the login stack".to_owned()
+                        fl!("integration-pam-ok")
                     } else if s.pam_wired {
-                        "Unlocks at login, but has no `password` line — changing \
-                         your login password will quietly stop that working"
-                            .to_owned()
+                        fl!("integration-pam-partial")
                     } else {
-                        "Not configured; you unlock manually each session"
-                            .to_owned()
+                        fl!("integration-pam-missing")
                     },
                 ))
                 .add(row(
                     !s.gnome_keyring_running,
                     s.gnome_keyring_running,
-                    "gnome-keyring",
+                    fl!("integration-keyring"),
                     if s.gnome_keyring_running {
-                        "Still running, and will contend with locket for the \
-                         Secret Service name"
-                            .to_owned()
+                        fl!("integration-keyring-running")
                     } else {
-                        "Not running".to_owned()
+                        fl!("integration-keyring-stopped")
                     },
                 ))
         }
@@ -210,12 +205,12 @@ pub fn view<'a>(
     widget::column::with_capacity(7)
         .spacing(spacing.space_m)
         .max_width(720.0)
-        .push(widget::text::title3("Settings"))
+        .push(widget::text::title3(fl!("settings-title")))
         .push(prefs)
         .push(appearance)
         .push(integration)
         .push(
-            widget::button::standard("Re-check")
+            widget::button::standard(fl!("settings-recheck"))
                 .on_press(Message::Refresh)
                 .apply(widget::container)
                 .align_x(cosmic::iced::alignment::Horizontal::Left),

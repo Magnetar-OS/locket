@@ -3,10 +3,13 @@ Type=Application
 Name=Locket Indicator
 Comment=Vault lock state in the COSMIC panel
 Exec=locket-applet
-Icon=io.github.idominikos.Locket
+Icon=io.github.entro314labs.Locket
 Terminal=false
 Categories=COSMIC;
 # Marks this as a panel applet rather than a launchable application, so it
 # appears in cosmic-settings' panel configuration and not in the app library.
 X-CosmicApplet=true
+# Opens the popup on hover-press the way the rest of the panel does; the applet
+# already uses the surface-action popup that supports it.
+X-CosmicHoverPopup=Auto
 NoDisplay=true

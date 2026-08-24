@@ -98,7 +98,7 @@ impl ItemKind {
         match self {
             ItemKind::Login => "dialog-password-symbolic",
             ItemKind::Note => "text-x-generic-symbolic",
-            ItemKind::Card => "credit-card-symbolic",
+            ItemKind::Card => "payment-card-symbolic",
             ItemKind::Identity => "avatar-default-symbolic",
             ItemKind::SshKey => "utilities-terminal-symbolic",
             ItemKind::GpgKey => "application-certificate-symbolic",

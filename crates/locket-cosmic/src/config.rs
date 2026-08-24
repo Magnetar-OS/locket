@@ -1,39 +1,30 @@
 //! Application settings, stored through `cosmic-config`.
 //!
-//! Using `cosmic-config` rather than a private dotfile means locket's
-//! settings live in the same store as the rest of the desktop and — because
-//! libcosmic is built with `dbus-config` — are mediated by
-//! `cosmic-settings-daemon` when it is running.
+//! Using `cosmic-config` rather than a private dotfile means locket's settings
+//! live in the same store as the rest of the desktop and — because libcosmic is
+//! built with `dbus-config` — are mediated by `cosmic-settings-daemon` when it
+//! is running.
 //!
-//! [`subscription`] is what makes that worth having: the store is watched, so
-//! a change made anywhere else — a second locket window, the settings daemon,
-//! someone editing the file — lands in this one without a restart.
+//! The store is *watched*, which is what makes it worth having: a change made
+//! anywhere else — a second locket window, the settings daemon, someone editing
+//! the file — lands in this one without a restart. That watch is
+//! [`cosmic::app::ApplicationExt::watch_config`], which already filters to the
+//! keys this struct owns and only emits when a value actually changed.
 
 // `APP_ID` is an associated const on the `Application` trait.
 use cosmic::Application as _;
-use cosmic::iced::Subscription;
-use cosmic::iced::futures::{SinkExt, StreamExt, channel::mpsc};
-use cosmic::iced::stream;
-use cosmic_config::{Config, ConfigGet, ConfigSet};
+use cosmic::cosmic_config::{
+    self, Config, CosmicConfigEntry, cosmic_config_derive::CosmicConfigEntry,
+};
 
 pub const CONFIG_VERSION: u64 = 1;
 
-mod key {
-    pub const AUTO_LOCK_SECONDS: &str = "auto-lock-seconds";
-    pub const CLIPBOARD_CLEAR_SECONDS: &str = "clipboard-clear-seconds";
-    pub const CONCEAL_ON_BLUR: &str = "conceal-on-blur";
-    pub const COMPACT_LIST: &str = "compact-list";
-
-    /// Every key this application owns, for filtering watch notifications.
-    pub const ALL: &[&str] = &[
-        AUTO_LOCK_SECONDS,
-        CLIPBOARD_CLEAR_SECONDS,
-        CONCEAL_ON_BLUR,
-        COMPACT_LIST,
-    ];
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Everything the preferences screen writes.
+///
+/// The derive stores one file per field, named after the field, so a rename
+/// here is a migration — see [`migrate`].
+#[derive(Debug, Clone, PartialEq, Eq, CosmicConfigEntry)]
+#[version = 1]
 pub struct Settings {
     /// Lock the vault after this many seconds idle. Zero disables auto-lock.
     pub auto_lock_seconds: u64,
@@ -59,148 +50,113 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Load settings, falling back to defaults for anything unset or corrupt.
+    /// Load, falling back to the defaults for anything unset or corrupt.
     ///
-    /// A missing key is the normal first-run case, so it is not worth an error
-    /// path; a malformed one is logged and replaced.
+    /// A missing key is the normal first-run case; a malformed one is logged
+    /// and replaced rather than refused.
     pub fn load(config: &Config) -> Self {
-        let defaults = Settings::default();
-        Self {
-            auto_lock_seconds: get_or(config, key::AUTO_LOCK_SECONDS, defaults.auto_lock_seconds),
-            clipboard_clear_seconds: get_or(
-                config,
-                key::CLIPBOARD_CLEAR_SECONDS,
-                defaults.clipboard_clear_seconds,
-            ),
-            conceal_on_blur: get_or(config, key::CONCEAL_ON_BLUR, defaults.conceal_on_blur),
-            compact_list: get_or(config, key::COMPACT_LIST, defaults.compact_list),
+        match Self::get_entry(config) {
+            Ok(settings) => settings,
+            Err((errors, settings)) => {
+                for e in errors {
+                    tracing::debug!("settings key unavailable ({e}); using the default");
+                }
+                settings
+            }
         }
     }
 
     /// The write half, driven by the preferences screen.
     pub fn store(&self, config: &Config) {
-        set(config, key::AUTO_LOCK_SECONDS, self.auto_lock_seconds);
-        set(
-            config,
-            key::CLIPBOARD_CLEAR_SECONDS,
-            self.clipboard_clear_seconds,
-        );
-        set(config, key::CONCEAL_ON_BLUR, self.conceal_on_blur);
-        set(config, key::COMPACT_LIST, self.compact_list);
-    }
-}
-
-fn get_or<T>(config: &Config, key: &str, fallback: T) -> T
-where
-    T: serde::de::DeserializeOwned,
-{
-    match config.get::<T>(key) {
-        Ok(v) => v,
-        Err(cosmic_config::Error::NoConfigDirectory) => fallback,
-        Err(e) => {
-            tracing::debug!("config key `{key}` unavailable ({e}); using default");
-            fallback
+        if let Err(e) = self.write_entry(config) {
+            tracing::warn!("could not persist the settings: {e}");
         }
     }
 }
 
-#[allow(dead_code)]
-fn set<T>(config: &Config, key: &str, value: T)
-where
-    T: serde::Serialize,
-{
-    if let Err(e) = config.set(key, value) {
-        tracing::warn!("could not persist config key `{key}`: {e}");
-    }
-}
-
-/// Watch the store, and emit the settings whenever they change elsewhere.
+/// Application ids this configuration has been stored under before.
 ///
-/// The watcher's callback runs on `notify`'s own thread, so it hands the
-/// reloaded settings across a channel rather than doing anything with them
-/// there. The watcher itself is held for the life of the subscription: drop it
-/// and the notifications stop, silently.
+/// Oldest first. `cosmic-config` keys are files under `cosmic/<app id>/v<n>`,
+/// so a rename moves the whole store and every preference silently reverts to
+/// its default.
+const LEGACY_APP_IDS: &[&str] = &[
+    "io.github.idominikos.Passman",
+    "io.github.idominikos.Locket",
+];
+
+/// Keys that used to be spelled differently, oldest name first.
 ///
-/// A machine with no `cosmic-config` at all parks forever instead of ending —
-/// a subscription that returns is one iced will not restart, and settings
-/// simply stay at whatever this window has.
-pub fn subscription() -> Subscription<Settings> {
-    Subscription::run(|| {
-        stream::channel(4, |mut output: mpsc::Sender<Settings>| async move {
-            let Some(config) = config() else {
-                std::future::pending::<()>().await;
-                unreachable!("pending never resolves");
-            };
+/// The hand-written store used kebab-case; the derive names each file after
+/// its Rust field. Same values, different filenames — so the migration is a
+/// copy, not a parse.
+const RENAMED_KEYS: &[(&str, &str)] = &[
+    ("auto-lock-seconds", "auto_lock_seconds"),
+    ("clipboard-clear-seconds", "clipboard_clear_seconds"),
+    ("conceal-on-blur", "conceal_on_blur"),
+    ("compact-list", "compact_list"),
+];
 
-            let (tx, mut rx) = mpsc::channel(4);
-            let watcher = config.watch(move |config, keys| {
-                // Only our own keys are worth a reload; the store holds every
-                // application's settings.
-                if !keys.iter().any(|k| key::ALL.contains(&k.as_str())) {
-                    return;
-                }
-                let _ = tx.clone().try_send(Settings::load(config));
-            });
-
-            let _watcher = match watcher {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::warn!("cannot watch the settings store: {e}");
-                    std::future::pending::<()>().await;
-                    unreachable!("pending never resolves");
-                }
-            };
-
-            while let Some(settings) = rx.next().await {
-                tracing::debug!("settings changed elsewhere; picking them up");
-                if output.send(settings).await.is_err() {
-                    break;
-                }
-            }
-        })
-    })
-}
-
-/// The application id the settings were stored under before the rename.
-const LEGACY_APP_ID: &str = "io.github.idominikos.Passman";
-
-/// Carry settings across from the name the project used to have.
+/// Carry settings across from every name they have been stored under.
 ///
-/// `cosmic-config` keys are files under `cosmic/<app id>/v<version>`, so a
-/// rename moves the whole store and every preference silently reverts to its
-/// default. Copied once, only when there is nothing at the new location to
+/// Copied rather than moved, so going back to a previous build finds its own
+/// settings intact, and only where there is nothing at the new location to
 /// overwrite.
-fn migrate_legacy_settings() {
+fn migrate() {
     let Some(base) = dirs::config_dir().map(|d| d.join("cosmic")) else {
         return;
     };
-    let (old, new) = (
-        base.join(LEGACY_APP_ID).join(format!("v{CONFIG_VERSION}")),
-        base.join(crate::app::App::APP_ID).join(format!("v{CONFIG_VERSION}")),
-    );
-    if new.exists() || !old.is_dir() {
+    let new = base
+        .join(crate::app::App::APP_ID)
+        .join(format!("v{CONFIG_VERSION}"));
+
+    for legacy in LEGACY_APP_IDS {
+        let old = base.join(legacy).join(format!("v{CONFIG_VERSION}"));
+        if !old.is_dir() {
+            continue;
+        }
+        copy_missing(&old, &new);
+    }
+
+    // Within the store, the keys themselves were renamed.
+    for (old_key, new_key) in RENAMED_KEYS {
+        let (from, to) = (new.join(old_key), new.join(new_key));
+        if from.is_file()
+            && !to.exists()
+            && let Err(e) = std::fs::copy(&from, &to)
+        {
+            tracing::warn!("could not carry `{old_key}` over to `{new_key}`: {e}");
+        }
+    }
+}
+
+/// Copy every file in `from` that `to` does not already have.
+fn copy_missing(from: &std::path::Path, to: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return;
+    };
+    let entries: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter(|e| !to.join(e.file_name()).exists())
+        .collect();
+    if entries.is_empty() {
         return;
     }
-    if let Err(e) = std::fs::create_dir_all(&new) {
+    if let Err(e) = std::fs::create_dir_all(to) {
         tracing::warn!("could not create the settings directory: {e}");
         return;
     }
-    let Ok(entries) = std::fs::read_dir(&old) else {
-        return;
-    };
-    for entry in entries.flatten().filter(|e| e.path().is_file()) {
-        if let Err(e) = std::fs::copy(entry.path(), new.join(entry.file_name())) {
+    for entry in entries {
+        if let Err(e) = std::fs::copy(entry.path(), to.join(entry.file_name())) {
             tracing::warn!("could not carry over {:?}: {e}", entry.file_name());
         }
     }
-    // Copied rather than moved: the old store is left where it is so that
-    // going back to the previous build finds its settings intact.
-    tracing::info!("carried settings over from the previous application name");
+    tracing::info!("carried settings over from {}", from.display());
 }
 
 /// Open the application's config store.
 pub fn config() -> Option<Config> {
-    migrate_legacy_settings();
+    migrate();
     match Config::new(crate::app::App::APP_ID, CONFIG_VERSION) {
         Ok(c) => Some(c),
         Err(e) => {
@@ -215,17 +171,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_key_the_settings_use_is_in_the_watch_filter() {
-        // A key missing from ALL is a setting that silently stops reloading:
-        // the watcher fires, the filter drops it, nothing happens.
-        for key in [
-            key::AUTO_LOCK_SECONDS,
-            key::CLIPBOARD_CLEAR_SECONDS,
-            key::CONCEAL_ON_BLUR,
-            key::COMPACT_LIST,
-        ] {
-            assert!(key::ALL.contains(&key), "`{key}` is not watched");
+    fn every_renamed_key_names_a_field_that_still_exists() {
+        // The derive names each file after its field, so a field renamed
+        // without a line here silently loses whatever the user had set.
+        let defaults = Settings::default();
+        let fields = [
+            ("auto_lock_seconds", defaults.auto_lock_seconds.to_string()),
+            (
+                "clipboard_clear_seconds",
+                defaults.clipboard_clear_seconds.to_string(),
+            ),
+            ("conceal_on_blur", defaults.conceal_on_blur.to_string()),
+            ("compact_list", defaults.compact_list.to_string()),
+        ];
+        for (_, new) in RENAMED_KEYS {
+            assert!(
+                fields.iter().any(|(name, _)| name == new),
+                "`{new}` is not a field of Settings"
+            );
         }
-        assert_eq!(key::ALL.len(), 4, "a key was added without watching it");
+        assert_eq!(RENAMED_KEYS.len(), fields.len());
+    }
+
+    #[test]
+    fn a_migration_never_overwrites_what_is_already_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = (dir.path().join("old"), dir.path().join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("compact_list"), "true").unwrap();
+        std::fs::write(old.join("conceal_on_blur"), "false").unwrap();
+        std::fs::write(new.join("compact_list"), "false").unwrap();
+
+        copy_missing(&old, &new);
+
+        assert_eq!(
+            std::fs::read_to_string(new.join("compact_list")).unwrap(),
+            "false",
+            "a value already set at the new location was overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new.join("conceal_on_blur")).unwrap(),
+            "false",
+            "a value only the old location had was not carried over"
+        );
     }
 }

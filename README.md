@@ -111,9 +111,17 @@ crates/
   locket-pam      pam_locket.so — unlocks the vault at login
   locket-nmh      native messaging host for the browser extension
 extension/         the browser extension itself (Chrome/Firefox, MV3)
-res/               desktop entry, systemd unit, .portal file, PAM notes
+res/               desktop entries, metainfo, systemd unit, .portal file, PAM notes
 scripts/           locket-setup (install/uninstall/status) and the keyring re-import
+justfile           build, install and metadata checks — the packager's path
+packaging/arch/    PKGBUILD
+docs/              cosmic-conventions.md — COSMIC ecosystem conventions, field-notes edition
 ```
+
+The two COSMIC crates carry their own fluent catalogue under
+`crates/<crate>/i18n/`; `fl!("id")` resolves against it at compile time, so a
+message id that does not exist is a build error rather than a label reading
+`id` at runtime.
 
 While `locketd` is running it holds the only unlocked copy of the
 data-encryption key, and the GUI, the browser host and every `libsecret` client
@@ -362,10 +370,19 @@ Both hardware factors are cargo features (`tpm`, `fido`, on by default).
 Without them neither library is needed, the GUI still builds, and it says the
 factor is unavailable in this build rather than pretending otherwise.
 
-`packaging/arch/PKGBUILD` builds an Arch package. It installs the pieces and
-stops there: claiming `org.freedesktop.secrets`, enabling the unit and editing
-a PAM stack are decisions for the person using the machine, taken after they
-have imported whatever their current keyring holds.
+For packaging there is a `justfile`, the same shape every COSMIC application
+ships:
+
+```sh
+just build-release
+just rootdir=$DESTDIR prefix=/usr install
+just validate-metadata          # desktop entries and AppStream, against their specs
+```
+
+`packaging/arch/PKGBUILD` builds an Arch package. Both paths install the pieces
+and stop there: claiming `org.freedesktop.secrets`, enabling the unit and
+editing a PAM stack are decisions for the person using the machine, taken after
+they have imported whatever their current keyring holds.
 
 ## Installing as your secret store
 

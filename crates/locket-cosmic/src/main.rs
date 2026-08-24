@@ -4,7 +4,9 @@ mod app;
 mod config;
 mod daemon;
 mod editor;
+mod i18n;
 mod import;
+mod labels;
 mod preferences;
 mod security;
 
@@ -19,6 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| "locket=info".into()),
         )
         .init();
+
+    // The languages the desktop asks for, in preference order. Done before any
+    // widget is built, because `fl!` resolves against whatever is selected now.
+    i18n::init(&i18n_embed::DesktopLanguageRequester::requested_languages());
 
     let vault_path = match std::env::var_os("LOCKET_VAULT") {
         Some(p) => std::path::PathBuf::from(p),

@@ -5,6 +5,8 @@
 //! [`EditorMessage`] into its own message and only handles the two outcomes
 //! the editor reports back.
 
+use crate::fl;
+use crate::labels;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
@@ -155,10 +157,10 @@ impl Editor {
     /// Build the item this form describes.
     fn to_item(&self) -> Result<Item, String> {
         if self.label.trim().is_empty() {
-            return Err("Give the item a name.".into());
+            return Err(fl!("editor-needs-name"));
         }
         if self.fields.iter().any(|f| f.name.trim().is_empty()) {
-            return Err("Every field needs a name.".into());
+            return Err(fl!("editor-field-needs-name"));
         }
 
         let mut item = Item::new(self.kind(), self.label.trim());
@@ -249,15 +251,13 @@ impl Editor {
 
     pub fn view(&self) -> Element<'_, EditorMessage> {
         let spacing = cosmic::theme::spacing();
-        let kind_labels: Vec<&str> = ItemKind::ALL.iter().map(|k| k.label()).collect();
-        let field_kind_labels: Vec<&str> = FieldKind::ALL.iter().map(|k| k.label()).collect();
 
         let mut form = widget::column::with_capacity(10).spacing(spacing.space_s);
 
         form = form.push(widget::text::title3(if self.is_new() {
-            "New item"
+            fl!("editor-new")
         } else {
-            "Edit item"
+            fl!("editor-edit")
         }));
 
         if let Some(error) = &self.error {
@@ -267,21 +267,21 @@ impl Editor {
         }
 
         form = form
-            .push(widget::text::caption_heading("Name"))
+            .push(widget::text::caption_heading(fl!("editor-name")))
             .push(
-                widget::text_input("e.g. GitHub", &self.label)
+                widget::text_input(fl!("editor-name-placeholder"), &self.label)
                     .on_input(EditorMessage::Label)
                     .on_submit(|_| EditorMessage::Save),
             )
-            .push(widget::text::caption_heading("Type"))
+            .push(widget::text::caption_heading(fl!("editor-type")))
             .push(widget::dropdown(
-                kind_labels,
+                labels::ITEM_KINDS.as_slice(),
                 Some(self.kind_index),
                 EditorMessage::Kind,
             ));
 
         // -- primary secret + generator ------------------------------------
-        form = form.push(widget::text::caption_heading("Password / secret")).push(
+        form = form.push(widget::text::caption_heading(fl!("editor-secret"))).push(
             widget::row::with_capacity(2)
                 .spacing(spacing.space_xxs)
                 .align_y(Alignment::Center)
@@ -295,7 +295,10 @@ impl Editor {
                     .on_input(EditorMessage::Secret)
                     .width(Length::Fill),
                 )
-                .push(widget::button::standard("Generate").on_press(EditorMessage::Generate)),
+                .push(
+                    widget::button::standard(fl!("editor-generate"))
+                        .on_press(EditorMessage::Generate),
+                ),
         );
 
         let recipe = self.recipe();
@@ -303,10 +306,10 @@ impl Editor {
             widget::row::with_capacity(3)
                 .spacing(spacing.space_s)
                 .align_y(Alignment::Center)
-                .push(widget::text::caption(format!(
-                    "{} chars · ~{:.0} bits",
-                    recipe.length,
-                    recipe.entropy_bits()
+                .push(widget::text::caption(fl!(
+                    "editor-strength",
+                    length = recipe.length,
+                    bits = format!("{:.0}", recipe.entropy_bits())
                 )))
                 .push(
                     widget::slider(8.0..=64.0, self.generator_length, EditorMessage::LengthChanged)
@@ -315,19 +318,19 @@ impl Editor {
                 )
                 .push(
                     widget::toggler(self.generator_symbols)
-                        .label("Symbols".to_string())
+                        .label(fl!("editor-symbols"))
                         .on_toggle(EditorMessage::ToggleSymbols),
                 ),
         );
 
         // -- extra fields ---------------------------------------------------
         form = form.push(widget::divider::horizontal::default());
-        form = form.push(widget::text::caption_heading("Fields"));
+        form = form.push(widget::text::caption_heading(fl!("editor-fields")));
 
         for (i, field) in self.fields.iter().enumerate() {
             let value_input: Element<'_, EditorMessage> = if field.kind.is_sensitive() {
                 widget::text_input::secure_input(
-                    "Value",
+                    fl!("editor-field-value"),
                     &field.value,
                     Some(EditorMessage::ToggleFieldReveal(i)),
                     !field.revealed,
@@ -336,7 +339,7 @@ impl Editor {
                 .width(Length::Fill)
                 .into()
             } else {
-                widget::text_input("Value", &field.value)
+                widget::text_input(fl!("editor-field-value"), &field.value)
                     .on_input(move |v| EditorMessage::FieldValue(i, v))
                     .width(Length::Fill)
                     .into()
@@ -355,20 +358,20 @@ impl Editor {
                             .spacing(spacing.space_xxs)
                             .align_y(Alignment::Center)
                             .push(
-                                widget::text_input("Name", &field.name)
+                                widget::text_input(fl!("editor-field-name"), &field.name)
                                     .on_input(move |v| EditorMessage::FieldName(i, v))
                                     .width(Length::FillPortion(2)),
                             )
                             .push(
                                 widget::dropdown(
-                                    field_kind_labels.clone(),
+                                    labels::FIELD_KINDS.as_slice(),
                                     Some(kind_index),
                                     move |k| EditorMessage::FieldKindChanged(i, k),
                                 )
                                 .width(Length::FillPortion(2)),
                             )
                             .push(
-                                widget::button::destructive("Remove")
+                                widget::button::destructive(fl!("editor-field-remove"))
                                     .on_press(EditorMessage::RemoveField(i)),
                             ),
                     )
@@ -376,22 +379,26 @@ impl Editor {
             );
         }
 
-        form = form.push(widget::button::standard("Add field").on_press(EditorMessage::AddField));
+        form = form
+            .push(widget::button::standard(fl!("editor-add-field")).on_press(EditorMessage::AddField));
 
         // Attributes are carried through untouched; say so rather than
         // silently keeping hidden state.
         if !self.attributes.is_empty() {
-            form = form.push(widget::text::caption(format!(
-                "{} Secret Service attribute(s) will be preserved",
-                self.attributes.len()
+            form = form.push(widget::text::caption(fl!(
+                "editor-attributes-kept",
+                count = self.attributes.len()
             )));
         }
 
         form = form.push(widget::divider::horizontal::default()).push(
             widget::row::with_capacity(2)
                 .spacing(spacing.space_xs)
-                .push(widget::button::suggested("Save").on_press(EditorMessage::Save))
-                .push(widget::button::standard("Cancel").on_press(EditorMessage::Cancel)),
+                .push(widget::button::suggested(fl!("editor-save")).on_press(EditorMessage::Save))
+                .push(
+                    widget::button::standard(fl!("editor-cancel"))
+                        .on_press(EditorMessage::Cancel),
+                ),
         );
 
         widget::scrollable(widget::container(form).padding(spacing.space_s))

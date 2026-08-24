@@ -31,11 +31,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libtss2-dev libudev-dev libssl-dev libpam0g-dev
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          # Matches rust-toolchain.toml; the action reads it when told to.
-          toolchain: "1.97.1"
-          components: clippy
+      # No toolchain action: rustup is preinstalled on the runner and reads
+      # `rust-toolchain.toml` itself, so the version and its components are
+      # named in one place instead of drifting apart from CI.
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace --exclude locket-cosmic --exclude locket-applet
@@ -58,9 +56,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config libtss2-dev libudev-dev libssl-dev \
             libxkbcommon-dev libwayland-dev libfontconfig-1-dev
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.97.1"
+      # Toolchain comes from rust-toolchain.toml, as above.
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p locket-cosmic -p locket-applet
       - run: cargo test -p locket-cosmic -p locket-applet
@@ -75,7 +71,7 @@ jobs:
       - name: AppStream metainfo
         # --no-net because the URLs it wants to reach are this repository, which
         # a fork or a pre-publication branch will not have.
-        run: appstreamcli validate --no-net res/io.github.idominikos.Locket.metainfo.xml
+        run: appstreamcli validate --no-net res/io.github.entro314labs.Locket.metainfo.xml
       - name: Desktop entries
         run: desktop-file-validate res/*.desktop
       - name: Installer script
