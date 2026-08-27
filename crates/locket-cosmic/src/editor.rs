@@ -12,7 +12,7 @@ use cosmic::prelude::*;
 use cosmic::widget;
 use locket_core::{
     generator::{self, PasswordRecipe},
-    model::{Field, FieldKind, Item, ItemKind, field_names},
+    model::{Field, FieldKind, Item, ItemKind, attr, field_names},
 };
 use uuid::Uuid;
 
@@ -67,6 +67,19 @@ pub struct Editor {
     pub attributes: std::collections::BTreeMap<String, String>,
     pub favorite: bool,
     pub error: Option<String>,
+    /// The item's secret is binary, edited here through its Base64 form.
+    ///
+    /// The editor is a text editor: leaving the field alone round-trips the
+    /// bytes untouched, and typing anything replaces the secret with the text
+    /// typed. Without tracking this, an edited value would keep the encoding
+    /// marker and be silently base64-decoded — or, failing that, fall back to
+    /// raw bytes — on its way to every application that reads it.
+    pub secret_is_binary: bool,
+    /// What the Base64 form looked like on open, to tell an edit from a
+    /// round-trip.
+    original_secret: String,
+    /// Decoded length of the binary secret, for the caption.
+    binary_len: usize,
 }
 
 impl Editor {
@@ -103,6 +116,9 @@ impl Editor {
             attributes: Default::default(),
             favorite: false,
             error: None,
+            secret_is_binary: false,
+            original_secret: String::new(),
+            binary_len: 0,
         }
     }
 
@@ -132,6 +148,13 @@ impl Editor {
             attributes: item.attributes.clone(),
             favorite: item.favorite,
             error: None,
+            secret_is_binary: item.secret_is_binary(),
+            original_secret: item.secret.expose().to_owned(),
+            binary_len: if item.secret_is_binary() {
+                item.secret_bytes().len()
+            } else {
+                0
+            },
         }
     }
 
@@ -171,6 +194,13 @@ impl Editor {
         }
         item.secret = self.secret.clone().into();
         item.attributes = self.attributes.clone();
+        // A binary secret leaves as binary only if it comes back untouched.
+        // Anything typed into the field is text, and keeping the marker on it
+        // would have every reader base64-decode the new value — or worse,
+        // fail to and hand back its raw bytes.
+        if self.secret_is_binary && self.secret != self.original_secret {
+            item.attributes.remove(attr::SECRET_ENCODING);
+        }
         item.favorite = self.favorite;
         item.fields = self
             .fields
@@ -300,6 +330,20 @@ impl Editor {
                         .on_press(EditorMessage::Generate),
                 ),
         );
+
+        if self.secret_is_binary {
+            // Say which of the two states the field is in: still the original
+            // bytes, or a replacement about to be saved as text.
+            let caption = if self.secret == self.original_secret {
+                fl!("editor-binary-secret", bytes = self.binary_len)
+            } else {
+                fl!("editor-binary-replaced")
+            };
+            form = form.push(
+                widget::text::caption(caption)
+                    .wrapping(cosmic::iced::core::text::Wrapping::WordOrGlyph),
+            );
+        }
 
         let recipe = self.recipe();
         form = form.push(
@@ -514,6 +558,52 @@ mod tests {
     fn cancel_reports_cancel() {
         let mut e = Editor::new(ItemKind::Login);
         assert!(matches!(e.update(EditorMessage::Cancel), Outcome::Cancel));
+    }
+
+    #[test]
+    fn an_untouched_binary_secret_round_trips_as_binary() {
+        let mut original = Item::new(ItemKind::ApiToken, "portal key");
+        original.set_secret_bytes(&[0xff, 0xfe, 0x00, 0x01]);
+
+        let mut e = Editor::from_item(&original);
+        assert!(e.secret_is_binary);
+        let item = saved(&mut e).expect("a populated editor should save");
+
+        assert!(
+            item.secret_is_binary(),
+            "leaving the field alone must not strip the encoding marker"
+        );
+        assert_eq!(item.secret_bytes().as_slice(), &[0xff, 0xfe, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn typing_over_a_binary_secret_saves_text_not_mislabelled_base64() {
+        let mut original = Item::new(ItemKind::ApiToken, "portal key");
+        original.set_secret_bytes(&[0xff, 0xfe]);
+
+        let mut e = Editor::from_item(&original);
+        e.update(EditorMessage::Secret("hunter2".into()));
+        let item = saved(&mut e).unwrap();
+
+        assert!(
+            !item.secret_is_binary(),
+            "the marker survived onto a typed text secret, so every reader \
+             would try to base64-decode it"
+        );
+        assert_eq!(item.secret.expose(), "hunter2");
+        assert_eq!(item.secret_bytes().as_slice(), b"hunter2");
+    }
+
+    #[test]
+    fn a_generated_password_over_a_binary_secret_drops_the_marker_too() {
+        let mut original = Item::new(ItemKind::ApiToken, "portal key");
+        original.set_secret_bytes(&[0xff, 0xfe]);
+
+        let mut e = Editor::from_item(&original);
+        e.update(EditorMessage::Generate);
+        let item = saved(&mut e).unwrap();
+        assert!(!item.secret_is_binary());
+        assert_eq!(item.secret_bytes().as_slice(), item.secret.expose().as_bytes());
     }
 
     #[test]

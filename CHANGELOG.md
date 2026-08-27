@@ -75,6 +75,13 @@ scripts/locket-setup            # reinstalls under the new id
   ("Binary secret · N bytes") and reveals and copies the Base64, the one
   faithful text form it has; a damaged one is called out, with a pointer to
   `locket-reimport-keyring` as the recovery path.
+- **Editing a binary secret silently corrupted it.** The editor showed the
+  Base64 store with nothing saying so, and a value typed over it kept the
+  binary marker — so every reader would base64-decode the new text, or fail to
+  and hand back its raw bytes. The editor now says what the field holds
+  ("Binary secret · N bytes, shown as Base64"), warns when the value has been
+  replaced, and saves a typed replacement as the text it is. An untouched
+  field still round-trips the original bytes exactly.
 - **Long revealed values ran underneath the Reveal/Copy buttons.** Tokens,
   JSON blobs and Base64 have no word boundaries, so word-wrapping never broke
   them; values now wrap at the glyph level when they must.

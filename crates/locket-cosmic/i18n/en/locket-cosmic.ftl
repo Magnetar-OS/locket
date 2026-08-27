@@ -391,3 +391,11 @@ detail-mangled-hint =
     This value contains replacement characters (�), which usually means an
     earlier import damaged binary data. If the source keyring still has the
     original, locket-reimport-keyring restores it.
+
+# The editor's secret field when the item holds a binary secret.
+editor-binary-secret =
+    Binary secret · { $bytes } bytes, shown as Base64. Applications read the
+    original bytes; typing here replaces it with a text secret.
+editor-binary-replaced =
+    The secret has changed and will be saved as the text above, no longer as
+    binary data. Cancel to keep the original.
