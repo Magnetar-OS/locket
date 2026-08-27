@@ -68,6 +68,16 @@ scripts/locket-setup            # reinstalls under the new id
 
 ### Fixed
 
+- **Binary secrets displayed as garbage.** The vault stores a non-text secret
+  base64-encoded with a marker, but the detail view printed the raw store for
+  every item — and for secrets damaged by the older lossy import, printed the
+  damage as if it were the password. A binary secret now says what it is
+  ("Binary secret · N bytes") and reveals and copies the Base64, the one
+  faithful text form it has; a damaged one is called out, with a pointer to
+  `locket-reimport-keyring` as the recovery path.
+- **Long revealed values ran underneath the Reveal/Copy buttons.** Tokens,
+  JSON blobs and Base64 have no word boundaries, so word-wrapping never broke
+  them; values now wrap at the glyph level when they must.
 - **Keyboard shortcuts did nothing on a non-Latin layout.** Ctrl+N, Ctrl+L and
   Ctrl+F were matched against `Key::Character("n")`, which a Greek or Cyrillic
   layout never produces. They go through libcosmic's `KeyBind` now, which falls

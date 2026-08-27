@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use cosmic::app::context_drawer::{self, ContextDrawer};
 use cosmic::app::{Core, Task};
+use cosmic::iced::core::text::Wrapping;
 use cosmic::iced::keyboard::{Key, Modifiers, key::Physical};
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::prelude::*;
@@ -680,9 +681,20 @@ impl App {
                     .align_y(Alignment::Center)
                     .spacing(spacing.space_s)
                     .push(if sensitive && revealed {
-                        Element::from(widget::text::monotext(shown).width(Length::Fill))
+                        // WordOrGlyph, not Word: a token or a base64 blob has
+                        // no word boundaries, and unwrapped it runs under the
+                        // buttons beside it.
+                        Element::from(
+                            widget::text::monotext(shown)
+                                .wrapping(Wrapping::WordOrGlyph)
+                                .width(Length::Fill),
+                        )
                     } else {
-                        Element::from(widget::text::body(shown).width(Length::Fill))
+                        Element::from(
+                            widget::text::body(shown)
+                                .wrapping(Wrapping::WordOrGlyph)
+                                .width(Length::Fill),
+                        )
                     })
                     .push(controls),
             )
@@ -729,12 +741,36 @@ impl App {
         // The primary secret, as other applications see it over the
         // Secret Service.
         if !item.secret.is_empty() {
+            // A binary secret is base64 at rest; presenting that as the
+            // password would be a lie twice over — it is neither text nor,
+            // decoded to a lossy string, the secret. Say what it is, and let
+            // reveal/copy work on the one faithful text form it has.
+            let heading = if item.secret_is_binary() {
+                let bytes = item.secret_bytes().len();
+                fl!("detail-binary-secret", bytes = bytes)
+            } else {
+                fl!("detail-password")
+            };
             column = column.push(self.field_row(
                 "__secret".to_owned(),
-                fl!("detail-password"),
+                heading,
                 item.secret.expose(),
                 FieldKind::Secret,
             ));
+            if item.secret_is_binary() {
+                column = column.push(
+                    widget::text::caption(fl!("detail-binary-hint"))
+                        .wrapping(Wrapping::WordOrGlyph),
+                );
+            } else if item.secret_is_mangled() {
+                // The replacement characters are stored; the original bytes
+                // are gone from the vault. Point at the recovery path rather
+                // than presenting damage as if it were the secret.
+                column = column.push(
+                    widget::text::caption(fl!("detail-mangled-hint"))
+                        .wrapping(Wrapping::WordOrGlyph),
+                );
+            }
         }
 
         for field in &item.fields {

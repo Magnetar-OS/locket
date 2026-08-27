@@ -379,3 +379,15 @@ dialog-delete-fallback-label = this item
 
 # The View menu entry that focuses the search box.
 menu-search = Search
+
+# The primary secret when it is binary data, base64-encoded at rest.
+detail-binary-secret = Binary secret · { $bytes } bytes
+detail-binary-hint =
+    Not text. Shown and copied as Base64; applications reading it through the
+    Secret Service get the original bytes.
+# The primary secret when it holds U+FFFD replacement characters: destroyed by
+# an import that predates the binary-secret encoding.
+detail-mangled-hint =
+    This value contains replacement characters (�), which usually means an
+    earlier import damaged binary data. If the source keyring still has the
+    original, locket-reimport-keyring restores it.

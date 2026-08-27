@@ -386,6 +386,25 @@ impl Item {
         Zeroizing::new(self.secret.expose().as_bytes().to_vec())
     }
 
+    /// Whether the primary secret is binary, stored base64-encoded.
+    ///
+    /// The UI needs to know: showing the raw store to a person would present
+    /// base64 as if it were the password, and decoding it to text is exactly
+    /// the lossy step [`set_secret_bytes`](Self::set_secret_bytes) exists to
+    /// avoid.
+    pub fn secret_is_binary(&self) -> bool {
+        self.attributes.get(attr::SECRET_ENCODING).map(String::as_str) == Some(BASE64)
+    }
+
+    /// Whether the stored secret carries U+FFFD replacement characters.
+    ///
+    /// That is the fingerprint of data destroyed by a lossy conversion before
+    /// the binary-secret encoding existed. The bytes are gone; the honest
+    /// thing a UI can do is say so and point at the re-import path.
+    pub fn secret_is_mangled(&self) -> bool {
+        !self.secret_is_binary() && self.secret.expose().contains('\u{FFFD}')
+    }
+
     /// Store bytes as the primary secret, losslessly.
     ///
     /// Text is stored as text so that `secret-tool` and the vault file stay
@@ -590,6 +609,26 @@ mod tests {
             "a stale marker would make the next read try to base64-decode plain text"
         );
         assert_eq!(item.secret_bytes().as_slice(), b"now text");
+    }
+
+    #[test]
+    fn the_ui_can_tell_binary_from_text_from_damaged() {
+        let mut item = Item::new(ItemKind::Login, "x");
+        item.set_secret_bytes(b"plain text");
+        assert!(!item.secret_is_binary());
+        assert!(!item.secret_is_mangled());
+
+        item.set_secret_bytes(&[0xff, 0xfe, 0x00]);
+        assert!(item.secret_is_binary());
+        // Base64 output never contains U+FFFD; a binary secret is not mangled.
+        assert!(!item.secret_is_mangled());
+
+        // The fingerprint of a pre-encoding lossy import: replacement
+        // characters stored as the secret itself, with no encoding marker.
+        item.attributes.remove(attr::SECRET_ENCODING);
+        item.secret = "app\u{FFFD}secret\u{FFFD}".to_owned().into();
+        assert!(!item.secret_is_binary());
+        assert!(item.secret_is_mangled());
     }
     use super::*;
 
