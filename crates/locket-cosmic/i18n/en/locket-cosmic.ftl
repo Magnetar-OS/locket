@@ -37,6 +37,25 @@ security-tpm-caveat =
 factor-tpm-pin = TPM PIN
 factor-security-key = Security key
 
+security-passphrase-heading = Passphrase
+security-passphrase-blurb =
+    Changing the passphrase rewraps the vault's key rather than re-encrypting
+    the vault, so it is fast whatever the vault holds — and every other unlock
+    factor keeps working.
+security-current-passphrase = Current passphrase
+security-new-passphrase = New passphrase
+security-confirm-passphrase = Confirm new passphrase
+security-kdf-cost = Unlock cost
+kdf-balanced = Balanced — 64 MiB, 3 passes. The default.
+kdf-stronger = Stronger — 256 MiB, 4 passes. Unlocking takes noticeably longer.
+kdf-lighter = Lighter — 19 MiB, 2 passes. For hardware where Balanced hurts.
+security-change-passphrase = Change passphrase
+security-changing-passphrase = Changing…
+security-passphrase-changed = Passphrase changed. Other unlock factors keep working.
+error-current-passphrase-wrong = The current passphrase is not right.
+error-new-passphrases-differ = The two new passphrases do not match.
+error-new-passphrase-empty = Enter the new passphrase twice.
+
 slot-passphrase = Argon2id · { $memory } MiB · { $passes } passes
 slot-tpm = Sealed to this machine's TPM{ $pin } · { $parent }
 slot-tpm-with-pin = , released by PIN
@@ -169,6 +188,9 @@ editor-save = Save
 editor-cancel = Cancel
 editor-needs-name = Give the item a name.
 editor-field-needs-name = Every field needs a name.
+editor-expires = Expires
+editor-expires-placeholder = YYYY-MM-DD, or leave empty
+editor-bad-expiry = Expiry wants a YYYY-MM-DD date, or nothing for never.
 
 
 ## Import
@@ -187,6 +209,9 @@ import-no-folder = No directory chosen
 import-no-file = No file chosen
 
 source-browser-csv = Browser or password manager export
+source-bitwarden = Bitwarden (.json)
+source-onepassword = 1Password (.1pux)
+source-protonpass = Proton Pass (.zip)
 source-dotenv = Project .env files
 source-ssh = SSH private keys
 source-cloud = Cloud CLI credentials
@@ -199,6 +224,18 @@ source-browser-csv-blurb =
     A .csv exported from Chrome, Edge, Brave, Firefox, Safari, Bitwarden,
     1Password or KeePassXC. Columns are matched by name, so a renamed header
     still imports.
+source-bitwarden-blurb =
+    Bitwarden's Tools → Export as .json — the format that carries custom
+    fields, TOTP seeds, cards, identities and folders. A password-protected
+    export is refused; export again without a file password.
+source-onepassword-blurb =
+    A .1pux export (File → Export). Logins, cards, identities, notes, tags
+    and TOTP seeds come across; items in 1Password's trash stay deleted, and
+    attached documents are counted rather than silently dropped.
+source-protonpass-blurb =
+    Proton Pass's non-encrypted zip export. Logins, aliases, cards, notes
+    and custom fields come across; a PGP-encrypted export is refused —
+    export again without encryption.
 source-dotenv-blurb =
     Walks a directory of projects and imports every .env file, skipping
     node_modules, build output, and .env.example templates. Your files are left
@@ -234,6 +271,12 @@ picker-csv = Choose an exported .csv
 picker-csv-filter = CSV export
 picker-kdbx = Choose a .kdbx database
 picker-kdbx-filter = KeePass database
+picker-bitwarden = Choose a Bitwarden .json export
+picker-bitwarden-filter = Bitwarden export
+picker-onepassword = Choose a .1pux export
+picker-onepassword-filter = 1Password export
+picker-protonpass = Choose a Proton Pass export
+picker-protonpass-filter = Proton Pass export
 picker-ssh = Choose an SSH directory
 picker-totp = Choose an authenticator export
 picker-file = Choose a file
@@ -266,8 +309,39 @@ unlock-working = Unlocking…
 
 category-all = All Items
 category-favorites = Favorites
+category-trash = Trash
+category-health = Health
 category-security = Security
 category-settings = Settings
+
+
+## Health report
+
+health-summary =
+    { $scanned } items scanned — { $weak } weak, { $reused } reused, { $old } old,
+    { $expiring } expiring, { $expired } expired
+health-clean = Nothing to report
+health-clean-detail = Passwords look strong, unique and current.
+health-reason-reused = reused by { $count } other item(s)
+health-reason-old = unchanged for { $days } days
+health-reason-expired = expired
+health-reason-expiring = expiring soon
+strength-very-weak = very weak password
+strength-weak = weak password
+strength-fair = fair password
+health-check-breaches = Check against known breaches
+health-checking = Checking against known breaches…
+health-breach-blurb =
+    Asks haveibeenpwned.com whether any of these secrets appear in a known
+    breach. Only the first five characters of each secret's SHA-1 hash leave
+    this machine — never the secret, never the full hash — and this is the
+    only thing in locket that touches the network, only when you press it.
+health-breached = In known breaches — seen { $count } time(s)
+health-no-breaches = No secret appears in known breaches.
+health-breach-failed = The breach check failed: { $error }
+health-old-note =
+    “Unchanged” is measured from the item's last edit, which is the closest
+    thing the vault records to when the secret itself last changed.
 
 
 ## Item list
@@ -289,6 +363,12 @@ lock = Lock
 ## Item details
 
 detail-edit = Edit
+detail-autotype = Auto-type
+toast-autotype-armed =
+    After allowing input access, click the field to fill — typing starts
+    { $seconds } seconds later. Username, Tab, password; no Enter.
+toast-autotype-done = Typed { $label } into the focused field
+toast-autotype-failed = Auto-type failed: { $error }
 detail-favorite = Favorite
 detail-unfavorite = Unfavorite
 detail-delete = Delete
@@ -300,6 +380,28 @@ detail-otp = One-time code
 detail-expires = expires in { $seconds } seconds
 detail-expires-one = expires in 1 second
 detail-attributes = Secret Service attributes
+
+# Item-level expiry (a certificate's end date, a token's lifetime) — not the
+# TOTP countdown above.
+detail-expired-on = Expired { $date }
+detail-expires-on = Expires { $date }
+
+detail-attachments = Attachments
+attachment-add = Add attachment…
+attachment-save = Save…
+attachment-remove = Remove
+attachment-picker-title = Choose a file to attach
+attachment-save-title = Save attachment
+attachment-note =
+    Stored encrypted in the vault; the original file is untouched. Attachments
+    are not carried into edit history.
+
+detail-history = History
+detail-history-restore = Restore
+detail-history-note =
+    Earlier versions of this item, captured each time an edit replaced them.
+    Restoring is itself an edit, so it can be undone the same way.
+history-entry = { $date } · { $subtitle }
 qr-show = Show QR code
 qr-hide = Hide QR code
 qr-caption =
@@ -317,6 +419,37 @@ copied-kind-value = Value
 menu-file = File
 menu-view = View
 menu-about = About
+menu-open-vault = Open another vault…
+menu-merge-copy = Merge a diverged copy…
+vault-picker-title = Open another vault
+merge-picker-title = Choose the diverged copy to merge
+
+menu-export = Export
+menu-export-json = Everything, as JSON (plaintext)…
+menu-export-csv = Flat CSV for another manager (plaintext)…
+menu-export-kdbx = Encrypted KeePass database…
+
+dialog-export-title = Export in the clear?
+dialog-export-body =
+    The file will hold every secret in the vault, unencrypted. It is the most
+    dangerous file on the disk while it exists — move the secrets, then delete
+    it. The encrypted KeePass export avoids this entirely.
+dialog-export-continue = Choose where to write it
+
+dialog-kdbx-title = Encrypt the export
+dialog-kdbx-body =
+    The database is sealed under its own passphrase — the one KeePassXC will
+    ask for when opening it.
+dialog-kdbx-passphrase = Database passphrase
+dialog-kdbx-confirm = Confirm passphrase
+dialog-kdbx-continue = Choose where to write it
+
+export-save-title = Export the vault
+toast-exported = Exported { $count } item(s) to { $path }
+toast-exported-lossy =
+    { $count } item(s) had fields or attachments CSV cannot carry; the JSON
+    export is lossless.
+toast-export-failed = Export failed: { $error }
 
 
 ## Dialogs
@@ -327,12 +460,48 @@ dialog-ssh-body =
     is set to ask every time, so nothing happens unless you allow it.
 dialog-allow-once = Allow once
 dialog-refuse = Refuse
-dialog-delete-title = Delete item?
+dialog-delete-title = Move to the trash?
 dialog-delete-body =
-    “{ $label }” will be removed from the vault. This cannot be undone, and any
-    application that reads it through the Secret Service will stop finding it.
-dialog-delete = Delete
+    “{ $label }” moves to the trash: any application that reads it through the
+    Secret Service stops finding it, but you can restore it from Trash until it
+    is purged.
+dialog-delete = Move to trash
 dialog-cancel = Cancel
+
+dialog-purge-title = Delete forever?
+dialog-purge-body = “{ $label }” will be gone for good. This cannot be undone.
+dialog-purge = Delete forever
+dialog-empty-trash-title = Empty the trash?
+dialog-empty-trash-body =
+    { $count } item(s) will be gone for good. This cannot be undone.
+
+dialog-conflict-title = A diverged copy of this vault exists
+dialog-conflict-body =
+    Your file synchroniser left “{ $name }” beside this vault — a copy holding
+    edits made on another machine. Merging folds both sides together: the newer
+    edit of each item wins and the other lands in its history, so nothing is
+    lost. The copy itself is only read.
+dialog-merge = Merge
+dialog-later = Not now
+
+
+## Trash
+
+empty-trash = The trash is empty
+empty-trash-detail = Items you delete wait here before they are gone for good.
+trash-deleted-on = Deleted { $date }
+trash-restore = Restore
+trash-delete-forever = Delete forever
+trash-empty-button = Empty trash
+trash-retention-label = Delete forever after
+retention-7d = 7 days
+retention-30d = 30 days
+retention-90d = 90 days
+retention-never = Never — only when emptied by hand
+trash-retention-detail =
+    Stored in the vault itself and enforced on unlock, by whichever locket
+    process opens it first — so the window means the same thing everywhere
+    the vault goes.
 
 
 ## Toasts and messages
@@ -342,7 +511,23 @@ toast-copied-clearing = { $what } copied — clipboard clears in { $seconds }s
 toast-allowed-signature = Allowed one signature with { $key }
 toast-refused-signature = Refused a signature with { $key }
 toast-saved = Saved { $label }
-toast-deleted = Deleted { $label }
+toast-trashed = Moved { $label } to the trash
+toast-restored = Restored { $label }
+toast-purged = Deleted { $label } forever
+toast-trash-emptied = Emptied the trash — { $count } item(s)
+toast-revision-restored = Restored an earlier version of { $label }
+toast-attachment-added = Attached { $name }
+toast-attachment-removed = Removed { $name }
+toast-attachment-saved = Wrote { $path }
+toast-attachment-failed = Could not handle the attachment: { $error }
+toast-merged = Merged — { $report }
+toast-merge-nothing = The copies are identical; nothing to merge.
+toast-merge-failed =
+    Could not merge: { $error }. A copy that does not decrypt with this vault's
+    key is not a fork of this vault.
+toast-merge-attachments =
+    { $count } conflicting edit(s) lost attachments held only by the older side;
+    their other changes are in the item's history.
 toast-imported = Imported { $summary }
 toast-unlocked-others = Unlocked for other applications too
 toast-factor-removed = Factor removed.
@@ -399,3 +584,26 @@ editor-binary-secret =
 editor-binary-replaced =
     The secret has changed and will be saved as the text above, no longer as
     binary data. Cancel to keep the original.
+
+# The strength meter on the create-vault screen. This is the one passphrase
+# nothing can recover, so it is the one worth estimating out loud.
+strength-meter = Strength: { $strength }
+strength-label-very-weak = very weak
+strength-label-weak = weak
+strength-label-fair = fair
+strength-label-good = good
+strength-label-strong = strong
+unlock-weak-warning =
+    A weak passphrase is the whole vault's weakness. Longer beats stranger:
+    four unrelated words outlast a short line of symbols.
+unlock-open-other = Open a different vault…
+
+detail-history-forget = Forget history
+dialog-forget-history-title = Forget this item's history?
+dialog-forget-history-body =
+    Every earlier version of “{ $label }” is deleted for good. Do this after
+    rotating a credential that leaked: history exists to make a replaced value
+    recoverable, which is the last thing you want for the one you just rotated
+    away from.
+dialog-forget = Forget
+toast-history-forgotten = Dropped { $count } earlier version(s) of { $label }

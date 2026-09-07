@@ -1,6 +1,7 @@
 //! locket — a password and secrets manager for COSMIC.
 
 mod app;
+mod autotype;
 mod config;
 mod daemon;
 mod editor;

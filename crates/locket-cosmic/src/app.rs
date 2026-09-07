@@ -58,6 +58,10 @@ pub enum Category {
     All,
     Favorites,
     Kind(ItemKind),
+    /// Soft-deleted items, restorable until purged.
+    Trash,
+    /// The password health report: weak, reused, old, expiring.
+    Health,
     /// Unlock factors: passphrase, TPM PIN, security key.
     Security,
     /// Preferences, and whether the desktop integration is actually working.
@@ -69,6 +73,8 @@ impl Category {
         match self {
             Category::All => fl!("category-all"),
             Category::Favorites => fl!("category-favorites"),
+            Category::Trash => fl!("category-trash"),
+            Category::Health => fl!("category-health"),
             Category::Security => fl!("category-security"),
             Category::Settings => fl!("category-settings"),
             // A category is the plural of its kind, and the plural is its own
@@ -81,6 +87,8 @@ impl Category {
         match self {
             Category::All => "view-grid-symbolic",
             Category::Favorites => "starred-symbolic",
+            Category::Trash => "user-trash-symbolic",
+            Category::Health => "emblem-default-symbolic",
             Category::Security => "security-high-symbolic",
             Category::Settings => "preferences-system-symbolic",
             Category::Kind(k) => k.icon_name(),
@@ -91,8 +99,9 @@ impl Category {
         match self {
             Category::All => true,
             Category::Favorites => item.favorite,
-            // Neither screen lists items, so nothing matches them.
-            Category::Security | Category::Settings => false,
+            // None of these screens list live items: Trash and Health draw
+            // their own lists rather than filtering this one.
+            Category::Trash | Category::Health | Category::Security | Category::Settings => false,
             Category::Kind(k) => item.kind == k,
         }
     }
@@ -134,6 +143,59 @@ pub enum Message {
     RequestDelete(Uuid),
     ConfirmDelete,
     CancelDelete,
+    // -- trash --
+    RestoreTrashed(Uuid),
+    RetentionSelected(usize),
+    RequestPurge(PurgeTarget),
+    ConfirmPurge,
+    CancelPurge,
+    // -- history --
+    RestoreRevision(usize),
+    RequestForgetHistory,
+    ConfirmForgetHistory,
+    CancelForgetHistory,
+    // -- attachments --
+    AttachmentAdd,
+    /// The picked file, read off the UI thread: name and bytes, or `None`
+    /// when the dialog was cancelled, or an error string.
+    AttachmentLoaded(Option<Result<(String, Vec<u8>), String>>),
+    AttachmentSave(Uuid),
+    /// Where to write attachment `0`, or `None` when cancelled.
+    AttachmentWrite(Uuid, Option<PathBuf>),
+    /// The write finished: the path on success, the error otherwise.
+    AttachmentWritten(Result<String, String>),
+    AttachmentRemove(Uuid),
+    // -- vaults and merging --
+    OpenVaultDialog,
+    VaultPicked(Option<PathBuf>),
+    MergeDialog,
+    MergePicked(Option<PathBuf>),
+    DismissConflict,
+    MergeConflict,
+    // -- export --
+    /// A format was picked from the menu; plaintext ones detour through a
+    /// warning dialog, kdbx through a passphrase dialog.
+    ExportRequest(ExportFormat),
+    /// The warning/passphrase dialog was accepted; open the save dialog.
+    ExportContinue,
+    ExportCancel,
+    ExportKdbxPassphrase(String),
+    ExportKdbxConfirm(String),
+    /// Where to write, or `None` when the save dialog was cancelled.
+    ExportPicked(ExportFormat, Option<PathBuf>),
+    /// A kdbx export finished off-thread; the vault comes home in the slot,
+    /// the result carries (count, path) or the error.
+    ExportFinished(Arc<Mutex<Option<Vault>>>, Result<(usize, String), String>),
+    // -- auto-type --
+    AutoType,
+    AutoTyped(Result<String, String>),
+    // -- health --
+    /// The report finished on its worker thread.
+    HealthReady(Box<locket_core::health::HealthReport>),
+    CheckBreaches,
+    /// The breach check finished: per item, how often its secret appears in
+    /// known breaches (zero-count items are omitted); or the error.
+    BreachesChecked(Result<Vec<(Uuid, u64)>, String>),
     // -- daemon --
     Daemon(DaemonEvent),
     DaemonUnlocked(bool),
@@ -161,6 +223,9 @@ pub enum Message {
     /// Enrolment finished; the vault comes back in the shared slot because it
     /// was moved into a blocking worker to keep the UI responsive.
     SecurityEnrolled(Arc<Mutex<Option<Vault>>>, Option<String>),
+    /// The passphrase change finished; same shared-slot arrangement — the
+    /// vault was in a worker for the Argon2 work.
+    PassphraseRotated(Arc<Mutex<Option<Vault>>>, Option<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +233,39 @@ enum Screen {
     Locked,
     Unlocking,
     Browsing,
+}
+
+/// What a purge confirmation is about to destroy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PurgeTarget {
+    One(Uuid),
+    All,
+}
+
+pub use locket_import::export::Format as ExportFormat;
+
+/// The retention windows the trash screen offers, parallel to
+/// [`RETENTION_LABELS`]. `None` keeps trash until emptied by hand.
+const RETENTION: &[Option<u32>] = &[Some(7), Some(30), Some(90), None];
+
+static RETENTION_LABELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    vec![
+        fl!("retention-7d"),
+        fl!("retention-30d"),
+        fl!("retention-90d"),
+        fl!("retention-never"),
+    ]
+});
+
+/// The export flow's dialog state.
+#[derive(Default)]
+struct ExportFlow {
+    /// The format awaiting its warning (plaintext) or passphrase (kdbx)
+    /// dialog. `None` when no export is in flight.
+    pending: Option<ExportFormat>,
+    kdbx_passphrase: String,
+    kdbx_confirm: String,
+    error: Option<String>,
 }
 
 pub struct Flags {
@@ -193,6 +291,11 @@ impl cosmic::app::CosmicFlags for Flags {
 pub enum MenuAction {
     NewItem,
     Import,
+    ExportJson,
+    ExportCsv,
+    ExportKdbx,
+    OpenVault,
+    MergeCopy,
     Lock,
     Search,
     About,
@@ -205,6 +308,11 @@ impl menu::action::MenuAction for MenuAction {
         match self {
             MenuAction::NewItem => Message::NewItem,
             MenuAction::Import => Message::OpenImport,
+            MenuAction::ExportJson => Message::ExportRequest(ExportFormat::Json),
+            MenuAction::ExportCsv => Message::ExportRequest(ExportFormat::Csv),
+            MenuAction::ExportKdbx => Message::ExportRequest(ExportFormat::Kdbx),
+            MenuAction::OpenVault => Message::OpenVaultDialog,
+            MenuAction::MergeCopy => Message::MergeDialog,
             MenuAction::Lock => Message::Lock,
             MenuAction::Search => Message::FocusSearch,
             MenuAction::About => Message::OpenAbout,
@@ -278,6 +386,24 @@ pub struct App {
     status: Option<Status>,
     /// Item awaiting a delete confirmation.
     pending_delete: Option<Uuid>,
+    /// Trash awaiting a permanent-delete confirmation.
+    pending_purge: Option<PurgeTarget>,
+    /// An item whose history is about to be dropped for good.
+    pending_forget: Option<Uuid>,
+    /// A synchroniser's fork found beside the vault, awaiting a decision.
+    sync_conflict: Option<PathBuf>,
+    /// Forks the user said "not now" to, so the dialog does not nag every
+    /// unlock of this session.
+    conflict_dismissed: HashSet<PathBuf>,
+    /// The export flow's dialogs, when one is open.
+    export: ExportFlow,
+    /// The health report, computed when the Health screen is opened rather
+    /// than per frame — zxcvbn over a whole vault is not redraw-priced work.
+    health: Option<locket_core::health::HealthReport>,
+    /// Breach-check outcome: item id → occurrence count. `None` until the
+    /// user explicitly runs it; it is the one thing here that goes online.
+    breaches: Option<Result<Vec<(Uuid, u64)>, String>>,
+    checking_breaches: bool,
 
     /// Set when the daemon asked for an unlock on an application's behalf, so
     /// the unlock screen can say why it appeared.
@@ -350,14 +476,48 @@ impl App {
         let Some(vault) = self.vault.as_mut() else {
             return Ok(Task::none());
         };
-        match vault.save() {
+        let saved = match vault.save() {
             Ok(()) => Ok(cosmic::task::future(async {
                 daemon::reload().await;
                 Message::Tick
             })),
             Err(locket_core::Error::ChangedOnDisk { .. }) => Err(fl!("error-save-conflict")),
             Err(e) => Err(fl!("error-save-failed", error = e.to_string())),
+        };
+        // A save while the Health screen is up means its numbers may have
+        // just changed — an edit from the drawer, a restored revision. The
+        // recomputation rides along with the save's own task.
+        if saved.is_ok() && self.category() == Category::Health {
+            let recompute = self.refresh_health();
+            return saved.map(|task| Task::batch([task, recompute]));
         }
+        saved
+    }
+
+    /// Recompute the health report from the vault as it stands, dropping any
+    /// breach results with it — they described the previous state.
+    ///
+    /// Off the UI thread: zxcvbn over every secret is 1.7 seconds on a
+    /// 10,000-item vault (`cargo run --release -p locket-core --example
+    /// bench`), which as a synchronous call is a frozen window. The data is
+    /// cloned rather than the vault moved, because the clone costs
+    /// milliseconds and leaves every other screen usable while the report
+    /// runs.
+    fn refresh_health(&mut self) -> Task<Message> {
+        self.breaches = None;
+        let Some(vault) = self.vault.as_ref() else {
+            self.health = None;
+            return Task::none();
+        };
+        let data = vault.data().clone();
+        cosmic::task::future(async move {
+            let report = tokio::task::spawn_blocking(move || {
+                locket_core::health::report(&data, locket_core::model::now())
+            })
+            .await
+            .unwrap_or_default();
+            Message::HealthReady(Box::new(report))
+        })
     }
 
     /// Take every secret back off the screen.
@@ -403,6 +563,39 @@ impl App {
 
     fn toast(&mut self, text: impl Into<String>) -> Task<Message> {
         self.toasts.push(widget::Toast::new(text.into())).map(cosmic::Action::App)
+    }
+
+    /// Fold a diverged copy of the open vault into it, using the DEK already
+    /// held — two forks of one vault share a key, so nobody is asked for a
+    /// second passphrase. A file that does not decrypt is not a fork, and the
+    /// toast says as much.
+    fn merge_sibling(&mut self, path: &std::path::Path) -> Task<Message> {
+        self.reload_if_changed();
+        let Some(vault) = self.vault.as_mut() else {
+            return Task::none();
+        };
+        let other = match vault.open_sibling(path) {
+            Ok(data) => data,
+            Err(e) => {
+                return self.toast(fl!("toast-merge-failed", error = e.to_string()));
+            }
+        };
+        let report = vault.merge_from(other);
+        if !report.changed() {
+            return self.toast(fl!("toast-merge-nothing"));
+        }
+        let saved = match self.save_vault() {
+            Ok(task) => task,
+            Err(e) => return self.toast(e),
+        };
+        let mut tasks = vec![saved, self.toast(fl!("toast-merged", report = report.to_string()))];
+        if report.attachments_dropped > 0 {
+            tasks.push(self.toast(fl!(
+                "toast-merge-attachments",
+                count = report.attachments_dropped
+            )));
+        }
+        Task::batch(tasks)
     }
 
     // -- views --------------------------------------------------------------
@@ -473,6 +666,41 @@ impl App {
             );
         }
 
+        // Creating is the one moment this passphrase can still be changed
+        // for free, so it is the one moment worth estimating it out loud.
+        // Scored against the application's own name, because "locket" is the
+        // first thing an attacker would try.
+        if creating && !self.passphrase.is_empty() {
+            use locket_core::health::Strength;
+            let strength = locket_core::health::strength(&self.passphrase, &["locket", "vault"]);
+            let named = match strength {
+                Strength::VeryWeak => fl!("strength-label-very-weak"),
+                Strength::Weak => fl!("strength-label-weak"),
+                Strength::Fair => fl!("strength-label-fair"),
+                Strength::Good => fl!("strength-label-good"),
+                Strength::Strong => fl!("strength-label-strong"),
+            };
+            let caption = widget::text::caption(fl!("strength-meter", strength = named));
+            form = form
+                .push(
+                    widget::determinate_linear(strength.fraction()).width(Length::Fill),
+                )
+                .push(if strength.is_flagged() {
+                    caption.class(cosmic::theme::Text::Color(
+                        cosmic::theme::active().cosmic().destructive_color().into(),
+                    ))
+                } else {
+                    caption
+                });
+            if strength.is_flagged() {
+                form = form.push(
+                    widget::text::caption(fl!("unlock-weak-warning"))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .center(),
+                );
+            }
+        }
+
         if let Some(error) = &self.error {
             form = form.push(widget::text::body(error.clone()).class(cosmic::theme::Text::Color(
                 cosmic::theme::active().cosmic().destructive_color().into(),
@@ -492,6 +720,13 @@ impl App {
         } else {
             Element::from(action.on_press(Message::UnlockSubmit))
         });
+
+        // The menu bar is hidden while locked, so without this there is no
+        // way to reach a vault that lives somewhere else — the screen would
+        // ask forever for the passphrase of a file the person does not have.
+        form = form.push(
+            widget::button::text(fl!("unlock-open-other")).on_press(Message::OpenVaultDialog),
+        );
 
         widget::container(form)
             .width(Length::Fill)
@@ -605,6 +840,15 @@ impl App {
                             .size(if compact { 16 } else { 24 }),
                     )
                     .push(text)
+                    .push_maybe({
+                        // Expired or expiring within 30 days: a credential
+                        // about to stop working deserves a mark in the list,
+                        // not only in the detail pane.
+                        let now = locket_core::model::now();
+                        (item.is_expired(now) || item.expires_within(now, 30 * 86_400)).then(
+                            || widget::icon::from_name("appointment-missed-symbolic").size(16),
+                        )
+                    })
                     .push_maybe(item.favorite.then(|| {
                         widget::icon::from_name("starred-symbolic").size(16)
                     }));
@@ -702,6 +946,244 @@ impl App {
             .into()
     }
 
+    /// The health report: weak, reused, old, expiring — and, on request,
+    /// breached.
+    fn health_view(&self) -> Element<'_, Message> {
+        use locket_core::health::Strength;
+        let spacing = cosmic::theme::spacing();
+        let Some(report) = &self.health else {
+            return widget::container(widget::text::body(""))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        };
+
+        let breach_count = |id: Uuid| -> Option<u64> {
+            match &self.breaches {
+                Some(Ok(found)) => found.iter().find(|(i, _)| *i == id).map(|(_, n)| *n),
+                _ => None,
+            }
+        };
+
+        let mut column = widget::column::with_capacity(6)
+            .spacing(spacing.space_s)
+            .padding(spacing.space_s);
+
+        column = column.push(widget::text::body(fl!(
+            "health-summary",
+            scanned = report.scanned,
+            weak = report.weak,
+            reused = report.reused,
+            old = report.old,
+            expiring = report.expiring,
+            expired = report.expired
+        )));
+
+        // Items breached but otherwise unflagged still need a row: a strong,
+        // unique password sitting in a breach corpus is the finding that
+        // matters most. Collect them after the report's own entries.
+        let breached_only: Vec<(Uuid, u64)> = match &self.breaches {
+            Some(Ok(found)) => found
+                .iter()
+                .filter(|(id, _)| !report.entries.iter().any(|e| e.id == *id))
+                .copied()
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        if report.is_clean() && breached_only.is_empty() {
+            let clean = widget::column::with_capacity(3)
+                .spacing(spacing.space_xs)
+                .align_x(Alignment::Center)
+                .push(widget::icon::from_name("emblem-default-symbolic").size(48))
+                .push(widget::text::title4(fl!("health-clean")))
+                .push(widget::text::body(fl!("health-clean-detail")).center());
+            column = column.push(
+                widget::container(clean)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::Center)
+                    .align_y(Alignment::Center),
+            );
+        } else {
+            let mut list = widget::list_column();
+            for e in &report.entries {
+                let mut reasons: Vec<String> = Vec::new();
+                match e.strength {
+                    Some(Strength::VeryWeak) => reasons.push(fl!("strength-very-weak")),
+                    Some(Strength::Weak) => reasons.push(fl!("strength-weak")),
+                    Some(Strength::Fair) => reasons.push(fl!("strength-fair")),
+                    _ => {}
+                }
+                if e.reused_with > 0 {
+                    reasons.push(fl!("health-reason-reused", count = e.reused_with));
+                }
+                if e.old {
+                    reasons.push(fl!("health-reason-old", days = e.age_days));
+                }
+                if e.expired {
+                    reasons.push(fl!("health-reason-expired"));
+                } else if e.expiring {
+                    reasons.push(fl!("health-reason-expiring"));
+                }
+                if let Some(count) = breach_count(e.id) {
+                    reasons.push(fl!("health-breached", count = count.to_string()));
+                }
+                list = list.add(self.health_row(e.id, e.kind.icon_name(), &e.label, reasons));
+            }
+            for (id, count) in &breached_only {
+                let Some(item) = self.vault.as_ref().and_then(|v| v.item(*id)) else {
+                    continue;
+                };
+                let finding: String = fl!("health-breached", count = count.to_string());
+                list = list.add(self.health_row(
+                    *id,
+                    item.kind.icon_name(),
+                    &item.label,
+                    vec![finding],
+                ));
+            }
+            column = column.push(widget::scrollable(list).height(Length::Fill));
+        }
+
+        // The one deliberate network affordance in the application, labelled
+        // with exactly what leaves the machine.
+        column = column.push(
+            widget::text::caption(fl!("health-breach-blurb")).wrapping(Wrapping::WordOrGlyph),
+        );
+        match &self.breaches {
+            Some(Ok(found)) if found.is_empty() => {
+                column = column.push(widget::text::body(fl!("health-no-breaches")));
+            }
+            Some(Err(e)) => {
+                column = column.push(
+                    widget::text::body(fl!("health-breach-failed", error = e.clone())).class(
+                        cosmic::theme::Text::Color(
+                            cosmic::theme::active().cosmic().destructive_color().into(),
+                        ),
+                    ),
+                );
+            }
+            _ => {}
+        }
+        let check = widget::button::standard(if self.checking_breaches {
+            fl!("health-checking")
+        } else {
+            fl!("health-check-breaches")
+        });
+        column = column.push(if self.checking_breaches {
+            Element::from(check)
+        } else {
+            check.on_press(Message::CheckBreaches).into()
+        });
+
+        column.into()
+    }
+
+    /// One report row; clicking opens the item so it can be fixed there.
+    fn health_row(
+        &self,
+        id: Uuid,
+        icon: &'static str,
+        label: &str,
+        reasons: Vec<String>,
+    ) -> Element<'static, Message> {
+        let spacing = cosmic::theme::spacing();
+        let row = widget::row::with_capacity(2)
+            .spacing(spacing.space_s)
+            .align_y(Alignment::Center)
+            .push(widget::icon::from_name(icon).size(24))
+            .push(
+                widget::column::with_capacity(2)
+                    .push(widget::text::body(label.to_owned()))
+                    .push(widget::text::caption(reasons.join(" · ")))
+                    .width(Length::Fill),
+            );
+        widget::button::custom(row)
+            .width(Length::Fill)
+            .class(cosmic::theme::Button::Text)
+            .on_press(Message::Select(id))
+            .into()
+    }
+
+    /// The trash: what waits here, when it arrived, and the two ways out.
+    fn trash_view(&self) -> Element<'_, Message> {
+        let spacing = cosmic::theme::spacing();
+        let Some(vault) = &self.vault else {
+            return widget::container(widget::text::body(""))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        };
+        let trash = &vault.data().trash;
+
+        if trash.is_empty() {
+            let empty = widget::column::with_capacity(3)
+                .spacing(spacing.space_xs)
+                .align_x(Alignment::Center)
+                .push(widget::icon::from_name("user-trash-symbolic").size(48))
+                .push(widget::text::title4(fl!("empty-trash")))
+                .push(widget::text::body(fl!("empty-trash-detail")).center());
+            return widget::container(empty)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::Center)
+                .into();
+        }
+
+        let mut column = widget::list_column();
+        for t in trash {
+            let row = widget::row::with_capacity(4)
+                .spacing(spacing.space_s)
+                .align_y(Alignment::Center)
+                .push(widget::icon::from_name(t.item.kind.icon_name()).size(24))
+                .push(
+                    widget::column::with_capacity(2)
+                        .push(widget::text::body(t.item.label.clone()))
+                        .push(widget::text::caption(fl!(
+                            "trash-deleted-on",
+                            date = locket_core::model::format_date(t.deleted)
+                        )))
+                        .width(Length::Fill),
+                )
+                .push(
+                    widget::button::standard(fl!("trash-restore"))
+                        .on_press(Message::RestoreTrashed(t.item.id)),
+                )
+                .push(
+                    widget::button::destructive(fl!("trash-delete-forever"))
+                        .on_press(Message::RequestPurge(PurgeTarget::One(t.item.id))),
+                );
+            column = column.add(row);
+        }
+
+        let selected = RETENTION
+            .iter()
+            .position(|r| *r == vault.data().settings.trash_retention_days);
+
+        widget::column::with_capacity(4)
+            .spacing(spacing.space_s)
+            .padding(spacing.space_s)
+            .push(widget::scrollable(column).height(Length::Fill))
+            .push(
+                widget::settings::section().add(widget::settings::item(
+                    fl!("trash-retention-label"),
+                    widget::dropdown(
+                        RETENTION_LABELS.as_slice(),
+                        selected,
+                        Message::RetentionSelected,
+                    ),
+                )),
+            )
+            .push(widget::text::caption(fl!("trash-retention-detail")))
+            .push(
+                widget::button::destructive(fl!("trash-empty-button"))
+                    .on_press(Message::RequestPurge(PurgeTarget::All)),
+            )
+            .into()
+    }
+
     fn detail_view(&self) -> Option<Element<'_, Message>> {
         let item = self.selected_item()?;
         let spacing = cosmic::theme::spacing();
@@ -721,9 +1203,14 @@ impl App {
         );
 
         column = column.push(
-            widget::row::with_capacity(3)
+            widget::row::with_capacity(4)
                 .spacing(spacing.space_xxs)
                 .push(widget::button::standard(fl!("detail-edit")).on_press(Message::EditSelected))
+                // Auto-type wants something to type: a secret, at least.
+                .push_maybe((!item.secret.is_empty()).then(|| {
+                    widget::button::standard(fl!("detail-autotype"))
+                        .on_press(Message::AutoType)
+                }))
                 .push(
                     widget::button::standard(if item.favorite {
                         fl!("detail-unfavorite")
@@ -737,6 +1224,23 @@ impl App {
                         .on_press(Message::RequestDelete(item.id)),
                 ),
         );
+
+        // Item-level expiry, red once it has passed. Placed above the fields
+        // because an expired credential changes how everything below reads.
+        if let Some(expires) = item.expires {
+            let now = locket_core::model::now();
+            let date = locket_core::model::format_date(expires);
+            let caption = if item.is_expired(now) {
+                widget::text::caption(fl!("detail-expired-on", date = date)).class(
+                    cosmic::theme::Text::Color(
+                        cosmic::theme::active().cosmic().destructive_color().into(),
+                    ),
+                )
+            } else {
+                widget::text::caption(fl!("detail-expires-on", date = date))
+            };
+            column = column.push(caption);
+        }
 
         // The primary secret, as other applications see it over the
         // Secret Service.
@@ -876,6 +1380,76 @@ impl App {
             column = column.push(attrs);
         }
 
+        // -- attachments ----------------------------------------------------
+        column = column
+            .push(widget::divider::horizontal::default())
+            .push(widget::text::caption_heading(fl!("detail-attachments")));
+        for a in &item.attachments {
+            column = column.push(
+                widget::row::with_capacity(4)
+                    .spacing(spacing.space_xxs)
+                    .align_y(Alignment::Center)
+                    .push(
+                        widget::column::with_capacity(2)
+                            .push(widget::text::body(a.name.clone()))
+                            .push(widget::text::caption(format_size(a.size())))
+                            .width(Length::Fill),
+                    )
+                    .push(
+                        widget::button::standard(fl!("attachment-save"))
+                            .on_press(Message::AttachmentSave(a.id)),
+                    )
+                    .push(
+                        widget::button::destructive(fl!("attachment-remove"))
+                            .on_press(Message::AttachmentRemove(a.id)),
+                    ),
+            );
+        }
+        column = column.push(
+            widget::button::standard(fl!("attachment-add")).on_press(Message::AttachmentAdd),
+        );
+        if !item.attachments.is_empty() {
+            column = column.push(
+                widget::text::caption(fl!("attachment-note")).wrapping(Wrapping::WordOrGlyph),
+            );
+        }
+
+        // -- history --------------------------------------------------------
+        if !item.history.is_empty() {
+            column = column
+                .push(widget::divider::horizontal::default())
+                .push(widget::text::caption_heading(fl!("detail-history")))
+                .push(
+                    widget::text::caption(fl!("detail-history-note"))
+                        .wrapping(Wrapping::WordOrGlyph),
+                );
+            // Newest first: the revision someone wants is almost always the
+            // one their last edit replaced.
+            for (index, revision) in item.history.iter().enumerate().rev() {
+                column = column.push(
+                    widget::row::with_capacity(2)
+                        .spacing(spacing.space_xxs)
+                        .align_y(Alignment::Center)
+                        .push(
+                            widget::text::body(fl!(
+                                "history-entry",
+                                date = locket_core::model::format_date(revision.saved),
+                                subtitle = revision.item.subtitle().to_owned()
+                            ))
+                            .width(Length::Fill),
+                        )
+                        .push(
+                            widget::button::standard(fl!("detail-history-restore"))
+                                .on_press(Message::RestoreRevision(index)),
+                        ),
+                );
+            }
+            column = column.push(
+                widget::button::destructive(fl!("detail-history-forget"))
+                    .on_press(Message::RequestForgetHistory),
+            );
+        }
+
         Some(column.into())
     }
 }
@@ -908,6 +1482,8 @@ impl cosmic::Application for App {
             Category::Kind(ItemKind::Card),
             Category::Kind(ItemKind::WifiNetwork),
             Category::Kind(ItemKind::Application),
+            Category::Health,
+            Category::Trash,
             Category::Security,
             Category::Settings,
         ] {
@@ -947,6 +1523,14 @@ impl cosmic::Application for App {
             last_activity: std::time::Instant::now(),
             status: None,
             pending_delete: None,
+            pending_purge: None,
+            pending_forget: None,
+            sync_conflict: None,
+            conflict_dismissed: HashSet::new(),
+            export: ExportFlow::default(),
+            health: None,
+            breaches: None,
+            checking_breaches: false,
             security: Security::default(),
             unlock_requested_by_app: false,
             clipboard_copy: None,
@@ -997,6 +1581,11 @@ impl cosmic::Application for App {
         if self.category() == Category::Settings {
             self.status = None;
             return Task::batch([self.update_title(), Self::refresh_status()]);
+        }
+        // Recomputed on entry so the report reflects the vault as it is now;
+        // stale breach results from a previous visit are dropped with it.
+        if self.category() == Category::Health {
+            return Task::batch([self.update_title(), self.refresh_health()]);
         }
         self.update_title()
     }
@@ -1079,11 +1668,22 @@ impl cosmic::Application for App {
                 let vault = slot.lock().ok().and_then(|mut g| g.take());
                 match vault {
                     Some(v) => {
+                        // Look for a synchroniser's fork while the directory
+                        // listing is cheap and the person is right here to
+                        // decide about it.
+                        let conflict = v
+                            .sync_conflict_siblings()
+                            .into_iter()
+                            .find(|p| !self.conflict_dismissed.contains(p));
                         self.vault = Some(v);
                         self.vault_exists = true;
                         self.screen = Screen::Browsing;
                         self.error = None;
-                        return self.update_title();
+                        let title = self.update_title();
+                        if conflict.is_some() {
+                            self.sync_conflict = conflict;
+                        }
+                        return title;
                     }
                     None => {
                         self.screen = Screen::Locked;
@@ -1315,15 +1915,22 @@ impl cosmic::Application for App {
                             return Task::none();
                         };
                         match id {
-                            // Replace in place so the item keeps its position
-                            // and its D-Bus object path stays meaningful.
+                            // Applied field by field rather than replaced
+                            // wholesale: the editor only speaks for what its
+                            // form shows, and a whole-item overwrite silently
+                            // destroyed everything it does not — tags,
+                            // attachments, history. `edit_item` also files
+                            // the state being replaced into history first.
                             Some(existing) => {
-                                if let Some(slot) = vault.item_mut(existing) {
-                                    let created = slot.created;
-                                    *slot = item;
-                                    slot.created = created;
-                                    slot.touch();
-                                }
+                                let _ = vault.edit_item(existing, move |slot| {
+                                    slot.label = item.label;
+                                    slot.kind = item.kind;
+                                    slot.secret = item.secret;
+                                    slot.attributes = item.attributes;
+                                    slot.fields = item.fields;
+                                    slot.favorite = item.favorite;
+                                    slot.expires = item.expires;
+                                });
                             }
                             None => {
                                 vault.add_item_default(item);
@@ -1541,6 +2148,80 @@ impl cosmic::Application for App {
                     self.security.pin = v;
                     self.security.error = None;
                 }
+                security::Message::CurrentPassphrase(v) => {
+                    self.security.current = v;
+                    self.security.error = None;
+                }
+                security::Message::NewPassphrase(v) => {
+                    self.security.new1 = v;
+                    self.security.error = None;
+                }
+                security::Message::ConfirmPassphrase(v) => {
+                    self.security.new2 = v;
+                    self.security.error = None;
+                }
+                security::Message::KdfSelected(i) => {
+                    if i < security::KDF_PRESETS.len() {
+                        self.security.kdf_index = i;
+                    }
+                }
+                security::Message::ChangePassphrase => {
+                    if self.security.changing {
+                        return Task::none();
+                    }
+                    if self.security.new1.is_empty() {
+                        self.security.error = Some(fl!("error-new-passphrase-empty"));
+                        return Task::none();
+                    }
+                    if self.security.new1 != self.security.new2 {
+                        self.security.error = Some(fl!("error-new-passphrases-differ"));
+                        return Task::none();
+                    }
+                    let Some(vault) = self.vault.take() else {
+                        return Task::none();
+                    };
+                    let params = security::KDF_PRESETS[self.security.kdf_index]();
+                    let current = std::mem::take(&mut self.security.current);
+                    let new = std::mem::take(&mut self.security.new1);
+                    self.security.new2.clear();
+                    self.security.changing = true;
+                    self.security.error = None;
+                    self.security.notice = None;
+                    let path = self.vault_path.clone();
+
+                    // Argon2 twice over — verifying the current passphrase,
+                    // then deriving the new slot — has no business on the UI
+                    // thread.
+                    return cosmic::task::future(async move {
+                        let outcome = tokio::task::spawn_blocking(move || {
+                            let mut vault = vault;
+                            // Proof of knowledge first: an unlocked window is
+                            // not authority to rotate the owner's passphrase.
+                            let result = match Vault::open(&path, &current) {
+                                Err(locket_core::Error::WrongPassphrase) => {
+                                    Err(fl!("error-current-passphrase-wrong"))
+                                }
+                                Err(e) => Err(e.to_string()),
+                                Ok(_) => vault
+                                    .change_passphrase(&new, params)
+                                    .map_err(|e| e.to_string()),
+                            };
+                            (vault, result)
+                        })
+                        .await;
+
+                        match outcome {
+                            Ok((vault, result)) => Message::PassphraseRotated(
+                                Arc::new(Mutex::new(Some(vault))),
+                                result.err(),
+                            ),
+                            Err(e) => Message::PassphraseRotated(
+                                Arc::new(Mutex::new(None)),
+                                Some(fl!("error-enrolment-task", error = e.to_string())),
+                            ),
+                        }
+                    });
+                }
                 security::Message::Dismiss => {
                     self.security.error = None;
                     self.security.notice = None;
@@ -1600,6 +2281,26 @@ impl cosmic::Application for App {
                 }
             },
 
+            Message::PassphraseRotated(slot, error) => {
+                self.security.changing = false;
+                self.security.clear_passphrase_form();
+                self.vault = slot.lock().ok().and_then(|mut g| g.take());
+                match error {
+                    Some(e) => self.security.error = Some(e),
+                    None => {
+                        self.security.notice = Some(fl!("security-passphrase-changed"));
+                        // The daemon's copy of the file just changed under it.
+                        return cosmic::task::future(async {
+                            daemon::reload().await;
+                            Message::Tick
+                        });
+                    }
+                }
+                if self.vault.is_none() {
+                    self.screen = Screen::Locked;
+                }
+            }
+
             Message::SecurityEnrolled(slot, error) => {
                 self.security.busy = None;
                 self.vault = slot.lock().ok().and_then(|mut g| g.take());
@@ -1625,7 +2326,10 @@ impl cosmic::Application for App {
                 let Some(vault) = self.vault.as_mut() else {
                     return Task::none();
                 };
-                let removed = vault.remove_item(id).map(|i| i.label);
+                // Soft-delete: the trash keeps it recoverable, and the dialog
+                // that got us here already said so.
+                let label = vault.item(id).map(|i| i.label.clone());
+                let trashed = vault.trash_item(id).is_some();
                 let saved = match self.save_vault() {
                     Ok(task) => task,
                     Err(e) => return self.toast(e),
@@ -1634,10 +2338,549 @@ impl cosmic::Application for App {
                     self.selected = None;
                     self.core.window.show_context = false;
                 }
-                if let Some(label) = removed {
-                    return Task::batch([saved, self.toast(fl!("toast-deleted", label = label))]);
+                if let Some(label) = label.filter(|_| trashed) {
+                    return Task::batch([saved, self.toast(fl!("toast-trashed", label = label))]);
                 }
                 return saved;
+            }
+
+            Message::RestoreTrashed(id) => {
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                let label = vault
+                    .data()
+                    .trashed(id)
+                    .map(|t| t.item.label.clone());
+                if vault.restore_item(id).is_none() {
+                    return Task::none();
+                }
+                let saved = match self.save_vault() {
+                    Ok(task) => task,
+                    Err(e) => return self.toast(e),
+                };
+                let label = label.unwrap_or_default();
+                return Task::batch([saved, self.toast(fl!("toast-restored", label = label))]);
+            }
+
+            Message::RetentionSelected(index) => {
+                let Some(&retention) = RETENTION.get(index) else {
+                    return Task::none();
+                };
+                self.reload_if_changed();
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                if vault.data().settings.trash_retention_days == retention {
+                    return Task::none();
+                }
+                vault.data_mut().settings.trash_retention_days = retention;
+                match self.save_vault() {
+                    Ok(task) => return task,
+                    Err(e) => return self.toast(e),
+                }
+            }
+
+            Message::RequestPurge(target) => self.pending_purge = Some(target),
+            Message::CancelPurge => self.pending_purge = None,
+
+            Message::ConfirmPurge => {
+                let Some(target) = self.pending_purge.take() else {
+                    return Task::none();
+                };
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                let notice = match target {
+                    PurgeTarget::One(id) => vault
+                        .purge_item(id)
+                        .map(|item| fl!("toast-purged", label = item.label)),
+                    PurgeTarget::All => {
+                        let count = vault.data().trash.len();
+                        vault.data_mut().trash.clear();
+                        (count > 0).then(|| fl!("toast-trash-emptied", count = count))
+                    }
+                };
+                let saved = match self.save_vault() {
+                    Ok(task) => task,
+                    Err(e) => return self.toast(e),
+                };
+                if let Some(notice) = notice {
+                    return Task::batch([saved, self.toast(notice)]);
+                }
+                return saved;
+            }
+
+            Message::RestoreRevision(index) => {
+                let Some(id) = self.selected else {
+                    return Task::none();
+                };
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                let restored = vault.edit_item(id, |item| {
+                    item.restore_revision(index).map(|()| item.label.clone())
+                });
+                match restored {
+                    Ok(Ok(label)) => {
+                        self.conceal();
+                        let saved = match self.save_vault() {
+                            Ok(task) => task,
+                            Err(e) => return self.toast(e),
+                        };
+                        return Task::batch([
+                            saved,
+                            self.toast(fl!("toast-revision-restored", label = label)),
+                        ]);
+                    }
+                    Ok(Err(e)) | Err(e) => return self.toast(e.to_string()),
+                }
+            }
+
+            Message::RequestForgetHistory => self.pending_forget = self.selected,
+            Message::CancelForgetHistory => self.pending_forget = None,
+
+            Message::ConfirmForgetHistory => {
+                let Some(id) = self.pending_forget.take() else {
+                    return Task::none();
+                };
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                // Not through `edit_item`: recording a revision of the state
+                // whose whole point is to have no revisions would be absurd.
+                let Some(item) = vault.item_mut(id) else {
+                    return Task::none();
+                };
+                let dropped = item.forget_history();
+                let label = item.label.clone();
+                if dropped == 0 {
+                    return Task::none();
+                }
+                let saved = match self.save_vault() {
+                    Ok(task) => task,
+                    Err(e) => return self.toast(e),
+                };
+                return Task::batch([
+                    saved,
+                    self.toast(fl!(
+                        "toast-history-forgotten",
+                        count = dropped,
+                        label = label
+                    )),
+                ]);
+            }
+
+            Message::AttachmentAdd => {
+                if self.selected.is_none() {
+                    return Task::none();
+                }
+                use cosmic::dialog::file_chooser::open::Dialog;
+                return cosmic::task::future(async move {
+                    let chosen = Dialog::new()
+                        .title(fl!("attachment-picker-title"))
+                        .open_file()
+                        .await
+                        .ok()
+                        .and_then(|r| r.url().to_file_path().ok());
+                    let Some(path) = chosen else {
+                        return Message::AttachmentLoaded(None);
+                    };
+                    // Read off the UI thread; an attachment can be megabytes.
+                    let loaded = tokio::fs::read(&path).await.map_err(|e| e.to_string());
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "attachment".to_owned());
+                    Message::AttachmentLoaded(Some(loaded.map(|data| (name, data))))
+                });
+            }
+
+            Message::AttachmentLoaded(outcome) => {
+                let Some(outcome) = outcome else {
+                    return Task::none(); // cancelled
+                };
+                let (name, data) = match outcome {
+                    Ok(pair) => pair,
+                    Err(e) => return self.toast(fl!("toast-attachment-failed", error = e)),
+                };
+                let Some(id) = self.selected else {
+                    return Task::none();
+                };
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                let Some(item) = vault.item_mut(id) else {
+                    return Task::none();
+                };
+                let mime = mime_for(&name);
+                if let Err(e) = item.add_attachment(&name, mime, data) {
+                    return self.toast(fl!("toast-attachment-failed", error = e.to_string()));
+                }
+                let saved = match self.save_vault() {
+                    Ok(task) => task,
+                    Err(e) => return self.toast(e),
+                };
+                return Task::batch([saved, self.toast(fl!("toast-attachment-added", name = name))]);
+            }
+
+            Message::AttachmentSave(attachment_id) => {
+                let Some(item) = self.selected_item() else {
+                    return Task::none();
+                };
+                let Some(attachment) = item.attachment(attachment_id) else {
+                    return Task::none();
+                };
+                let name = attachment.name.clone();
+                use cosmic::dialog::file_chooser::save::Dialog;
+                return cosmic::task::future(async move {
+                    let chosen = Dialog::new()
+                        .title(fl!("attachment-save-title"))
+                        .file_name(name)
+                        .save_file()
+                        .await
+                        .ok()
+                        .and_then(|r| r.url().and_then(|u| u.to_file_path().ok()));
+                    Message::AttachmentWrite(attachment_id, chosen)
+                });
+            }
+
+            Message::AttachmentWrite(attachment_id, path) => {
+                let Some(path) = path else {
+                    return Task::none(); // cancelled
+                };
+                let Some(item) = self.selected_item() else {
+                    return Task::none();
+                };
+                let Some(attachment) = item.attachment(attachment_id) else {
+                    return Task::none();
+                };
+                // Cloned so the write can leave the UI thread; wiped with the
+                // task. The dialog vouched for the destination, so an existing
+                // file there is a choice, not an accident.
+                let data = attachment.data.expose().to_vec();
+                return cosmic::task::future(async move {
+                    let outcome = write_attachment(&path, &data)
+                        .await
+                        .map(|()| path.display().to_string())
+                        .map_err(|e| e.to_string());
+                    Message::AttachmentWritten(outcome)
+                });
+            }
+
+            Message::AttachmentWritten(outcome) => {
+                return match outcome {
+                    Ok(path) => self.toast(fl!("toast-attachment-saved", path = path)),
+                    Err(e) => self.toast(fl!("toast-attachment-failed", error = e)),
+                };
+            }
+
+            Message::AttachmentRemove(attachment_id) => {
+                let Some(id) = self.selected else {
+                    return Task::none();
+                };
+                let Some(vault) = self.vault.as_mut() else {
+                    return Task::none();
+                };
+                let Some(item) = vault.item_mut(id) else {
+                    return Task::none();
+                };
+                let Some(removed) = item.remove_attachment(attachment_id) else {
+                    return Task::none();
+                };
+                let name = removed.name.clone();
+                let saved = match self.save_vault() {
+                    Ok(task) => task,
+                    Err(e) => return self.toast(e),
+                };
+                return Task::batch([
+                    saved,
+                    self.toast(fl!("toast-attachment-removed", name = name)),
+                ]);
+            }
+
+            Message::OpenVaultDialog => {
+                use cosmic::dialog::file_chooser::{FileFilter, open::Dialog};
+                return cosmic::task::future(async {
+                    let chosen = Dialog::new()
+                        .title(fl!("vault-picker-title"))
+                        .filter(FileFilter::new("locket vault").glob("*.vault"))
+                        .open_file()
+                        .await
+                        .ok()
+                        .and_then(|r| r.url().to_file_path().ok());
+                    Message::VaultPicked(chosen)
+                });
+            }
+
+            Message::VaultPicked(path) => {
+                let Some(path) = path else {
+                    return Task::none(); // cancelled
+                };
+                if path == self.vault_path {
+                    return Task::none();
+                }
+                // Switching vaults is a lock plus a different unlock target.
+                // The daemon keeps serving the system vault regardless; the
+                // Settings panel is where that distinction is reported.
+                self.vault = None;
+                self.vault_path = path;
+                self.vault_exists = self.vault_path.is_file();
+                self.screen = Screen::Locked;
+                self.selected = None;
+                self.conceal();
+                self.search.clear();
+                self.core.window.show_context = false;
+                self.passphrase_focused = true;
+                let title = self.update_title();
+                return Task::batch([title, widget::text_input::focus(PASSPHRASE_ID.clone())]);
+            }
+
+            Message::MergeDialog => {
+                use cosmic::dialog::file_chooser::{FileFilter, open::Dialog};
+                return cosmic::task::future(async {
+                    let chosen = Dialog::new()
+                        .title(fl!("merge-picker-title"))
+                        .filter(FileFilter::new("locket vault").glob("*.vault"))
+                        .open_file()
+                        .await
+                        .ok()
+                        .and_then(|r| r.url().to_file_path().ok());
+                    Message::MergePicked(chosen)
+                });
+            }
+
+            Message::MergePicked(path) => {
+                let Some(path) = path else {
+                    return Task::none(); // cancelled
+                };
+                return self.merge_sibling(&path);
+            }
+
+            Message::ExportRequest(format) => {
+                if self.vault.is_none() {
+                    return Task::none();
+                }
+                self.export = ExportFlow {
+                    pending: Some(format),
+                    ..ExportFlow::default()
+                };
+            }
+
+            Message::ExportCancel => self.export = ExportFlow::default(),
+
+            Message::ExportKdbxPassphrase(v) => {
+                self.export.kdbx_passphrase = v;
+                self.export.error = None;
+            }
+            Message::ExportKdbxConfirm(v) => {
+                self.export.kdbx_confirm = v;
+                self.export.error = None;
+            }
+
+            Message::ExportContinue => {
+                let Some(format) = self.export.pending else {
+                    return Task::none();
+                };
+                if format == ExportFormat::Kdbx {
+                    if self.export.kdbx_passphrase.is_empty() {
+                        self.export.error = Some(fl!("error-new-passphrase-empty"));
+                        return Task::none();
+                    }
+                    if self.export.kdbx_passphrase != self.export.kdbx_confirm {
+                        self.export.error = Some(fl!("error-new-passphrases-differ"));
+                        return Task::none();
+                    }
+                }
+                let name = match format {
+                    ExportFormat::Json => "locket-export.json",
+                    ExportFormat::Csv => "locket-export.csv",
+                    ExportFormat::Kdbx => "locket-export.kdbx",
+                };
+                use cosmic::dialog::file_chooser::save::Dialog;
+                return cosmic::task::future(async move {
+                    let chosen = Dialog::new()
+                        .title(fl!("export-save-title"))
+                        .file_name(name.to_owned())
+                        .save_file()
+                        .await
+                        .ok()
+                        .and_then(|r| r.url().and_then(|u| u.to_file_path().ok()));
+                    Message::ExportPicked(format, chosen)
+                });
+            }
+
+            Message::ExportPicked(format, path) => {
+                let Some(path) = path else {
+                    self.export = ExportFlow::default();
+                    return Task::none(); // cancelled at the save dialog
+                };
+                // The save dialog already asked about replacing; the module's
+                // own refuse-to-overwrite would second-guess an answered
+                // question.
+                let _ = std::fs::remove_file(&path);
+
+                match format {
+                    ExportFormat::Json | ExportFormat::Csv => {
+                        self.export = ExportFlow::default();
+                        let Some(vault) = self.vault.as_ref() else {
+                            return Task::none();
+                        };
+                        let outcome = match format {
+                            ExportFormat::Json => {
+                                locket_import::export::to_json(vault, &path).map(|n| (n, 0))
+                            }
+                            ExportFormat::Csv => locket_import::export::to_csv(vault, &path),
+                            ExportFormat::Kdbx => unreachable!("handled below"),
+                        };
+                        return match outcome {
+                            Ok((count, lossy)) => {
+                                let mut tasks = vec![self.toast(fl!(
+                                    "toast-exported",
+                                    count = count,
+                                    path = path.display().to_string()
+                                ))];
+                                if lossy > 0 {
+                                    tasks.push(
+                                        self.toast(fl!("toast-exported-lossy", count = lossy)),
+                                    );
+                                }
+                                Task::batch(tasks)
+                            }
+                            Err(e) => {
+                                self.toast(fl!("toast-export-failed", error = e.to_string()))
+                            }
+                        };
+                    }
+                    ExportFormat::Kdbx => {
+                        // The kdbx KDF is deliberately slow; move the vault
+                        // into a worker so the window keeps painting.
+                        let passphrase = std::mem::take(&mut self.export.kdbx_passphrase);
+                        self.export = ExportFlow::default();
+                        let Some(vault) = self.vault.take() else {
+                            return Task::none();
+                        };
+                        return cosmic::task::future(async move {
+                            let outcome = tokio::task::spawn_blocking(move || {
+                                let result =
+                                    locket_import::export::to_kdbx(&vault, &path, &passphrase)
+                                        .map(|count| (count, path.display().to_string()))
+                                        .map_err(|e| e.to_string());
+                                (vault, result)
+                            })
+                            .await;
+                            match outcome {
+                                Ok((vault, result)) => Message::ExportFinished(
+                                    Arc::new(Mutex::new(Some(vault))),
+                                    result,
+                                ),
+                                Err(e) => Message::ExportFinished(
+                                    Arc::new(Mutex::new(None)),
+                                    Err(e.to_string()),
+                                ),
+                            }
+                        });
+                    }
+                }
+            }
+
+            Message::ExportFinished(slot, outcome) => {
+                self.vault = slot.lock().ok().and_then(|mut g| g.take());
+                if self.vault.is_none() {
+                    self.screen = Screen::Locked;
+                }
+                return match outcome {
+                    Ok((count, path)) => {
+                        self.toast(fl!("toast-exported", count = count, path = path))
+                    }
+                    Err(e) => self.toast(fl!("toast-export-failed", error = e)),
+                };
+            }
+
+            Message::AutoType => {
+                let Some(item) = self.selected_item() else {
+                    return Task::none();
+                };
+                let label = item.label.clone();
+                let username = item
+                    .field_value(locket_core::model::field_names::USERNAME)
+                    .map(str::to_owned);
+                let secret = item.secret.clone();
+                let armed = self.toast(fl!(
+                    "toast-autotype-armed",
+                    seconds = crate::autotype::COUNTDOWN_SECS
+                ));
+                let typing = cosmic::task::future(async move {
+                    Message::AutoTyped(
+                        crate::autotype::type_credentials(username, secret)
+                            .await
+                            .map(|()| label),
+                    )
+                });
+                return Task::batch([armed, typing]);
+            }
+
+            Message::AutoTyped(outcome) => {
+                return match outcome {
+                    Ok(label) => self.toast(fl!("toast-autotype-done", label = label)),
+                    Err(e) => self.toast(fl!("toast-autotype-failed", error = e)),
+                };
+            }
+
+            Message::HealthReady(report) => self.health = Some(*report),
+
+            Message::CheckBreaches => {
+                if self.checking_breaches {
+                    return Task::none();
+                }
+                let Some(vault) = self.vault.as_ref() else {
+                    return Task::none();
+                };
+                // Clone what the check needs; the request loop must not hold
+                // the vault, and the copies are wiped with the task.
+                let secrets: Vec<(Uuid, String)> = vault
+                    .data()
+                    .all_items()
+                    .filter(|(_, i)| !i.secret.is_empty() && !i.secret_is_binary())
+                    .map(|(_, i)| (i.id, i.secret.expose().to_owned()))
+                    .collect();
+                self.checking_breaches = true;
+                self.breaches = None;
+                return cosmic::task::future(async move {
+                    let outcome = async {
+                        let client = locket_hibp::client().map_err(|e| e.to_string())?;
+                        let mut found = Vec::new();
+                        for (id, secret) in &secrets {
+                            match locket_hibp::pwned_count(&client, secret).await {
+                                Ok(0) => {}
+                                Ok(count) => found.push((*id, count)),
+                                Err(e) => return Err(e.to_string()),
+                            }
+                        }
+                        Ok(found)
+                    }
+                    .await;
+                    Message::BreachesChecked(outcome)
+                });
+            }
+
+            Message::BreachesChecked(outcome) => {
+                self.checking_breaches = false;
+                self.breaches = Some(outcome);
+            }
+
+            Message::DismissConflict => {
+                if let Some(path) = self.sync_conflict.take() {
+                    self.conflict_dismissed.insert(path);
+                }
+            }
+
+            Message::MergeConflict => {
+                let Some(path) = self.sync_conflict.take() else {
+                    return Task::none();
+                };
+                self.conflict_dismissed.insert(path.clone());
+                return self.merge_sibling(&path);
             }
         }
 
@@ -1663,6 +2906,8 @@ impl cosmic::Application for App {
                     preferences::view(&self.settings, self.status.as_ref(), &self.about)
                         .map(Message::Preferences)
                 }
+                None if self.category() == Category::Trash => self.trash_view(),
+                None if self.category() == Category::Health => self.health_view(),
                 None => self.browse_view(),
             },
         };
@@ -1694,6 +2939,25 @@ impl cosmic::Application for App {
                 vec![
                     menu::Item::Button(fl!("new-item"), None, MenuAction::NewItem),
                     menu::Item::Button(fl!("import"), None, MenuAction::Import),
+                    menu::Item::Folder(
+                        fl!("menu-export"),
+                        vec![
+                            menu::Item::Button(
+                                fl!("menu-export-kdbx"),
+                                None,
+                                MenuAction::ExportKdbx,
+                            ),
+                            menu::Item::Button(
+                                fl!("menu-export-json"),
+                                None,
+                                MenuAction::ExportJson,
+                            ),
+                            menu::Item::Button(fl!("menu-export-csv"), None, MenuAction::ExportCsv),
+                        ],
+                    ),
+                    menu::Item::Divider,
+                    menu::Item::Button(fl!("menu-open-vault"), None, MenuAction::OpenVault),
+                    menu::Item::Button(fl!("menu-merge-copy"), None, MenuAction::MergeCopy),
                     menu::Item::Divider,
                     menu::Item::Button(fl!("lock"), None, MenuAction::Lock),
                 ],
@@ -1721,7 +2985,10 @@ impl cosmic::Application for App {
         // Security manages unlock factors, not items — offering "New item"
         // there would be a button that lands you somewhere unrelated.
         if self.editor.is_none() && self.import.is_none() {
-            if !matches!(self.category(), Category::Security | Category::Settings) {
+            if !matches!(
+                self.category(),
+                Category::Trash | Category::Health | Category::Security | Category::Settings
+            ) {
                 actions.push(
                     widget::button::suggested(fl!("new-item"))
                         .on_press(Message::NewItem)
@@ -1762,25 +3029,172 @@ impl cosmic::Application for App {
             );
         }
 
-        let id = self.pending_delete?;
-        let label = self
-            .vault
-            .as_ref()
-            .and_then(|v| v.item(id))
-            .map(|i| i.label.clone())
-            .unwrap_or_else(|| fl!("dialog-delete-fallback-label"));
+        if let Some(format) = self.export.pending {
+            // The plaintext warning, or the kdbx passphrase form.
+            let dialog = if format == ExportFormat::Kdbx {
+                let spacing = cosmic::theme::spacing();
+                let mut form = widget::column::with_capacity(4)
+                    .spacing(spacing.space_s)
+                    .push(
+                        widget::text_input::secure_input(
+                            fl!("dialog-kdbx-passphrase"),
+                            &self.export.kdbx_passphrase,
+                            None,
+                            true,
+                        )
+                        .on_input(Message::ExportKdbxPassphrase),
+                    )
+                    .push(
+                        widget::text_input::secure_input(
+                            fl!("dialog-kdbx-confirm"),
+                            &self.export.kdbx_confirm,
+                            None,
+                            true,
+                        )
+                        .on_input(Message::ExportKdbxConfirm)
+                        .on_submit(|_| Message::ExportContinue),
+                    );
+                if let Some(error) = &self.export.error {
+                    form = form.push(widget::text::body(error.clone()).class(
+                        cosmic::theme::Text::Color(
+                            cosmic::theme::active().cosmic().destructive_color().into(),
+                        ),
+                    ));
+                }
+                widget::dialog()
+                    .title(fl!("dialog-kdbx-title"))
+                    .body(fl!("dialog-kdbx-body"))
+                    .control(form)
+                    .primary_action(
+                        widget::button::suggested(fl!("dialog-kdbx-continue"))
+                            .on_press(Message::ExportContinue),
+                    )
+            } else {
+                widget::dialog()
+                    .title(fl!("dialog-export-title"))
+                    .body(fl!("dialog-export-body"))
+                    .primary_action(
+                        widget::button::destructive(fl!("dialog-export-continue"))
+                            .on_press(Message::ExportContinue),
+                    )
+            };
+            return Some(
+                dialog
+                    .secondary_action(
+                        widget::button::standard(fl!("dialog-cancel"))
+                            .on_press(Message::ExportCancel),
+                    )
+                    .into(),
+            );
+        }
 
+        if let Some(target) = self.pending_purge {
+            let (title, body) = match target {
+                PurgeTarget::One(id) => {
+                    let label = self
+                        .vault
+                        .as_ref()
+                        .and_then(|v| v.data().trashed(id))
+                        .map(|t| t.item.label.clone())
+                        .unwrap_or_else(|| fl!("dialog-delete-fallback-label"));
+                    (fl!("dialog-purge-title"), fl!("dialog-purge-body", label = label))
+                }
+                PurgeTarget::All => {
+                    let count = self
+                        .vault
+                        .as_ref()
+                        .map(|v| v.data().trash.len())
+                        .unwrap_or(0);
+                    (
+                        fl!("dialog-empty-trash-title"),
+                        fl!("dialog-empty-trash-body", count = count),
+                    )
+                }
+            };
+            return Some(
+                widget::dialog()
+                    .title(title)
+                    .body(body)
+                    .primary_action(
+                        widget::button::destructive(fl!("dialog-purge"))
+                            .on_press(Message::ConfirmPurge),
+                    )
+                    .secondary_action(
+                        widget::button::standard(fl!("dialog-cancel"))
+                            .on_press(Message::CancelPurge),
+                    )
+                    .into(),
+            );
+        }
+
+        if let Some(id) = self.pending_forget {
+            let label = self
+                .vault
+                .as_ref()
+                .and_then(|v| v.item(id))
+                .map(|i| i.label.clone())
+                .unwrap_or_else(|| fl!("dialog-delete-fallback-label"));
+            return Some(
+                widget::dialog()
+                    .title(fl!("dialog-forget-history-title"))
+                    .body(fl!("dialog-forget-history-body", label = label))
+                    .primary_action(
+                        widget::button::destructive(fl!("dialog-forget"))
+                            .on_press(Message::ConfirmForgetHistory),
+                    )
+                    .secondary_action(
+                        widget::button::standard(fl!("dialog-cancel"))
+                            .on_press(Message::CancelForgetHistory),
+                    )
+                    .into(),
+            );
+        }
+
+        if let Some(id) = self.pending_delete {
+            let label = self
+                .vault
+                .as_ref()
+                .and_then(|v| v.item(id))
+                .map(|i| i.label.clone())
+                .unwrap_or_else(|| fl!("dialog-delete-fallback-label"));
+
+            return Some(
+                widget::dialog()
+                    .title(fl!("dialog-delete-title"))
+                    .body(fl!("dialog-delete-body", label = label))
+                    .primary_action(
+                        widget::button::destructive(fl!("dialog-delete"))
+                            .on_press(Message::ConfirmDelete),
+                    )
+                    .secondary_action(
+                        widget::button::standard(fl!("dialog-cancel"))
+                            .on_press(Message::CancelDelete),
+                    )
+                    .into(),
+            );
+        }
+
+        // Last, because it is the least urgent: a sync conflict waited on
+        // disk already and can wait through a delete dialog too.
+        let conflict = self.sync_conflict.as_ref()?;
+        if self.screen != Screen::Browsing {
+            return None;
+        }
+        let name = conflict
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         Some(
             widget::dialog()
-                .title(fl!("dialog-delete-title"))
-                .body(fl!("dialog-delete-body", label = label))
+                .title(fl!("dialog-conflict-title"))
+                .body(fl!("dialog-conflict-body", name = name))
                 .primary_action(
-                    widget::button::destructive(fl!("dialog-delete"))
-                        .on_press(Message::ConfirmDelete),
+                    widget::button::suggested(fl!("dialog-merge"))
+                        .on_press(Message::MergeConflict),
                 )
                 .secondary_action(
-                    widget::button::standard(fl!("dialog-cancel"))
-                        .on_press(Message::CancelDelete),
+                    widget::button::standard(fl!("dialog-later"))
+                        .on_press(Message::DismissConflict),
                 )
                 .into(),
         )
@@ -1815,8 +3229,17 @@ impl cosmic::Application for App {
 
     /// Escape backs out of the innermost thing, in the order they stack.
     fn on_escape(&mut self) -> Task<Self::Message> {
-        if self.pending_delete.is_some() {
+        if self.export.pending.is_some() {
+            self.export = ExportFlow::default();
+        } else if self.pending_forget.is_some() {
+            self.pending_forget = None;
+        } else if self.pending_purge.is_some() {
+            self.pending_purge = None;
+        } else if self.pending_delete.is_some() {
             self.pending_delete = None;
+        } else if self.sync_conflict.is_some() {
+            // Escape means "not now", and "not now" is remembered.
+            return self.update(Message::DismissConflict);
         } else if self.import.as_ref().is_some_and(|i| !i.busy) {
             // Not while it is running: the vault is out of the app's hands
             // until the task returns it, and there would be nothing to go
@@ -1926,6 +3349,44 @@ impl cosmic::Application for App {
 
 fn has_totp(item: &Item) -> bool {
     item.fields.iter().any(|f| f.kind == FieldKind::Totp)
+}
+
+/// Human-readable size, the way a file manager prints it.
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// A best-effort MIME type from the file extension; the fallback is honest.
+fn mime_for(name: &str) -> &'static str {
+    match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Write attachment bytes where the save dialog pointed, 0600 first.
+///
+/// The mode is set at open rather than after the write, so the plaintext is
+/// never sitting there world-readable even for a moment.
+async fn write_attachment(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
+    let mut file = opts.open(path).await?;
+    use tokio::io::AsyncWriteExt as _;
+    file.write_all(data).await?;
+    file.sync_all().await
 }
 
 /// What the About section says. Everything here comes from the manifest, so a

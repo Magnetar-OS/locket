@@ -31,6 +31,7 @@ pub enum EditorMessage {
     ToggleFieldReveal(usize),
     AddField,
     RemoveField(usize),
+    Expires(String),
     Save,
     Cancel,
 }
@@ -66,6 +67,8 @@ pub struct Editor {
     /// so the editor must not drop what it does not display.
     pub attributes: std::collections::BTreeMap<String, String>,
     pub favorite: bool,
+    /// `YYYY-MM-DD` when the item expires; empty means never.
+    pub expires: String,
     pub error: Option<String>,
     /// The item's secret is binary, edited here through its Base64 form.
     ///
@@ -115,6 +118,7 @@ impl Editor {
             generator_symbols: true,
             attributes: Default::default(),
             favorite: false,
+            expires: String::new(),
             error: None,
             secret_is_binary: false,
             original_secret: String::new(),
@@ -147,6 +151,10 @@ impl Editor {
             generator_symbols: true,
             attributes: item.attributes.clone(),
             favorite: item.favorite,
+            expires: item
+                .expires
+                .map(locket_core::model::format_date)
+                .unwrap_or_default(),
             error: None,
             secret_is_binary: item.secret_is_binary(),
             original_secret: item.secret.expose().to_owned(),
@@ -186,7 +194,15 @@ impl Editor {
             return Err(fl!("editor-field-needs-name"));
         }
 
+        let expires = match self.expires.trim() {
+            "" => None,
+            date => Some(
+                locket_core::model::parse_date(date).ok_or_else(|| fl!("editor-bad-expiry"))?,
+            ),
+        };
+
         let mut item = Item::new(self.kind(), self.label.trim());
+        item.expires = expires;
         // Preserve identity so an edit updates rather than replaces; other
         // applications may hold this item's D-Bus path.
         if let Some(id) = self.id {
@@ -267,6 +283,10 @@ impl Editor {
                     self.fields.remove(i);
                 }
             }
+            EditorMessage::Expires(v) => {
+                self.expires = v;
+                self.error = None;
+            }
 
             EditorMessage::Save => match self.to_item() {
                 Ok(item) => {
@@ -308,7 +328,12 @@ impl Editor {
                 labels::ITEM_KINDS.as_slice(),
                 Some(self.kind_index),
                 EditorMessage::Kind,
-            ));
+            ))
+            .push(widget::text::caption_heading(fl!("editor-expires")))
+            .push(
+                widget::text_input(fl!("editor-expires-placeholder"), &self.expires)
+                    .on_input(EditorMessage::Expires),
+            );
 
         // -- primary secret + generator ------------------------------------
         form = form.push(widget::text::caption_heading(fl!("editor-secret"))).push(
@@ -604,6 +629,25 @@ mod tests {
         let item = saved(&mut e).unwrap();
         assert!(!item.secret_is_binary());
         assert_eq!(item.secret_bytes().as_slice(), item.secret.expose().as_bytes());
+    }
+
+    #[test]
+    fn expiry_round_trips_and_nonsense_is_refused() {
+        let mut original = Item::new(ItemKind::Certificate, "TLS cert");
+        original.expires = locket_core::model::parse_date("2027-03-01");
+
+        let mut e = Editor::from_item(&original);
+        assert_eq!(e.expires, "2027-03-01");
+        let item = saved(&mut e).expect("an unchanged expiry should save");
+        assert_eq!(item.expires, original.expires);
+
+        e.update(EditorMessage::Expires("soonish".into()));
+        assert!(saved(&mut e).is_none(), "a nonsense date saved");
+        assert!(e.error.is_some());
+
+        e.update(EditorMessage::Expires(String::new()));
+        let item = saved(&mut e).expect("clearing the field should save");
+        assert_eq!(item.expires, None, "an emptied expiry survived");
     }
 
     #[test]

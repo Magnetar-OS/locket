@@ -137,7 +137,36 @@ pub enum Message {
     Enroll(Factor),
     Remove(Uuid),
     Dismiss,
+    CurrentPassphrase(String),
+    NewPassphrase(String),
+    ConfirmPassphrase(String),
+    KdfSelected(usize),
+    ChangePassphrase,
 }
+
+/// The unlock-cost presets the passphrase form offers. Argon2id throughout;
+/// the labels in the dropdown say what each costs.
+pub const KDF_PRESETS: &[fn() -> locket_core::crypto::KdfParams] = &[
+    // Balanced: the crate default (OWASP baseline).
+    locket_core::crypto::KdfParams::default,
+    // Stronger: 256 MiB, 4 passes.
+    || locket_core::crypto::KdfParams {
+        m_cost: 256 * 1024,
+        t_cost: 4,
+        p_cost: 4,
+    },
+    // Lighter: OWASP's low-memory profile, 19 MiB, 2 passes.
+    || locket_core::crypto::KdfParams {
+        m_cost: 19 * 1024,
+        t_cost: 2,
+        p_cost: 1,
+    },
+];
+
+/// Dropdown labels, cached because the widget borrows them per frame.
+pub static KDF_LABELS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    vec![fl!("kdf-balanced"), fl!("kdf-stronger"), fl!("kdf-lighter")]
+});
 
 /// State for the security screen.
 #[derive(Default)]
@@ -146,6 +175,21 @@ pub struct Security {
     pub busy: Option<Factor>,
     pub error: Option<String>,
     pub notice: Option<String>,
+    // -- the passphrase form --
+    pub current: String,
+    pub new1: String,
+    pub new2: String,
+    pub kdf_index: usize,
+    pub changing: bool,
+}
+
+impl Security {
+    /// Wipe the passphrase form, keeping the rest of the screen's state.
+    pub fn clear_passphrase_form(&mut self) {
+        self.current.clear();
+        self.new1.clear();
+        self.new2.clear();
+    }
 }
 
 impl Security {
@@ -255,6 +299,59 @@ impl Security {
 
         // The honest caveat, where someone choosing a PIN will read it.
         column = column.push(widget::text::caption(fl!("security-tpm-caveat")));
+
+        // -- change the passphrase -------------------------------------------
+        column = column
+            .push(widget::divider::horizontal::default())
+            .push(widget::text::caption_heading(fl!("security-passphrase-heading")))
+            .push(widget::text::caption(fl!("security-passphrase-blurb")))
+            .push(
+                // The current passphrase is required even though the vault is
+                // open: an unlocked window must not be enough to lock its
+                // owner out by rotating the passphrase under them.
+                widget::text_input::secure_input(
+                    fl!("security-current-passphrase"),
+                    &self.current,
+                    None,
+                    true,
+                )
+                .on_input(Message::CurrentPassphrase),
+            )
+            .push(
+                widget::text_input::secure_input(
+                    fl!("security-new-passphrase"),
+                    &self.new1,
+                    None,
+                    true,
+                )
+                .on_input(Message::NewPassphrase),
+            )
+            .push(
+                widget::text_input::secure_input(
+                    fl!("security-confirm-passphrase"),
+                    &self.new2,
+                    None,
+                    true,
+                )
+                .on_input(Message::ConfirmPassphrase),
+            )
+            .push(widget::text::caption_heading(fl!("security-kdf-cost")))
+            .push(widget::dropdown(
+                KDF_LABELS.as_slice(),
+                Some(self.kdf_index),
+                Message::KdfSelected,
+            ));
+
+        let change = widget::button::suggested(if self.changing {
+            fl!("security-changing-passphrase")
+        } else {
+            fl!("security-change-passphrase")
+        });
+        column = column.push(if self.changing {
+            Element::from(change)
+        } else {
+            Element::from(change.on_press(Message::ChangePassphrase))
+        });
 
         widget::scrollable(widget::container(column).padding(spacing.space_s))
             .height(Length::Fill)

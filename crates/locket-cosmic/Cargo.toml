@@ -21,6 +21,10 @@ fido = ["dep:locket-fido"]
 
 [dependencies]
 locket-core.workspace = true
+locket-hibp.workspace = true
+# Auto-type goes through the RemoteDesktop portal; same ashpd generation
+# libcosmic already carries, so this adds no second copy.
+ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
 locket-tpm = { path = "../locket-tpm", optional = true }
 locket-fido = { path = "../locket-fido", optional = true }
 locket-secret.workspace = true

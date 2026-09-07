@@ -25,6 +25,9 @@ use crate::fl;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     BrowserCsv,
+    Bitwarden,
+    OnePassword,
+    ProtonPass,
     DotEnv,
     SshKeys,
     CloudClis,
@@ -37,6 +40,9 @@ pub enum Source {
 impl Source {
     pub const ALL: &'static [Source] = &[
         Source::BrowserCsv,
+        Source::Bitwarden,
+        Source::OnePassword,
+        Source::ProtonPass,
         Source::DotEnv,
         Source::SshKeys,
         Source::CloudClis,
@@ -49,6 +55,9 @@ impl Source {
     fn blurb(self) -> String {
         match self {
             Source::BrowserCsv => fl!("source-browser-csv-blurb"),
+            Source::Bitwarden => fl!("source-bitwarden-blurb"),
+            Source::OnePassword => fl!("source-onepassword-blurb"),
+            Source::ProtonPass => fl!("source-protonpass-blurb"),
             Source::DotEnv => fl!("source-dotenv-blurb"),
             Source::PasswordStore => fl!("source-pass-blurb"),
             Source::KeePass => fl!("source-keepass-blurb"),
@@ -84,6 +93,9 @@ impl Source {
             Source::Totp => "2FA",
             Source::PasswordStore => "pass",
             Source::KeePass => "KeePass",
+            Source::Bitwarden => "Bitwarden",
+            Source::OnePassword => "1Password",
+            Source::ProtonPass => "Proton Pass",
             _ => "Login",
         }
     }
@@ -147,6 +159,9 @@ impl Default for Import {
 static SOURCE_LABELS: LazyLock<Vec<String>> = LazyLock::new(|| {
     vec![
         fl!("source-browser-csv"),
+        fl!("source-bitwarden"),
+        fl!("source-onepassword"),
+        fl!("source-protonpass"),
         fl!("source-dotenv"),
         fl!("source-ssh"),
         fl!("source-cloud"),
@@ -208,6 +223,18 @@ impl Import {
             Source::KeePass => Picker::File {
                 title: fl!("picker-kdbx"),
                 filter: Some((fl!("picker-kdbx-filter"), "kdbx")),
+            },
+            Source::Bitwarden => Picker::File {
+                title: fl!("picker-bitwarden"),
+                filter: Some((fl!("picker-bitwarden-filter"), "json")),
+            },
+            Source::OnePassword => Picker::File {
+                title: fl!("picker-onepassword"),
+                filter: Some((fl!("picker-onepassword-filter"), "1pux")),
+            },
+            Source::ProtonPass => Picker::File {
+                title: fl!("picker-protonpass"),
+                filter: Some((fl!("picker-protonpass-filter"), "zip")),
             },
             Source::SshKeys => Picker::Folder {
                 title: fl!("picker-ssh"),
@@ -406,6 +433,18 @@ pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
         Source::Totp => {
             let path = path.ok_or_else(|| fl!("import-error-no-file"))?;
             locket_import::totp::import_file(vault, path, into)
+        }
+        Source::Bitwarden => {
+            let path = path.ok_or_else(|| fl!("import-error-no-file"))?;
+            locket_import::bitwarden::import_file(vault, path, into)
+        }
+        Source::OnePassword => {
+            let path = path.ok_or_else(|| fl!("import-error-no-file"))?;
+            locket_import::onepassword::import_file(vault, path, into)
+        }
+        Source::ProtonPass => {
+            let path = path.ok_or_else(|| fl!("import-error-no-file"))?;
+            locket_import::protonpass::import_file(vault, path, into)
         }
         Source::Keyring => {
             return Err(fl!("import-error-keyring-elsewhere"));
