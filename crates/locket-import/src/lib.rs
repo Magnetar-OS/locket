@@ -20,11 +20,15 @@ use std::path::PathBuf;
 use locket_core::{Vault, model::Collection};
 use uuid::Uuid;
 
+pub mod bitwarden;
 pub mod cloud;
 pub mod csv;
 pub mod dotenv;
+pub mod export;
 pub mod keepass;
+pub mod onepassword;
 pub mod pass;
+pub mod protonpass;
 pub mod ssh;
 pub mod totp;
 

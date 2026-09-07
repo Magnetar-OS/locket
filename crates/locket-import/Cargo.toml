@@ -12,8 +12,16 @@ locket-core.workspace = true
 uuid.workspace = true
 dirs.workspace = true
 base64ct.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-keepass = "0.13"
+# Held at `=`: 0.13.25 declares an aes range wide enough to unify with the
+# workspace's pinned aes 0.8 while its own cbc/cipher sit on the 0.5
+# generation, and the mix does not compile. 0.13.22 resolves cleanly.
+# Revisit together with the crypto block in the workspace Cargo.toml.
+keepass = { version = "=0.13.22", features = ["save_kdbx4"] }
+# 1Password's .1pux and Proton Pass's export are both zip envelopes around
+# JSON. Deflate only — that is what both exporters write.
+zip = { version = "8", default-features = false, features = ["deflate"] }
 csv = "1"
 thiserror.workspace = true
 tracing.workspace = true
