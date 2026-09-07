@@ -39,3 +39,12 @@ the `manifest.json`. Firefox matches on the id baked into
 The popup lists credentials matching the current page and fills on click. It
 never fills automatically, never asks for your passphrase, and shows nothing
 while the vault is locked — unlock in locket itself.
+
+**Saving** is offer-only. A content script notices a login form being
+submitted; if the vault does not already hold that exact value for that
+site, the toolbar icon gains a badge and the popup's next opening asks
+"Save login for this site?" — nothing is written until you say so, and
+"Not now" forgets it. The pending credential waits in the browser's
+session storage, which is memory-backed and gone when the browser closes.
+An update to an existing entry files the old password into the item's
+history in locket, so even a mistaken save is undoable there.

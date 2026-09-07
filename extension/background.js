@@ -19,11 +19,83 @@ const origin = (u) => {
   }
 };
 
+// A submitted login waiting for the user's decision, keyed so the popup can
+// show it for the right site. Session storage only: memory-backed, cleared
+// when the browser closes, never written to disk.
+const PENDING_KEY = "pending-save";
+
+async function setPending(pending) {
+  if (pending) {
+    await chrome.storage.session.set({ [PENDING_KEY]: pending });
+    chrome.action.setBadgeText({ text: "1" });
+    chrome.action.setTitle({ title: "locket — save this login?" });
+  } else {
+    await chrome.storage.session.remove(PENDING_KEY);
+    chrome.action.setBadgeText({ text: "" });
+    chrome.action.setTitle({ title: "locket" });
+  }
+}
+
+// A form was submitted with a password in it. Decide whether it is worth
+// offering: a value identical to what the vault already holds is not.
+async function submitted(msg) {
+  const status = await ask({ type: "status" });
+  if (status.type !== "status" || !status.unlocked) return;
+
+  const matches = await ask({ type: "search", url: msg.url });
+  if (matches.type === "matches") {
+    const existing = matches.items.find((i) => i.username === msg.username);
+    if (existing) {
+      // Same username: only offer if the password actually changed.
+      const current = await ask({ type: "get", id: existing.id, url: msg.url });
+      if (current.type === "secret" && current.password === msg.password) return;
+    }
+  }
+
+  await setPending({
+    url: msg.url,
+    origin: origin(msg.url),
+    username: msg.username,
+    password: msg.password,
+    at: Date.now(),
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   (async () => {
     switch (msg.type) {
       case "status":
         reply(await ask({ type: "status" }));
+        break;
+      case "submitted":
+        await submitted(msg);
+        reply({ type: "ok" });
+        break;
+      case "pending": {
+        const stored = await chrome.storage.session.get(PENDING_KEY);
+        reply({ type: "pending", pending: stored[PENDING_KEY] || null });
+        break;
+      }
+      case "save-pending": {
+        const stored = await chrome.storage.session.get(PENDING_KEY);
+        const pending = stored[PENDING_KEY];
+        if (!pending) {
+          reply({ type: "error", message: "Nothing waiting to be saved." });
+          break;
+        }
+        const saved = await ask({
+          type: "save",
+          url: pending.url,
+          username: pending.username,
+          password: pending.password,
+        });
+        if (saved.type === "saved") await setPending(null);
+        reply(saved);
+        break;
+      }
+      case "dismiss-pending":
+        await setPending(null);
+        reply({ type: "ok" });
         break;
       case "search":
         reply(await ask({ type: "search", url: msg.url }));

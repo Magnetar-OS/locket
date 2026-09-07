@@ -35,11 +35,27 @@ trait SecretService {
 trait SecretItem {
     fn get_secret(&self, session: &OwnedObjectPath) -> zbus::Result<(SecretStruct,)>;
 
+    fn set_secret(&self, secret: &SecretStruct) -> zbus::Result<()>;
+
     #[zbus(property)]
     fn attributes(&self) -> zbus::Result<std::collections::HashMap<String, String>>;
 
     #[zbus(property)]
     fn label(&self) -> zbus::Result<String>;
+}
+
+#[zbus::proxy(
+    interface = "org.freedesktop.Secret.Collection",
+    default_service = "org.freedesktop.secrets",
+    assume_defaults = false
+)]
+trait SecretCollection {
+    fn create_item(
+        &self,
+        properties: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+        secret: &SecretStruct,
+        replace: bool,
+    ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, zbus::zvariant::Type)]
@@ -195,6 +211,108 @@ impl Host {
     }
 }
 
+impl Host {
+    /// Store a submitted credential: update the entry already saved for this
+    /// origin and username, or create a new one in the default collection.
+    async fn save(&self, url: &str, username: &str, password: &str) -> Response {
+        let origin = protocol::origin_of(url);
+        if origin.is_empty() {
+            return Response::Error {
+                message: "the page has no usable origin".into(),
+            };
+        }
+
+        let secret = SecretStruct {
+            session: self.session.clone(),
+            parameters: Vec::new(),
+            value: password.as_bytes().to_vec(),
+            content_type: "text/plain".into(),
+        };
+
+        // An existing entry for the same origin *and* username is updated in
+        // place — SetSecret files the old value into the item's history on
+        // the service side, so a bad save is undoable from locket.
+        for (path, attributes, label) in self.all_items().await {
+            let stored_user = attributes
+                .get("username")
+                .or_else(|| attributes.get("user"))
+                .map(String::as_str)
+                .unwrap_or_default();
+            if stored_user != username {
+                continue;
+            }
+            let matches_origin = [
+                attributes.get("url").map(String::as_str),
+                attributes.get("uri").map(String::as_str),
+                attributes.get("service").map(String::as_str),
+                attributes.get("host").map(String::as_str),
+                Some(label.as_str()),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|stored| protocol::origin_matches(stored, url));
+            if !matches_origin {
+                continue;
+            }
+
+            let Some(item) = self.item(&path).await else {
+                continue;
+            };
+            return match item.set_secret(&secret).await {
+                Ok(()) => Response::Saved { updated: true },
+                Err(e) => Response::Error {
+                    message: format!("could not update the entry: {e}"),
+                },
+            };
+        }
+
+        // No match: a new login in the default collection, attributed the
+        // way locket's own importers attribute — so the next Search finds it.
+        let collection = match SecretCollectionProxy::builder(&self.connection)
+            .path("/org/freedesktop/secrets/aliases/default")
+        {
+            Ok(builder) => match builder.build().await {
+                Ok(collection) => collection,
+                Err(e) => {
+                    return Response::Error {
+                        message: format!("no default collection: {e}"),
+                    };
+                }
+            },
+            Err(e) => {
+                return Response::Error {
+                    message: format!("no default collection: {e}"),
+                };
+            }
+        };
+
+        let label = origin.clone();
+        let mut attributes = std::collections::HashMap::new();
+        attributes.insert("url", origin.as_str());
+        if !username.is_empty() {
+            attributes.insert("username", username);
+        }
+        attributes.insert("xdg:schema", "org.freedesktop.Secret.Generic");
+        let mut properties: std::collections::HashMap<&str, zbus::zvariant::Value<'_>> =
+            std::collections::HashMap::new();
+        properties.insert(
+            "org.freedesktop.Secret.Item.Label",
+            zbus::zvariant::Value::from(label.as_str()),
+        );
+        properties.insert(
+            "org.freedesktop.Secret.Item.Attributes",
+            zbus::zvariant::Value::from(attributes),
+        );
+
+        match collection.create_item(properties, &secret, false).await {
+            Ok(_) => Response::Saved { updated: false },
+            Err(e) => Response::Error {
+                message: format!("could not save the entry: {e}"),
+            },
+        }
+    }
+}
+
 /// Is a daemon there, and is it unlocked?
 async fn status() -> Response {
     match locket_secret::client::status().await {
@@ -260,6 +378,11 @@ async fn main() {
                         match other {
                             Request::Search { url } => host.search(&url).await,
                             Request::Get { id, url } => host.get(&id, &url).await,
+                            Request::Save {
+                                url,
+                                username,
+                                password,
+                            } => host.save(&url, &username, &password).await,
                             Request::Status => unreachable!("handled above"),
                         }
                     }

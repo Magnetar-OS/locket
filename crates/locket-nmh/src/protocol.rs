@@ -51,6 +51,20 @@ pub enum Request {
     /// the search and the click would be filled with another site's password,
     /// which is the exact failure autofill is supposed to prevent.
     Get { id: String, url: String },
+    /// Store a credential the user just submitted, after they confirmed the
+    /// save in the popup.
+    ///
+    /// Writing is deliberately less guarded than reading — a hostile
+    /// extension gains nothing by *adding* secrets, and an update files the
+    /// value it replaces into the item's history, so even a poisoned write
+    /// is recoverable. The one rule enforced here: an update only lands on
+    /// an item already saved for this origin and username, so a write can
+    /// never silently retarget some other site's credential.
+    Save {
+        url: String,
+        username: String,
+        password: String,
+    },
 }
 
 /// What the host answers.
@@ -61,6 +75,9 @@ pub enum Response {
     /// Deliberately carries no passwords.
     Matches { items: Vec<Match> },
     Secret { id: String, password: String },
+    /// The save landed; `updated` says whether an existing entry was
+    /// changed (its old value now in history) rather than a new one made.
+    Saved { updated: bool },
     /// The vault is locked; the user must unlock in locket itself.
     Locked,
     Error { message: String },
@@ -248,6 +265,22 @@ mod tests {
         // served a secret with no origin check at all.
         let json = r#"{"type":"get","id":"/org/freedesktop/secrets/collection/c1/i2"}"#;
         assert!(serde_json::from_str::<Request>(json).is_err());
+    }
+
+    #[test]
+    fn a_save_request_parses_from_the_wire_shape_the_extension_sends() {
+        let json = r#"{"type":"save","url":"https://example.com/login","username":"ada","password":"hunter2"}"#;
+        assert_eq!(
+            serde_json::from_str::<Request>(json).unwrap(),
+            Request::Save {
+                url: "https://example.com/login".into(),
+                username: "ada".into(),
+                password: "hunter2".into(),
+            }
+        );
+        // A save without a password is not a save.
+        let missing = r#"{"type":"save","url":"https://example.com","username":"ada"}"#;
+        assert!(serde_json::from_str::<Request>(missing).is_err());
     }
 
     #[test]
