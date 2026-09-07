@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 locket-core.workspace = true
+locket-hibp.workspace = true
 locket-secret.workspace = true
 locket-import = { path = "../locket-import" }
 tokio.workspace = true

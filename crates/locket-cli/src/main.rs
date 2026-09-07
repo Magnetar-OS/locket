@@ -89,15 +89,71 @@ enum Command {
         /// Mark or unmark as a favourite.
         #[arg(long)]
         favorite: Option<bool>,
+        /// Set when the item expires: `YYYY-MM-DD`, or `never` to clear.
+        #[arg(long, value_name = "DATE")]
+        expires: Option<String>,
     },
 
-    /// Delete an item.
+    /// Move an item to the trash.
+    ///
+    /// The item disappears from every application reading it over the Secret
+    /// Service, but stays recoverable with `trash restore` until the vault's
+    /// retention window purges it.
     Rm {
         /// Label or id, matched case-insensitively.
         query: String,
         /// Do not ask for confirmation.
         #[arg(long, short)]
         yes: bool,
+        /// Delete immediately and permanently, skipping the trash.
+        #[arg(long)]
+        permanent: bool,
+    },
+
+    /// List, restore or empty the trash.
+    #[command(subcommand)]
+    Trash(TrashCommand),
+
+    /// Show an item's edit history, or restore a revision.
+    ///
+    /// Every edit files the state it replaced, up to a bounded number of
+    /// revisions. Restoring is itself an edit, so it can be undone the same
+    /// way.
+    History {
+        /// Label or id, matched case-insensitively.
+        query: String,
+        /// Restore this revision (as numbered by the listing).
+        #[arg(long, value_name = "N")]
+        restore: Option<usize>,
+        /// Drop every recorded revision, permanently.
+        ///
+        /// What to run after rotating a credential that leaked: history
+        /// exists to make a replaced value recoverable, which is the last
+        /// thing you want for the one you just rotated away from.
+        #[arg(long, conflicts_with = "restore")]
+        forget: bool,
+    },
+
+    /// Add, list, save or remove an item's file attachments.
+    #[command(subcommand)]
+    Attach(AttachCommand),
+
+    /// Merge another copy of this vault — a sync conflict — into this one.
+    ///
+    /// Matched by id, decided by timestamp: the newer edit wins and the
+    /// losing state is filed in the winner's history, so neither side's work
+    /// is discarded. The other file is read, never written.
+    Merge {
+        /// The diverged copy, e.g. `default.sync-conflict-….vault`.
+        other: PathBuf,
+        /// Read the other copy's passphrase from this environment variable.
+        /// Without it, the passphrase that opened this vault is tried first,
+        /// then the tty is prompted.
+        #[arg(long, value_name = "VAR")]
+        other_passphrase_env: Option<String>,
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// List the vault's unlock factors.
@@ -146,6 +202,33 @@ enum Command {
         /// Optional key file.
         #[arg(long)]
         keyfile: Option<PathBuf>,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import a Bitwarden JSON export.
+    ///
+    /// The JSON export carries what the CSV cannot: custom fields, TOTP
+    /// seeds, cards, identities and folders. A password-protected export is
+    /// refused; export again without a file password.
+    ImportBitwarden {
+        /// The exported .json file.
+        file: PathBuf,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import a 1Password .1pux export.
+    ImportOnepassword {
+        /// The exported .1pux file.
+        file: PathBuf,
+        #[arg(long)]
+        into: Option<String>,
+    },
+    /// Import a Proton Pass zip export.
+    ///
+    /// The non-encrypted export; a PGP-encrypted one is refused.
+    ImportProtonpass {
+        /// The exported .zip file.
+        file: PathBuf,
         #[arg(long)]
         into: Option<String>,
     },
@@ -224,21 +307,60 @@ enum Command {
         /// the tty.
         #[arg(long, value_name = "VAR")]
         new_passphrase_env: Option<String>,
+        /// Argon2id memory cost in MiB (default 64).
+        #[arg(long, value_name = "MIB")]
+        memory_mib: Option<u32>,
+        /// Argon2id passes (default 3).
+        #[arg(long, value_name = "N")]
+        passes: Option<u32>,
+        /// Argon2id lanes (default 4).
+        #[arg(long, value_name = "N")]
+        parallelism: Option<u32>,
+        /// Keep the current passphrase and only re-derive at the new cost.
+        ///
+        /// This is how a vault created years ago catches up with current
+        /// parameters without anyone memorising anything new: the DEK is
+        /// rewrapped under a key derived at the new cost, ~32 bytes of work.
+        #[arg(long, conflicts_with = "new_passphrase_env")]
+        rederive_only: bool,
     },
 
-    /// Write every item, secrets included, to a plaintext file.
+    /// Write every item, secrets included, to another format.
     ///
-    /// The way *out*. A password manager you cannot leave is a trap, and the
-    /// only honest export is the one that includes the secrets — so this
-    /// writes 0600 and tells you to delete it, exactly as the importers say
-    /// about the files they read.
+    /// The way *out*. A password manager you cannot leave is a trap, so
+    /// leaving is as supported as arriving: lossless JSON, the flat CSV every
+    /// manager imports, or an encrypted .kdbx that KeePassXC opens directly.
+    /// The plaintext formats write 0600 and tell you to delete the file,
+    /// exactly as the importers say about the files they read.
     Export {
         /// Where to write. Refused if it already exists.
         file: PathBuf,
-        /// Required, so nobody produces a plaintext copy of every credential
-        /// they own by tab-completing their way through `--help`.
+        /// json (lossless), csv (flat; says what it dropped), or kdbx
+        /// (encrypted, needs --kdbx-passphrase-env or a prompt).
+        #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+        format: ExportFormat,
+        /// Required for the plaintext formats, so nobody produces a plaintext
+        /// copy of every credential they own by tab-completing --help.
         #[arg(long)]
         i_understand_this_is_plaintext: bool,
+        /// Read the new database's passphrase from this environment variable.
+        #[arg(long, value_name = "VAR")]
+        kdbx_passphrase_env: Option<String>,
+    },
+
+    /// Report weak, reused, old and expiring secrets.
+    ///
+    /// Runs entirely offline unless --check-breaches is given. That flag
+    /// queries Have I Been Pwned by k-anonymity range: five hex characters
+    /// of each secret's SHA-1 leave the machine, never the secret and never
+    /// its full hash.
+    Health {
+        /// Also check each flagged-or-not text secret against known breaches.
+        #[arg(long)]
+        check_breaches: bool,
+        /// Emit the report as JSON (labels and findings; never secrets).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Generate a password without storing it.
@@ -247,6 +369,75 @@ enum Command {
         length: usize,
         #[arg(long)]
         no_symbols: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrashCommand {
+    /// List what the trash holds and when each item was deleted.
+    List,
+    /// Put a trashed item back in the collection it came from.
+    Restore {
+        /// Label or id of the trashed item.
+        query: String,
+    },
+    /// Permanently delete one trashed item.
+    Purge {
+        /// Label or id of the trashed item.
+        query: String,
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Permanently delete everything in the trash.
+    Empty {
+        /// Do not ask for confirmation.
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Set how long trashed items survive before unlock purges them.
+    ///
+    /// Stored in the vault itself, so every process that opens it — the
+    /// daemon, the GUI, this tool — enforces the same window.
+    Retain {
+        /// Days to keep trashed items, or `never` to keep them until emptied
+        /// by hand.
+        days: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AttachCommand {
+    /// Attach a file to an item.
+    Add {
+        /// Label or id, matched case-insensitively.
+        query: String,
+        /// The file to attach. Read once and stored encrypted; the original
+        /// is untouched.
+        file: PathBuf,
+    },
+    /// List an item's attachments.
+    List {
+        /// Label or id, matched case-insensitively.
+        query: String,
+    },
+    /// Write an attachment back out as a file.
+    Save {
+        /// Label or id, matched case-insensitively.
+        query: String,
+        /// Attachment name or id, as shown by `attach list`.
+        name: String,
+        /// Where to write it. Defaults to the attachment's own name in the
+        /// current directory. Refused if it already exists.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Remove an attachment from an item.
+    Rm {
+        /// Label or id, matched case-insensitively.
+        query: String,
+        /// Attachment name or id, as shown by `attach list`.
+        name: String,
     },
 }
 
@@ -353,6 +544,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "subtitle": item.subtitle(),
                             "favorite": item.favorite,
                             "attributes": item.attributes,
+                            "expires": item.expires.map(locket_core::model::format_date),
                         })
                     );
                 } else {
@@ -410,6 +602,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             set,
             unset,
             favorite,
+            expires,
         } => {
             let mut vault = Vault::open(&path, &passphrase)?;
             let id = find_item(&vault, &query)?;
@@ -450,32 +643,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fields.push(Field::new(name, kind, value));
             }
 
-            let item = vault
-                .item_mut(id)
-                .ok_or("the item vanished between finding and editing it")?;
-            if let Some(label) = &label {
-                item.label = label.clone();
-            }
-            if let Some(value) = new_secret {
-                item.secret = locket_core::secret::SecretString::new(value);
-            }
-            for field in fields {
-                item.set_field(field);
-            }
-            for name in &unset {
-                item.fields.retain(|f| &f.name != name);
-            }
-            if let Some(favorite) = favorite {
-                item.favorite = favorite;
-            }
-            item.touch();
-            let label = item.label.clone();
+            // Parse before editing, so a bad date cannot leave a half edit.
+            let new_expires = match expires.as_deref() {
+                None => None,
+                Some("never") => Some(None),
+                Some(date) => Some(Some(locket_core::model::parse_date(date).ok_or_else(
+                    || format!("--expires wants YYYY-MM-DD or `never`, got `{date}`"),
+                )?)),
+            };
+
+            // Through `edit_item`, so the state being replaced lands in the
+            // item's history first.
+            let label = vault.edit_item(id, |item| {
+                if let Some(label) = &label {
+                    item.label = label.clone();
+                }
+                if let Some(value) = new_secret {
+                    item.secret = locket_core::secret::SecretString::new(value);
+                }
+                for field in fields {
+                    item.set_field(field);
+                }
+                for name in &unset {
+                    item.fields.retain(|f| &f.name != name);
+                }
+                if let Some(favorite) = favorite {
+                    item.favorite = favorite;
+                }
+                if let Some(expires) = new_expires {
+                    item.expires = expires;
+                }
+                item.label.clone()
+            })?;
 
             vault.save()?;
             println!("updated {label}");
         }
 
-        Command::Rm { query, yes } => {
+        Command::Rm {
+            query,
+            yes,
+            permanent,
+        } => {
             let mut vault = Vault::open(&path, &passphrase)?;
             let id = find_item(&vault, &query)?;
             let label = vault
@@ -484,20 +693,377 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| query.clone());
 
             if !yes {
-                eprint!("Delete `{label}`? This cannot be undone. [y/N] ");
-                use std::io::Write as _;
-                std::io::stderr().flush()?;
-                let mut answer = String::new();
-                std::io::stdin().read_line(&mut answer)?;
-                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                if permanent {
+                    eprint!("Permanently delete `{label}`? This cannot be undone. [y/N] ");
+                } else {
+                    eprint!(
+                        "Move `{label}` to the trash? Applications reading it over the \
+                         Secret Service will no longer see it. [y/N] "
+                    );
+                }
+                if !confirm()? {
                     eprintln!("left alone");
                     return Ok(());
                 }
             }
 
-            vault.remove_item(id).ok_or("could not remove the item")?;
-            vault.save()?;
-            println!("deleted {label}");
+            if permanent {
+                vault.remove_item(id).ok_or("could not remove the item")?;
+                vault.save()?;
+                println!("permanently deleted {label}");
+            } else {
+                vault.trash_item(id).ok_or("could not trash the item")?;
+                vault.save()?;
+                println!("moved {label} to the trash; `trash restore` brings it back");
+            }
+        }
+
+        Command::Trash(cmd) => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            match cmd {
+                TrashCommand::List => {
+                    if vault.data().trash.is_empty() {
+                        println!("the trash is empty");
+                    }
+                    for t in &vault.data().trash {
+                        println!(
+                            "{}  {:<28} {:<16} deleted {}",
+                            t.item.id,
+                            t.item.label,
+                            t.item.kind.label(),
+                            locket_core::model::format_date(t.deleted)
+                        );
+                    }
+                    if let Some(days) = vault.data().settings.trash_retention_days {
+                        eprintln!("\nitems are purged {days} days after deletion");
+                    }
+                    // Opening may itself have purged; keep that.
+                    if vault.is_dirty() {
+                        vault.save()?;
+                    }
+                }
+                TrashCommand::Restore { query } => {
+                    let id = find_trashed(&vault, &query)?;
+                    let label = vault
+                        .data()
+                        .trashed(id)
+                        .map(|t| t.item.label.clone())
+                        .unwrap_or_default();
+                    vault.restore_item(id).ok_or("could not restore the item")?;
+                    vault.save()?;
+                    println!("restored {label}");
+                }
+                TrashCommand::Purge { query, yes } => {
+                    let id = find_trashed(&vault, &query)?;
+                    let label = vault
+                        .data()
+                        .trashed(id)
+                        .map(|t| t.item.label.clone())
+                        .unwrap_or_default();
+                    if !yes {
+                        eprint!("Permanently delete `{label}`? This cannot be undone. [y/N] ");
+                        if !confirm()? {
+                            eprintln!("left alone");
+                            return Ok(());
+                        }
+                    }
+                    vault.purge_item(id).ok_or("could not purge the item")?;
+                    vault.save()?;
+                    println!("permanently deleted {label}");
+                }
+                TrashCommand::Retain { days } => {
+                    let retention = match days.as_str() {
+                        "never" => None,
+                        n => Some(n.parse::<u32>().map_err(|_| {
+                            format!("`{n}` is not a number of days (or `never`)")
+                        })?),
+                    };
+                    vault.data_mut().settings.trash_retention_days = retention;
+                    vault.save()?;
+                    match retention {
+                        Some(days) => println!("trashed items are purged after {days} day(s)"),
+                        None => println!("trashed items are kept until emptied by hand"),
+                    }
+                }
+                TrashCommand::Empty { yes } => {
+                    let count = vault.data().trash.len();
+                    if count == 0 {
+                        println!("the trash is already empty");
+                        return Ok(());
+                    }
+                    if !yes {
+                        eprint!(
+                            "Permanently delete {count} trashed item(s)? This cannot be \
+                             undone. [y/N] "
+                        );
+                        if !confirm()? {
+                            eprintln!("left alone");
+                            return Ok(());
+                        }
+                    }
+                    vault.data_mut().trash.clear();
+                    vault.save()?;
+                    println!("emptied the trash ({count} item(s))");
+                }
+            }
+        }
+
+        Command::History {
+            query,
+            restore,
+            forget,
+        } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let id = find_item(&vault, &query)?;
+
+            if forget {
+                let item = vault.item_mut(id).ok_or("item vanished")?;
+                let dropped = item.forget_history();
+                let label = item.label.clone();
+                vault.save()?;
+                println!("dropped {dropped} revision(s) of {label}");
+                return Ok(());
+            }
+
+            match restore {
+                None => {
+                    let item = vault.item(id).ok_or("item vanished")?;
+                    if item.history.is_empty() {
+                        println!("{} has no recorded history", item.label);
+                        return Ok(());
+                    }
+                    for (n, rev) in item.history.iter().enumerate().rev() {
+                        println!(
+                            "{n:>3}  {}  {:<28} {}",
+                            locket_core::model::format_date(rev.saved),
+                            rev.item.label,
+                            rev.item.subtitle()
+                        );
+                    }
+                    eprintln!("\nrestore one with `history {query} --restore N`");
+                }
+                Some(n) => {
+                    let label = vault.edit_item(id, |item| {
+                        item.restore_revision(n).map(|()| item.label.clone())
+                    })??;
+                    vault.save()?;
+                    println!("restored revision {n} of {label}");
+                }
+            }
+        }
+
+        Command::Attach(cmd) => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            match cmd {
+                AttachCommand::Add { query, file } => {
+                    let id = find_item(&vault, &query)?;
+                    let data = std::fs::read(&file)?;
+                    let name = file
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .ok_or("the path has no file name")?;
+                    let mime = mime_for(&name);
+                    let size = data.len();
+                    let item = vault.item_mut(id).ok_or("item vanished")?;
+                    item.add_attachment(&name, mime, data)?;
+                    let label = item.label.clone();
+                    vault.save()?;
+                    println!("attached {name} ({size} bytes) to {label}");
+                    eprintln!(
+                        "\n{} is untouched; the vault holds an encrypted copy.",
+                        file.display()
+                    );
+                }
+                AttachCommand::List { query } => {
+                    let id = find_item(&vault, &query)?;
+                    let item = vault.item(id).ok_or("item vanished")?;
+                    if item.attachments.is_empty() {
+                        println!("{} has no attachments", item.label);
+                    }
+                    for a in &item.attachments {
+                        println!(
+                            "{}  {:<28} {:>9} bytes  {}",
+                            a.id,
+                            a.name,
+                            a.size(),
+                            a.mime
+                        );
+                    }
+                }
+                AttachCommand::Save { query, name, out } => {
+                    let id = find_item(&vault, &query)?;
+                    let item = vault.item(id).ok_or("item vanished")?;
+                    let attachment = item
+                        .attachments
+                        .iter()
+                        .find(|a| a.name == name || a.id.to_string() == name)
+                        .ok_or_else(|| format!("no attachment `{name}` on {}", item.label))?;
+                    let out = out.unwrap_or_else(|| PathBuf::from(&attachment.name));
+                    write_new_0600(&out, attachment.data.expose())?;
+                    println!("wrote {} ({} bytes)", out.display(), attachment.size());
+                }
+                AttachCommand::Rm { query, name } => {
+                    let id = find_item(&vault, &query)?;
+                    let item = vault.item_mut(id).ok_or("item vanished")?;
+                    let attachment_id = item
+                        .attachments
+                        .iter()
+                        .find(|a| a.name == name || a.id.to_string() == name)
+                        .map(|a| a.id)
+                        .ok_or_else(|| format!("no attachment `{name}` on {}", item.label))?;
+                    item.remove_attachment(attachment_id);
+                    let label = item.label.clone();
+                    vault.save()?;
+                    println!("removed {name} from {label}");
+                }
+            }
+        }
+
+        Command::Health {
+            check_breaches,
+            json,
+        } => {
+            let vault = Vault::open(&path, &passphrase)?;
+            let report = locket_core::health::report(vault.data(), locket_core::model::now());
+
+            // The breach check runs over every scoreable text secret, not
+            // only the flagged ones: a strong unique password can still be in
+            // a breach, and that is precisely the case worth finding.
+            let mut breached: Vec<(String, u64)> = Vec::new();
+            if check_breaches {
+                let client = locket_hibp::client()?;
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(async {
+                    for (_, item) in vault.data().all_items() {
+                        if item.secret.is_empty() || item.secret_is_binary() {
+                            continue;
+                        }
+                        match locket_hibp::pwned_count(&client, item.secret.expose()).await {
+                            Ok(0) => {}
+                            Ok(count) => breached.push((item.label.clone(), count)),
+                            Err(e) => {
+                                eprintln!("breach check failed on {}: {e}", item.label);
+                            }
+                        }
+                    }
+                });
+            }
+
+            if json {
+                for e in &report.entries {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "id": e.id,
+                            "label": e.label,
+                            "strength": e.strength.map(|s| format!("{s:?}")),
+                            "reused_with": e.reused_with,
+                            "age_days": e.age_days,
+                            "old": e.old,
+                            "expired": e.expired,
+                            "expiring": e.expiring,
+                            "breached": breached
+                                .iter()
+                                .find(|(l, _)| *l == e.label)
+                                .map(|(_, n)| n),
+                        })
+                    );
+                }
+            } else {
+                println!(
+                    "{} item(s) scanned: {} weak, {} reused, {} old, {} expiring, {} expired",
+                    report.scanned,
+                    report.weak,
+                    report.reused,
+                    report.old,
+                    report.expiring,
+                    report.expired
+                );
+                for e in &report.entries {
+                    let mut findings = Vec::new();
+                    if let Some(s) = e.strength.filter(|s| s.is_flagged()) {
+                        findings.push(format!("{s:?}").to_lowercase());
+                    }
+                    if e.reused_with > 0 {
+                        findings.push(format!("reused by {} other(s)", e.reused_with));
+                    }
+                    if e.old {
+                        findings.push(format!("unchanged for {} days", e.age_days));
+                    }
+                    if e.expired {
+                        findings.push("expired".into());
+                    } else if e.expiring {
+                        findings.push("expiring".into());
+                    }
+                    println!("  {:<28} {}", e.label, findings.join(", "));
+                }
+                if report.is_clean() {
+                    println!("nothing to report");
+                }
+            }
+
+            if check_breaches {
+                if breached.is_empty() {
+                    println!("\nno secret appears in known breaches");
+                } else {
+                    println!("\nin known breaches:");
+                    for (label, count) in &breached {
+                        println!("  {label:<28} seen {count} time(s)");
+                    }
+                }
+            }
+            if !report.is_clean() || !breached.is_empty() {
+                std::process::exit(1);
+            }
+        }
+
+        Command::Merge {
+            other,
+            other_passphrase_env,
+            dry_run,
+        } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+
+            // Two forks of one vault usually share a passphrase, so try the
+            // one we already have before asking again.
+            let other_vault = match &other_passphrase_env {
+                Some(var) => {
+                    let pw = std::env::var(var)
+                        .map_err(|_| format!("environment variable `{var}` is not set"))?;
+                    Vault::open(&other, &pw)?
+                }
+                None => Vault::open(&other, &passphrase).or_else(|_| {
+                    let pw = rpassword::prompt_password(format!(
+                        "Passphrase for {}: ",
+                        other.display()
+                    ))?;
+                    Vault::open(&other, &pw)
+                })?,
+            };
+
+            let report = vault.merge_from(other_vault.data().clone());
+            if !report.changed() {
+                println!("nothing to merge; the copies are identical");
+                return Ok(());
+            }
+            if report.attachments_dropped > 0 {
+                eprintln!(
+                    "{} conflicted edit(s) lost attachments held only by the losing \
+                     side; check the affected items' history",
+                    report.attachments_dropped
+                );
+            }
+            if dry_run {
+                println!("would merge: {report}");
+                println!("(dry run; nothing written)");
+            } else {
+                vault.save()?;
+                println!("merged: {report}");
+                eprintln!(
+                    "\n{} was only read. Delete it once you have confirmed the merge.",
+                    other.display()
+                );
+            }
         }
 
         Command::Slots => {
@@ -585,6 +1151,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("imported {summary} from {}", database.display());
         }
 
+        Command::ImportBitwarden { file, into } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary =
+                locket_import::bitwarden::import_file(&mut vault, &file, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", file.display());
+            eprintln!(
+                "\nNow delete {} — it is a plaintext copy of every secret it held.",
+                file.display()
+            );
+        }
+
+        Command::ImportOnepassword { file, into } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary =
+                locket_import::onepassword::import_file(&mut vault, &file, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", file.display());
+            for note in &summary.notes {
+                eprintln!("\n{note}");
+            }
+            eprintln!(
+                "\nNow delete {} — it is a plaintext copy of every secret it held.",
+                file.display()
+            );
+        }
+
+        Command::ImportProtonpass { file, into } => {
+            let mut vault = Vault::open(&path, &passphrase)?;
+            let summary =
+                locket_import::protonpass::import_file(&mut vault, &file, into.as_deref())?;
+            vault.save()?;
+            println!("imported {summary} from {}", file.display());
+            eprintln!(
+                "\nNow delete {} — it is a plaintext copy of every secret it held.",
+                file.display()
+            );
+        }
+
         Command::ImportCsv { file, into } => {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary = locket_import::csv::import_file(&mut vault, &file, into.as_deref())?;
@@ -659,26 +1264,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("\nNow delete {} — it is a plaintext copy of every seed it held.", file.display());
         }
 
-        Command::Passwd { new_passphrase_env } => {
+        Command::Passwd {
+            new_passphrase_env,
+            memory_mib,
+            passes,
+            parallelism,
+            rederive_only,
+        } => {
             let mut vault = Vault::open(&path, &passphrase)?;
-            let new = match &new_passphrase_env {
-                Some(var) => std::env::var(var)
-                    .map_err(|_| format!("environment variable `{var}` is not set"))?,
-                None => {
-                    let first = rpassword::prompt_password("New passphrase: ")?;
-                    let again = rpassword::prompt_password("Again: ")?;
-                    if first != again {
-                        return Err("the two passphrases do not match".into());
+            let defaults = KdfParams::default();
+            let params = KdfParams {
+                m_cost: memory_mib.map(|m| m * 1024).unwrap_or(defaults.m_cost),
+                t_cost: passes.unwrap_or(defaults.t_cost),
+                p_cost: parallelism.unwrap_or(defaults.p_cost),
+            };
+
+            let new = if rederive_only {
+                passphrase.clone()
+            } else {
+                match &new_passphrase_env {
+                    Some(var) => std::env::var(var)
+                        .map_err(|_| format!("environment variable `{var}` is not set"))?,
+                    None => {
+                        let first = rpassword::prompt_password("New passphrase: ")?;
+                        let again = rpassword::prompt_password("Again: ")?;
+                        if first != again {
+                            return Err("the two passphrases do not match".into());
+                        }
+                        first
                     }
-                    first
                 }
             };
             if new.is_empty() {
                 return Err("an empty passphrase is not a passphrase".into());
             }
-            vault.change_passphrase(&new, KdfParams::default())?;
+            vault.change_passphrase(&new, params)?;
             vault.save()?;
-            println!("passphrase changed for {}", path.display());
+            if rederive_only {
+                println!(
+                    "re-derived at argon2id m={}KiB t={} p={} for {}",
+                    params.m_cost,
+                    params.t_cost,
+                    params.p_cost,
+                    path.display()
+                );
+            } else {
+                println!("passphrase changed for {}", path.display());
+            }
             let others = vault.slots().len().saturating_sub(1);
             if others > 0 {
                 eprintln!("{others} other unlock factor(s) still open this vault.");
@@ -687,26 +1319,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Command::Export {
             file,
+            format,
             i_understand_this_is_plaintext,
+            kdbx_passphrase_env,
         } => {
-            if !i_understand_this_is_plaintext {
+            use locket_import::export;
+            let format = export::Format::from(format);
+            if format.is_plaintext() && !i_understand_this_is_plaintext {
                 return Err(
                     "refusing to write plaintext secrets without \
-                     --i-understand-this-is-plaintext"
+                     --i-understand-this-is-plaintext (or use --format kdbx, \
+                     which is encrypted)"
                         .into(),
                 );
             }
-            if file.exists() {
-                return Err(format!("{} already exists", file.display()).into());
-            }
             let vault = Vault::open(&path, &passphrase)?;
-            let count = export_to(&vault, &file)?;
-            println!("exported {count} item(s) to {}", file.display());
-            eprintln!(
-                "\n{} now holds every secret in the vault in the clear. Delete it \
-                 once you have moved them.",
-                file.display()
-            );
+            match format {
+                export::Format::Json => {
+                    let count = export::to_json(&vault, &file)?;
+                    println!("exported {count} item(s) to {}", file.display());
+                }
+                export::Format::Csv => {
+                    let (count, lossy) = export::to_csv(&vault, &file)?;
+                    println!("exported {count} item(s) to {}", file.display());
+                    if lossy > 0 {
+                        eprintln!(
+                            "{lossy} item(s) had custom fields or attachments CSV cannot \
+                             carry; use --format json for a lossless copy"
+                        );
+                    }
+                }
+                export::Format::Kdbx => {
+                    let kdbx_pw = match &kdbx_passphrase_env {
+                        Some(var) => std::env::var(var)
+                            .map_err(|_| format!("environment variable `{var}` is not set"))?,
+                        None => {
+                            let first =
+                                rpassword::prompt_password("Passphrase for the new database: ")?;
+                            let again = rpassword::prompt_password("Again: ")?;
+                            if first != again {
+                                return Err("the two passphrases do not match".into());
+                            }
+                            first
+                        }
+                    };
+                    let count = export::to_kdbx(&vault, &file, &kdbx_pw)?;
+                    println!(
+                        "exported {count} item(s) to {} (KDBX 4, encrypted)",
+                        file.display()
+                    );
+                }
+            }
+            if format.is_plaintext() {
+                eprintln!(
+                    "\n{} now holds every secret in the vault in the clear. Delete it \
+                     once you have moved them.",
+                    file.display()
+                );
+            }
         }
 
         Command::Add {
@@ -745,6 +1415,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// Read one y/N answer from stdin. The prompt is already printed.
+fn confirm() -> Result<bool, Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
+}
+
+/// Resolve a label or id to exactly one *trashed* item.
+fn find_trashed(vault: &Vault, query: &str) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
+    let needle = query.to_lowercase();
+    let matches: Vec<_> = vault
+        .data()
+        .trash
+        .iter()
+        .filter(|t| {
+            t.item.label.to_lowercase() == needle || t.item.id.to_string() == needle
+        })
+        .collect();
+    match matches.len() {
+        0 => Err(format!("nothing in the trash matches `{query}`").into()),
+        1 => Ok(matches[0].item.id),
+        n => Err(format!("`{query}` matches {n} trashed items; use the id").into()),
+    }
+}
+
+/// A best-effort MIME type from the file extension; the fallback is honest.
+fn mime_for(name: &str) -> &'static str {
+    match name.rsplit('.').next().map(str::to_lowercase).as_deref() {
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("json") => "application/json",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Create a file 0600 that must not already exist, and write it whole.
+fn write_new_0600(path: &std::path::Path, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let mut file = opts
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.write_all(data)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -798,51 +1525,25 @@ fn find_item(vault: &Vault, query: &str) -> Result<uuid::Uuid, Box<dyn std::erro
     }
 }
 
-/// Write the whole vault out as JSON, secrets included.
-///
-/// JSON rather than CSV because CSV cannot represent an item with arbitrary
-/// extra fields without either losing them or inventing a column per field —
-/// and losing them silently is exactly the failure this command exists to
-/// avoid. Created 0600 before anything is written to it.
-fn export_to(vault: &Vault, path: &std::path::Path) -> Result<usize, Box<dyn std::error::Error>> {
-    use std::io::Write as _;
+/// CLI spelling of [`locket_import::export::Format`].
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum ExportFormat {
+    /// Lossless: every field, tag, expiry and attachment. Plaintext.
+    Json,
+    /// The flat file every manager imports. Loses custom structure. Plaintext.
+    Csv,
+    /// An encrypted KeePass database, opened directly by KeePassXC.
+    Kdbx,
+}
 
-    let mut items = Vec::new();
-    for (collection, item) in vault.data().all_items() {
-        items.push(serde_json::json!({
-            "collection": collection.label,
-            "id": item.id,
-            "kind": item.kind,
-            "label": item.label,
-            "secret": item.secret.expose(),
-            "attributes": item.attributes,
-            "tags": item.tags,
-            "favorite": item.favorite,
-            "fields": item.fields.iter().map(|f| serde_json::json!({
-                "name": f.name,
-                "kind": f.kind,
-                "value": f.value.expose(),
-            })).collect::<Vec<_>>(),
-        }));
+impl From<ExportFormat> for locket_import::export::Format {
+    fn from(f: ExportFormat) -> Self {
+        match f {
+            ExportFormat::Json => Self::Json,
+            ExportFormat::Csv => Self::Csv,
+            ExportFormat::Kdbx => Self::Kdbx,
+        }
     }
-    let count = items.len();
-
-    let document = serde_json::json!({
-        "format": "locket-export-v1",
-        "items": items,
-    });
-
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut file = opts.open(path)?;
-    file.write_all(&serde_json::to_vec_pretty(&document)?)?;
-    file.sync_all()?;
-    Ok(count)
 }
 
 /// CLI spelling of [`locket_import::dotenv::Grouping`].
