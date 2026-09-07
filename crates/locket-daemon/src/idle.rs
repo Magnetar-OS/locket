@@ -139,6 +139,20 @@ trait LoginManager {
     fn get_session(&self, session_id: &str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
 
     fn get_session_by_pid(&self, pid: u32) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+
+    fn get_user(&self, uid: u32) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+}
+
+/// The per-user object, for the one property that survives running outside a
+/// login session.
+#[zbus::proxy(
+    interface = "org.freedesktop.login1.User",
+    default_service = "org.freedesktop.login1"
+)]
+trait LoginUser {
+    /// The user's primary graphical session, as `(id, object path)`.
+    #[zbus(property)]
+    fn display(&self) -> zbus::Result<(String, zbus::zvariant::OwnedObjectPath)>;
 }
 
 #[zbus::proxy(
@@ -170,12 +184,18 @@ pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result
     let session_path = session_path(&manager).await;
 
     let session = match session_path {
-        Some(path) => Some(
-            LoginSessionProxy::builder(&connection)
-                .path(path)?
-                .build()
-                .await?,
-        ),
+        Some(path) => {
+            // Said out loud because the failure is silent otherwise: a daemon
+            // that found no session still runs, still locks on suspend, and
+            // never mentions that the screen lock goes unwatched.
+            tracing::info!(session = %path.as_str(), "following the session's lock state");
+            Some(
+                LoginSessionProxy::builder(&connection)
+                    .path(path)?
+                    .build()
+                    .await?,
+            )
+        }
         None => {
             tracing::warn!("no logind session found; only suspend will lock the vault");
             None
@@ -227,9 +247,22 @@ async fn lock(state: &SharedState, why: &str, notify: bool) {
     }
 }
 
-/// This process's logind session, by id if the environment names one and by
-/// pid otherwise — a daemon started by systemd inherits the former, one
-/// started by hand may not.
+/// This process's logind session.
+///
+/// Three ways, because none of them works everywhere:
+///
+/// 1. `XDG_SESSION_ID`, when something put it in the environment.
+/// 2. The session owning this pid, for a daemon started by hand from a
+///    terminal inside the session.
+/// 3. The user's *display* session, asked of logind directly.
+///
+/// The third exists because the first two both fail in the arrangement the
+/// shipped unit actually creates: a systemd **user** unit runs under
+/// `user@<uid>.service`, which logind classes as a manager session rather
+/// than a login one. `XDG_SESSION_ID` is not in the user manager's
+/// environment, and `GetSessionByPID` answers "does not belong to any known
+/// session" — measured on a live COSMIC session, where it left the daemon
+/// following suspend only and silently not following the screen lock at all.
 async fn session_path(
     manager: &LoginManagerProxy<'_>,
 ) -> Option<zbus::zvariant::OwnedObjectPath> {
@@ -238,5 +271,24 @@ async fn session_path(
     {
         return Some(path);
     }
-    manager.get_session_by_pid(std::process::id()).await.ok()
+    if let Ok(path) = manager.get_session_by_pid(std::process::id()).await {
+        return Some(path);
+    }
+
+    // Safety: `getuid` reads this process's own real uid and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let user = manager.get_user(uid).await.ok()?;
+    let user = LoginUserProxy::builder(manager.inner().connection())
+        .path(user)
+        .ok()?
+        .build()
+        .await
+        .ok()?;
+    let (id, path) = user.display().await.ok()?;
+    // A user with no graphical session gets an empty path rather than an
+    // error, and following that would be following nothing.
+    if id.is_empty() {
+        return None;
+    }
+    Some(path)
 }
