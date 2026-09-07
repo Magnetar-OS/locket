@@ -762,12 +762,19 @@ impl CollectionIface {
             let Some(pos) = data.collections.iter().position(|c| c.id == self.id) else {
                 return Err(fdo::Error::UnknownObject("no such collection".into()));
             };
-            let removed = data.collections.remove(pos);
+            // Deleting a collection deletes every item in it — through the
+            // trash, item by item, because a whole collection wiped by one
+            // call is exactly the accident the trash exists to survive.
+            let item_ids: Vec<Uuid> =
+                data.collections[pos].items.iter().map(|i| i.id).collect();
+            for id in &item_ids {
+                data.trash_item(*id);
+            }
+            data.collections.remove(pos);
             state.persist();
-            removed
-                .items
+            item_ids
                 .iter()
-                .map(|i| item_path(self.id, i.id))
+                .map(|i| item_path(self.id, *i))
                 .collect::<Vec<_>>()
         };
 
@@ -859,6 +866,10 @@ impl CollectionIface {
             let id = match existing {
                 Some(pos) => {
                     let item = &mut collection.items[pos];
+                    // A replace-on-store is an edit: the value it overwrites
+                    // goes into the item's history first, so an application
+                    // rotating a credential does not destroy the old one.
+                    item.record_revision();
                     item.set_secret_bytes(&plaintext);
                     item.label = label;
                     item.content_type = secret.content_type.clone();
@@ -996,7 +1007,10 @@ impl ItemIface {
         {
             let mut state = self.state.lock().await;
             let vault = state.vault_mut().map_err(fdo::Error::from)?;
-            vault.remove_item(self.id);
+            // Soft-delete. To this client — and every other one — the item is
+            // gone: the trash lives outside the collections that SearchItems
+            // and the properties walk, so only locket's own trash UI sees it.
+            vault.trash_item(self.id);
             state.persist();
         }
         let path = item_path(self.collection, self.id);
@@ -1054,6 +1068,8 @@ impl ItemIface {
         let item = vault
             .item_mut(self.id)
             .ok_or_else(|| fdo::Error::UnknownObject("no such item".into()))?;
+        // SetSecret is an edit: file the value being overwritten.
+        item.record_revision();
         item.set_secret_bytes(&plaintext);
         item.content_type = secret.content_type;
         item.touch();

@@ -13,6 +13,7 @@ pub mod error;
 pub mod import;
 pub mod manager;
 pub mod portal;
+pub mod quick;
 pub mod service;
 pub mod session;
 pub mod unlock_socket;
