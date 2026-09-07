@@ -1546,8 +1546,14 @@ impl cosmic::Application for App {
         // even bouncing it through one message, lands too early and is
         // silently dropped. Both were tried; neither produced a focus ring.
         // Waiting a beat lets the first frame render, after which the
-        // operation finds the field. Verified against the accent ring the
-        // COSMIC theme draws on a focused input.
+        // operation finds the field.
+        //
+        // A timer alone is a race, though, and losing it is not cosmetic: an
+        // unfocused field draws no caret at all, so the window looks like it
+        // is ignoring the keyboard. `subscription` therefore also re-focuses
+        // on every `window::Event::Focused`, which is the deterministic
+        // signal — this timer only covers the case where the window was
+        // already focused before the subscription attached.
         (
             app,
             cosmic::task::future(async {
@@ -3340,6 +3346,23 @@ impl cosmic::Application for App {
                     cosmic::iced::Event::Window(cosmic::iced::window::Event::Unfocused)
                 )
                 .then_some(Message::WindowUnfocused)
+            }));
+        }
+
+        // The unlock screen has exactly one thing to type into, so the caret
+        // belongs there whenever the window can receive keys. Driving it from
+        // the window's own focus event rather than a timer is what makes it
+        // deterministic: a focused field draws a blinking caret, and an
+        // unfocused one draws none at all, which reads as a window ignoring
+        // the keyboard. cosmic-greeter reaches the same place by focusing in
+        // response to an event rather than on a delay.
+        if matches!(self.screen, Screen::Locked | Screen::Unlocking) {
+            subs.push(cosmic::iced::event::listen_with(|event, _, _| {
+                matches!(
+                    event,
+                    cosmic::iced::Event::Window(cosmic::iced::window::Event::Focused)
+                )
+                .then_some(Message::FocusPassphrase)
             }));
         }
 
