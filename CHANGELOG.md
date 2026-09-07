@@ -6,6 +6,163 @@ Nothing has been released yet, so everything so far sits under Unreleased.
 
 ## Unreleased
 
+### Added
+
+**The vault forgives more, and remembers more.** Vault format 4 — the envelope
+is unchanged, and a format 3 file upgrades in place on its next save. The
+version exists so an older build refuses the file instead of opening it and
+silently stripping the data it does not know about:
+
+- **Trash.** Deleting an item — in the GUI, with `locket-cli rm`, or by any
+  application calling `Delete` over the Secret Service — now moves it to the
+  trash instead of destroying it. To everything reading the vault the item is
+  gone; the Trash category in the GUI and `locket-cli trash list/restore/purge`
+  bring it back or finish the job. Trash is purged on unlock after a retention
+  window stored in the vault itself (30 days by default;
+  `locket-cli trash retain <days>|never`), so every process enforces the same
+  number. Deleting a whole collection routes every item through the trash too.
+- **Item history.** Every edit files the state it replaced — the GUI editor,
+  `locket-cli edit`, a Secret Service `SetSecret` or replace-on-store from any
+  application. Bounded per item (10 revisions, 256 KiB); the detail pane and
+  `locket-cli history` list and restore them, and a restore is itself an edit,
+  so it can be undone the same way.
+- **Attachments.** Files ride on an item, encrypted in the vault body — a
+  recovery-codes PDF, a key backup. Capped at 10 MiB each, 25 MiB per item,
+  with the limit stated rather than discovered. In the GUI (add/save/remove in
+  the detail pane, through the file chooser) and the CLI
+  (`locket-cli attach add/list/save/rm`). History snapshots deliberately do not
+  carry attachments, and the UI says so.
+- **Expiry.** An item can carry an expiry date — a certificate's end, a
+  token's lifetime. The editor and `locket-cli edit --expires` set it; the
+  list badges items expired or expiring within 30 days; the detail pane says
+  which and when.
+- **Merge.** Two diverged copies of one vault — what a file synchroniser
+  leaves after both machines edited — fold back together: matched by id,
+  decided by timestamp, the losing side of each conflict filed into the
+  winner's history rather than discarded. The GUI notices a
+  `.sync-conflict` sibling on unlock and offers the merge (no second
+  passphrase: forks share a key), or merge any copy via File → Merge a
+  diverged copy…; the CLI grew `locket-cli merge`. Deletions propagate only
+  when newer than the other side's last edit, and an edit after a deletion
+  resurrects the item.
+- **Open another vault** from the File menu. The daemon keeps serving the
+  system vault; the Settings panel already reports which is which.
+
+The GUI editor also stopped discarding what its form does not show: tags,
+attachments and history now survive an edit, where previously a whole-item
+replace dropped them.
+
+**Password health.** A Health page in the GUI and `locket-cli health`: weak
+passwords (zxcvbn, with the item's own label and username fed in as the
+guesses an attacker tries first), secrets reused across items, secrets
+unchanged for over a year, and items expired or expiring. Entirely offline.
+Checking against **Have I Been Pwned** is a separate, explicit action — a
+button on the page, `--check-breaches` on the CLI — that sends only the
+first five characters of each secret's SHA-1 by k-anonymity range, with
+response padding requested; it lives in its own crate (`locket-hibp`),
+which is the only code in the workspace that touches the network.
+
+**The passphrase can now be changed from the GUI** (Security screen), with
+the current passphrase required first — an unlocked window is not authority
+to lock its owner out — and an Argon2id cost preset (Balanced / Stronger /
+Lighter). `locket-cli passwd` grew the matching knobs (`--memory-mib`,
+`--passes`, `--parallelism`) plus `--rederive-only`, which keeps the
+passphrase and just rewraps the key at the new cost — how an old vault
+catches up with current parameters.
+
+**The daemon hardens itself at startup**: `PR_SET_DUMPABLE(0)`, so no core
+dumps and no `ptrace`/`process_vm_readv` from other processes in the
+session, and `mlockall` after raising `RLIMIT_MEMLOCK` to its hard limit,
+so nothing it maps reaches swap where the limit allows (the installed unit
+now grants `LimitMEMLOCK=infinity`; elsewhere the daemon logs what it got).
+
+**Fuzzing.** `cargo fuzz` targets over the four places untrusted bytes
+enter — the vault file parser, the SSH agent wire protocol, the Secret
+Service session transport (DH peer keys and secret payloads), and the TOTP
+and `.env` importers — with a bounded run on every CI pass.
+
+**Three more ways in.** First-class importers for **Bitwarden** (the JSON
+export, with custom fields, TOTP seeds, cards, identities and folders),
+**1Password** (`.1pux` — trashed items stay deleted, attached documents are
+counted rather than silently dropped) and **Proton Pass** (the zip export;
+aliases keep their address). All three in the GUI's import screen and as
+`locket-cli import-bitwarden / import-onepassword / import-protonpass`;
+password-protected and PGP-encrypted exports are refused with directions,
+and re-importing never duplicates.
+
+**Three ways out.** `locket-cli export --format json|csv|kdbx` and a File →
+Export menu in the GUI: lossless JSON, the flat CSV every manager imports
+(it says exactly how many items had fields it could not carry), and an
+encrypted **KDBX 4** database KeePassXC opens directly — TOTP seeds, tags
+and field protection intact, verified by round-tripping through locket's
+own KeePass importer. The plaintext formats keep the CLI's explicit consent
+gate; in the GUI they detour through a warning dialog first.
+
+**Auto-type, the Wayland way.** An *Auto-type* button on an item types
+username → Tab → password into whatever field is focused, over the
+`RemoteDesktop` portal's keysym path — layout-independent, permission
+granted through the compositor's own dialog, and a measured investigation
+of what the portals actually offer on COSMIC lives in
+`docs/autotype-wayland.md`. No Enter is sent, and there is no global hotkey
+yet: `GlobalShortcuts` has no routed backend on COSMIC, which the note
+records with the commands to re-check.
+
+**The panel applet grew a quick search.** Type into the popup, copy a
+secret in one click — the 90% of interactions that do not deserve a window.
+It is an ordinary Secret Service client holding no key material: the list
+shows labels and usernames only, a secret is fetched at the moment Copy is
+pressed, and the clipboard clears after 30 seconds with the same
+"is-it-still-ours" check the main window makes. Closing the popup forgets
+the query. The lookup lives in `locket-secret::quick` so there is one
+definition of it rather than a copy per frontend.
+
+**History can be forgotten.** `locket-cli history <item> --forget` and a
+button in the detail pane drop every recorded revision. This is what to run
+after rotating a credential that leaked — history exists to make a replaced
+value recoverable, which is exactly wrong for the one you just rotated away
+from. The [threat model](docs/threat-model.md) now says so in as many words.
+
+**A strength meter on vault creation.** The one passphrase nothing can
+recover is the one worth estimating out loud, so the create screen scores it
+as you type (zxcvbn, with "locket" and "vault" fed in as the words an
+attacker guesses first) and says plainly that four unrelated words outlast a
+short line of symbols. The unlock screen also gained *Open a different
+vault…*, because the menu bar is hidden while locked and somebody whose
+vault lives elsewhere was otherwise stuck.
+
+**The vault says when it locks.** Locking on idle, on session lock and on
+suspend already existed; now each sends a desktop notification naming the
+reason — nothing from the vault, just why — so an application quietly
+losing its secrets after a resume stops being a mystery. The trash's
+retention window also gained a control in the Trash screen itself,
+alongside the existing `locket-cli trash retain`. Pass
+`--no-lock-notifications` to the daemon to turn the notifications off.
+
+**The browser extension saves as well as fills.** A content script notices
+a submitted login; if the vault does not hold that value the toolbar icon
+gains a badge, and the popup asks before anything is written. Updates land
+on the entry already saved for that origin and username — never anything
+else — and the replaced password goes into the item's history. The native
+host grew the matching `save` request; reading stayed exactly as guarded
+as it was.
+
+**Measured, not asserted.** `cargo run --release -p locket-core --example
+bench` times the four things a person waits on against a 10,000-item vault,
+and [docs/performance.md](docs/performance.md) records the numbers with the
+budget each has to fit. It found a real bug on its first run: the health
+report is 1.6 seconds at that size and was being computed on the UI thread —
+imperceptible on the author's nine-item vault, a frozen window on anyone
+else's. It now runs on a worker. Search and sort come in at 1–2 ms, which is
+the argument for leaving both implementations naive.
+
+**A written threat model.** [docs/threat-model.md](docs/threat-model.md):
+what each component trusts, what reaches it, and what an attacker with the
+vault file, with a process on your session, with a hostile browser extension
+or inside a Flatpak sandbox can and cannot do — plus the deliberate
+exposures (the plaintext collection index, the 1024-bit DH group, auto-type
+having no way to name the window it types into) and what trash and history
+changed about deletion. `SECURITY.md` points at it.
+
 ### Renamed
 
 The project is now **Locket**. Everything moved with it: the binaries
@@ -68,6 +225,17 @@ scripts/locket-setup            # reinstalls under the new id
 
 ### Fixed
 
+- **A vault from before the rename would not open.** The file records its
+  magic as `passman-vault`, the check demanded `locket-vault`, and the daemon
+  started against an unreadable file — while this changelog promised the old
+  vault kept working where it was. The old magic is now accepted and *kept*:
+  it is bound into the authenticated data of every slot and of the body, so
+  rewriting it would have locked the vault out of its own key. A passphrase
+  change or a hardware enrolment on such a vault now seals under the file's
+  own magic too, where it used the current constant and would have done the
+  same.
+- The systemd unit set `ProtectHome=read-write`, which is not a value systemd
+  accepts; it logged the line as ignored on every start.
 - **Binary secrets displayed as garbage.** The vault stores a non-text secret
   base64-encoded with a marker, but the detail view printed the raw store for
   every item — and for secrets damaged by the older lossy import, printed the

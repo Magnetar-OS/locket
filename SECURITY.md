@@ -19,6 +19,14 @@ You will get an acknowledgement. If the report is valid you will be credited in
 the advisory unless you ask not to be. There is no bounty; this is one person's
 project.
 
+## The threat model
+
+[docs/threat-model.md](docs/threat-model.md) sets out what each component
+trusts, what reaches it, and what an attacker with the vault file, with a
+process on your session, with a hostile browser extension or with a
+sandboxed application can and cannot do — including the exposures that are
+deliberate and the two things vault format 4 changed about deletion.
+
 ## What is in scope
 
 Anything that lets code or a person reach secrets they should not:
@@ -41,7 +49,13 @@ Anything that lets code or a person reach secrets they should not:
   defence, which is why the vault locks on idle, on session lock and on
   suspend.
 * Physical attacks on an unlocked machine.
-* Weak passphrases. Argon2id makes guessing expensive, not impossible.
+* Weak passphrases. Argon2id makes guessing expensive, not impossible; the
+  strength meter on vault creation is the mitigation, and it is advice.
+* Data the vault retains on purpose. A deleted item waits in the trash until
+  its retention window expires, and a replaced password stays in the item's
+  history — both inside the encrypted body. See
+  [the threat model](docs/threat-model.md#what-trash-and-history-changed) for
+  what that means after rotating a compromised credential.
 * The 1024-bit Diffie-Hellman group in the Secret Service transport. It is
   fixed by the wire format `libsecret` implements, it protects secrets in
   transit on your own session bus only, and the alternative that clients
@@ -56,8 +70,11 @@ in each case what was actually run.
 
 **Not verified:** anything involving a FIDO2 token on hardware. The code paths
 exist and are unit-tested against a software stand-in; no physical token has
-ever been attached. There has been no external review, no fuzzing campaign, and
-no reproducible-build story.
+ever been attached. There has been no external review and no reproducible-build
+story. Fuzzing exists but is bounded rather than a campaign: five targets over
+the vault parser, the SSH agent wire protocol, the Secret Service session
+transport and two importers, run for a minute each on every CI pass — no
+overnight soak.
 
 ## Supported versions
 

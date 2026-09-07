@@ -70,8 +70,30 @@ the editor lets you set it per field rather than guessing from the name.
 - **Auto-lock** after 15 minutes idle by default. Revealed secrets also
   re-conceal when the window loses focus, which is a display change and not a
   lock: it costs nothing and covers the screenshot-and-screen-share case.
-- **Deleting** asks first, and says that the item is gone for any application
-  reading it over the Secret Service too.
+- **Deleting** asks first, then moves the item to the **trash**: gone for any
+  application reading it over the Secret Service, restorable from the Trash
+  category until a retention window stored in the vault itself purges it —
+  30 days by default, enforced on unlock by whichever process gets there
+  first. This covers deletes arriving over the bus too, so a misbehaving
+  `libsecret` client can no longer destroy anything outright.
+- **Every edit files the state it replaced** into the item's bounded history —
+  including a `SetSecret` or replace-on-store from another application — and
+  the detail pane restores any revision, itself undoably. **Attachments**
+  (encrypted, 10 MiB each) and an **expiry date** with list badges ride on
+  items; **two diverged copies of one vault merge** by id and timestamp, the
+  losing side of each conflict filed into history rather than discarded, and
+  a `.sync-conflict` sibling left by a file synchroniser is noticed and
+  offered for merge on unlock.
+- **Health** reports weak passwords (zxcvbn, seeded with the item's own
+  label and username), secrets reused across items, secrets unchanged for a
+  year, and expiring items — offline. Checking against Have I Been Pwned is
+  a separate button that says exactly what leaves the machine: five hex
+  characters of each secret's SHA-1, by k-anonymity range, from the one
+  crate in the workspace allowed to touch the network.
+- **The passphrase changes from the Security screen** — current passphrase
+  required first, Argon2id cost selectable — and `locket-cli passwd
+  --rederive-only` re-wraps at new parameters without changing what you
+  type.
 - `Ctrl+N` new item, `Ctrl+F` search, `Ctrl+L` lock. Shortcuts are only
   claimed when no text field has already consumed the key.
 - **Settings live in `cosmic-config`**, the desktop's own store, mediated by
@@ -97,8 +119,9 @@ you find out which of the two you are in, since it reports the actual owner of
 
 ```
 crates/
-  locket-core     vault format, Argon2id + XChaCha20-Poly1305, item model  (no I/O, no D-Bus, no UI)
-  locket-secret   org.freedesktop.secrets + org.freedesktop.impl.portal.Secret
+  locket-core     vault format, Argon2id + XChaCha20-Poly1305, item model, health  (no I/O, no D-Bus, no UI)
+  locket-hibp     Have I Been Pwned range queries — the only crate that touches the network
+  locket-secret   org.freedesktop.secrets + org.freedesktop.impl.portal.Secret, quick lookup
   locket-daemon   locketd — owns the unlocked vault, serves D-Bus and the agent
   locket-agent    SSH agent protocol, including security-key (`sk-`) signing
   locket-cli      command line interface
@@ -115,7 +138,7 @@ res/               desktop entries, metainfo, systemd unit, .portal file, PAM no
 scripts/           locket-setup (install/uninstall/status) and the keyring re-import
 justfile           build, install and metadata checks — the packager's path
 packaging/arch/    PKGBUILD
-docs/              cosmic-conventions.md — COSMIC ecosystem conventions, field-notes edition
+docs/              cosmic-conventions.md, threat-model.md, performance.md, autotype-wayland.md
 ```
 
 The two COSMIC crates carry their own fluent catalogue under
@@ -169,9 +192,12 @@ in the clear there too — and the index is covered by the body's AEAD, so
 relabelling a collection on disk invalidates the vault rather than silently
 succeeding.
 
-Older files are read and upgraded in place: format 1 (a single inline KDF
-descriptor) becomes a one-slot format 2 file, and format 2 gains the collection
-index, the next time the vault is saved.
+Older files are read and upgraded in place, the next time the vault is saved:
+format 1 (a single inline KDF descriptor) becomes a one-slot format 2 file,
+format 2 gains the collection index, and format 3 becomes format 4 — the
+envelope unchanged, the version raised so a build that predates trash, item
+history and attachments refuses the file instead of opening it and silently
+stripping what it does not know about on save.
 
 ### Secret Service transport
 
@@ -331,21 +357,13 @@ so they are reproducible from a vault backup and no two apps can collide.
 Install `res/locket.portal` into `/usr/share/xdg-desktop-portal/portals/` to
 make xdg-desktop-portal route to it.
 
-Next:
-
-1. **A FIDO2 token on hardware.** Both the vault slot and the SSH agent's
-   `sk-` support are implemented and unit-tested, but every path that talks to
-   a real token needs a physical touch and no token has been attached to this
-   machine. Until that happens, treat the hardware half as untested.
-2. **Packaging beyond Arch.** `packaging/arch/PKGBUILD` builds a package;
-   Debian, Fedora and Flatpak do not exist. Flatpak is the awkward one: a
-   sandboxed application cannot own `org.freedesktop.secrets` for the session
-   or install a PAM module, so at best it would ship the frontend alone.
-3. **PAM for `sudo`** — a *different* module from the session one, and still
-   gated on the reasoning in [On authorising `sudo`](#on-authorising-sudo).
-4. **PKCS#11**, only if a caller turns up. See
-   [Why there is no PKCS#11 module](#why-there-is-no-pkcs11-module) for why
-   writing one now would be a module nothing loads.
+What comes next lives in [ROADMAP.md](ROADMAP.md): six milestones from
+vault-format parity with KeePassXC (trash, history, attachments, merge)
+through passkeys and password health, Wayland-portal auto-type, the polish
+and accessibility bar, desktop-wide COSMIC integration, and finally
+distribution beyond one machine. The items previously listed here — FIDO2 on
+real hardware, packaging beyond Arch, PAM for `sudo`, conditional PKCS#11 —
+are carried there with their reasoning intact.
 
 ## Building
 
