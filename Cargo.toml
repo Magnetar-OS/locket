@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
+# Its own workspace: libfuzzer's build flags and lockfile stay out of ours.
+exclude = ["fuzz"]
 members = [
     "crates/locket-core",
+    "crates/locket-hibp",
     "crates/locket-secret",
     "crates/locket-agent",
     "crates/locket-daemon",
@@ -25,6 +28,7 @@ repository = "https://github.com/entro314-labs/locket"
 
 [workspace.dependencies]
 locket-core = { path = "crates/locket-core" }
+locket-hibp = { path = "crates/locket-hibp" }
 locket-secret = { path = "crates/locket-secret" }
 locket-import = { path = "crates/locket-import" }
 locket-agent = { path = "crates/locket-agent" }
@@ -73,6 +77,13 @@ cbc = { version = "=0.1.2", features = ["alloc", "block-padding"] }
 num-bigint = "0.5"
 base32 = "0.5"
 base64ct = { version = "1.8", features = ["alloc"] }
+# Password strength estimation for the health report. Pure computation, no
+# I/O, so it is allowed into locket-core (behind its `health` feature).
+zxcvbn = "3.1"
+# The one network client in the workspace, used only by locket-hibp for the
+# opt-in Have I Been Pwned range check. rustls so nothing links OpenSSL for
+# it; no default features so no cookie jar, no proxy discovery, no surprises.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
 
 # --- SSH -------------------------------------------------------------------
 # Same generation as ssh-key's own `rsa`, so an RSA keypair converts across

@@ -64,6 +64,25 @@ impl std::fmt::Debug for SecretBytes {
     }
 }
 
+/// Serialises as base64, because these bytes only ever appear inside the
+/// encrypted vault body, where the container is JSON.
+impl Serialize for SecretBytes {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use base64ct::Encoding as _;
+        s.serialize_str(&base64ct::Base64::encode_string(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretBytes {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use base64ct::Encoding as _;
+        let s = String::deserialize(d)?;
+        base64ct::Base64::decode_vec(&s)
+            .map(SecretBytes)
+            .map_err(|_| serde::de::Error::custom("malformed base64 in secret bytes"))
+    }
+}
+
 /// A UTF-8 secret that is wiped from memory when dropped.
 ///
 /// Serialises transparently as a plain JSON string: this type is only ever

@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use zeroize::Zeroizing;
 
-use crate::secret::SecretString;
+use crate::secret::{SecretBytes, SecretString};
 
 /// Seconds since the Unix epoch.
 pub type Timestamp = u64;
@@ -23,6 +23,47 @@ pub fn now() -> Timestamp {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Parse `YYYY-MM-DD` to midnight UTC of that day.
+///
+/// The one date format the vault speaks, chosen because it is what the
+/// `Date` field kind already documents and what certificates print. Days are
+/// converted with the standard civil-from-days arithmetic rather than a
+/// calendar dependency.
+pub fn parse_date(s: &str) -> Option<Timestamp> {
+    let mut parts = s.trim().splitn(3, '-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1970..=9999).contains(&y) {
+        return None;
+    }
+    // Howard Hinnant's days_from_civil.
+    let y = y - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as u64;
+    let mp = u64::from((m + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + u64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    u64::try_from(days).ok().map(|d| d * 86_400)
+}
+
+/// Format a timestamp as the `YYYY-MM-DD` (UTC) that [`parse_date`] reads.
+pub fn format_date(ts: Timestamp) -> String {
+    // Howard Hinnant's civil_from_days.
+    let z = (ts / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = y + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// What kind of thing an item is. Drives the icon, the detail layout, and
@@ -248,6 +289,57 @@ pub mod field_names {
     pub const TOKEN_ENDPOINT: &str = "token-endpoint";
 }
 
+/// One attachment is refused above this many bytes. The point of an
+/// attachment is a recovery-codes PDF or a key backup, not a photo library,
+/// and every byte here is base64 inside a JSON body that is re-encrypted and
+/// rewritten whole on each save.
+pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// An item's attachments are refused past this total.
+pub const MAX_ITEM_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
+/// How many revisions an item keeps before the oldest is dropped.
+pub const MAX_REVISIONS: usize = 10;
+
+/// Revisions are also dropped oldest-first when their serialized size passes
+/// this, so one huge note edited many times cannot balloon the vault.
+pub const HISTORY_BUDGET_BYTES: usize = 256 * 1024;
+
+/// An encrypted file riding on an item — recovery codes, a key backup.
+///
+/// The bytes live inside the vault body like every other secret. Anything
+/// writing them out again is responsible for not spooling plaintext to disk:
+/// hand them to a save dialog, not a temp file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub id: Uuid,
+    /// The file name it arrived under, and the suggested name on save.
+    pub name: String,
+    /// MIME type, best-effort; `application/octet-stream` when unknown.
+    pub mime: String,
+    pub data: SecretBytes,
+    pub added: Timestamp,
+}
+
+impl Attachment {
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+/// A prior state of an item, captured before an edit overwrote it.
+///
+/// The snapshot is a whole item with two exclusions that keep history from
+/// feeding on itself: no nested history, and no attachments — an attachment
+/// duplicated into every revision would multiply the vault by its own size.
+/// Attachment changes are therefore not versioned, and the editor says so.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Revision {
+    /// When this state was *replaced* — the moment the edit happened.
+    pub saved: Timestamp,
+    pub item: Item,
+}
+
 /// A single stored secret.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
@@ -273,6 +365,16 @@ pub struct Item {
     pub favorite: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// When this item stops being valid — a certificate's notAfter, a token's
+    /// expiry. `None` for the many kinds of item that do not expire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<Attachment>,
+    /// Prior states, newest last. Bounded by [`MAX_REVISIONS`] and
+    /// [`HISTORY_BUDGET_BYTES`]; see [`Revision`] for what a snapshot excludes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<Revision>,
     pub created: Timestamp,
     pub modified: Timestamp,
 }
@@ -294,6 +396,9 @@ impl Item {
             fields: Vec::new(),
             favorite: false,
             tags: Vec::new(),
+            expires: None,
+            attachments: Vec::new(),
+            history: Vec::new(),
             created: ts,
             modified: ts,
         }
@@ -427,6 +532,168 @@ impl Item {
     pub fn touch(&mut self) {
         self.modified = now();
     }
+
+    // -- expiry --------------------------------------------------------------
+
+    pub fn is_expired(&self, at: Timestamp) -> bool {
+        self.expires.is_some_and(|e| e <= at)
+    }
+
+    /// Expiring soon, but not yet expired — drives the "expiring" badge.
+    pub fn expires_within(&self, at: Timestamp, horizon: u64) -> bool {
+        self.expires
+            .is_some_and(|e| e > at && e.saturating_sub(at) <= horizon)
+    }
+
+    // -- attachments ---------------------------------------------------------
+
+    /// Attach a file's bytes, enforcing the per-attachment and per-item caps.
+    pub fn add_attachment(
+        &mut self,
+        name: impl Into<String>,
+        mime: impl Into<String>,
+        data: Vec<u8>,
+    ) -> crate::Result<Uuid> {
+        let name = name.into();
+        if data.len() > MAX_ATTACHMENT_BYTES {
+            return Err(crate::Error::AttachmentTooLarge {
+                name,
+                size: data.len(),
+                max: MAX_ATTACHMENT_BYTES,
+            });
+        }
+        let total: usize = self.attachments.iter().map(Attachment::size).sum();
+        if total + data.len() > MAX_ITEM_ATTACHMENT_BYTES {
+            return Err(crate::Error::AttachmentTooLarge {
+                name,
+                size: total + data.len(),
+                max: MAX_ITEM_ATTACHMENT_BYTES,
+            });
+        }
+        let attachment = Attachment {
+            id: Uuid::new_v4(),
+            name,
+            mime: mime.into(),
+            data: SecretBytes::new(data),
+            added: now(),
+        };
+        let id = attachment.id;
+        self.attachments.push(attachment);
+        self.modified = now();
+        Ok(id)
+    }
+
+    pub fn attachment(&self, id: Uuid) -> Option<&Attachment> {
+        self.attachments.iter().find(|a| a.id == id)
+    }
+
+    pub fn remove_attachment(&mut self, id: Uuid) -> Option<Attachment> {
+        let pos = self.attachments.iter().position(|a| a.id == id)?;
+        self.modified = now();
+        Some(self.attachments.remove(pos))
+    }
+
+    // -- history -------------------------------------------------------------
+
+    /// This item as a history snapshot: itself, minus history and attachments.
+    pub(crate) fn snapshot(&self) -> Item {
+        let mut copy = self.clone();
+        copy.history = Vec::new();
+        copy.attachments = Vec::new();
+        copy
+    }
+
+    /// Whether two states differ in anything history exists to recover —
+    /// timestamps alone do not make a revision worth keeping.
+    pub(crate) fn content_differs(a: &Item, b: &Item) -> bool {
+        a.label != b.label
+            || a.kind != b.kind
+            || a.attributes != b.attributes
+            || a.secret != b.secret
+            || a.content_type != b.content_type
+            || a.fields.len() != b.fields.len()
+            || a.fields.iter().zip(&b.fields).any(|(x, y)| {
+                x.name != y.name || x.kind != y.kind || x.value != y.value
+            })
+            || a.tags != b.tags
+            || a.expires != b.expires
+    }
+
+    /// Capture the current state as a revision. Call *before* applying an
+    /// edit, so what lands in history is what the edit replaced.
+    ///
+    /// A state identical to the newest revision is not recorded twice, and
+    /// the bounds ([`MAX_REVISIONS`], [`HISTORY_BUDGET_BYTES`]) evict
+    /// oldest-first.
+    pub fn record_revision(&mut self) {
+        let snap = self.snapshot();
+        if let Some(last) = self.history.last()
+            && !Self::content_differs(&last.item, &snap)
+        {
+            return;
+        }
+        self.history.push(Revision {
+            saved: now(),
+            item: snap,
+        });
+        self.trim_history();
+    }
+
+    /// Enforce [`MAX_REVISIONS`] and [`HISTORY_BUDGET_BYTES`], oldest-first.
+    pub(crate) fn trim_history(&mut self) {
+        while self.history.len() > MAX_REVISIONS {
+            self.history.remove(0);
+        }
+        while self.history.len() > 1 && self.history_size() > HISTORY_BUDGET_BYTES {
+            self.history.remove(0);
+        }
+    }
+
+    fn history_size(&self) -> usize {
+        self.history
+            .iter()
+            .map(|r| serde_json::to_vec(&r.item).map(|v| v.len()).unwrap_or(0))
+            .sum()
+    }
+
+    /// Drop every recorded revision.
+    ///
+    /// The point of history is that a replaced value is recoverable — which
+    /// is exactly wrong after rotating a credential that leaked: the old one
+    /// would sit in the vault until eviction. This is the way to make a
+    /// rotation final, and it is not undoable.
+    pub fn forget_history(&mut self) -> usize {
+        let dropped = self.history.len();
+        self.history.clear();
+        if dropped > 0 {
+            self.modified = now();
+        }
+        dropped
+    }
+
+    /// Restore a revision by index into [`Item::history`].
+    ///
+    /// The state being replaced is recorded first, so a restore is itself
+    /// undoable. Attachments and identity (id, created) stay as they are —
+    /// a revision never carried them.
+    pub fn restore_revision(&mut self, index: usize) -> crate::Result<()> {
+        let Some(revision) = self.history.get(index).cloned() else {
+            return Err(crate::Error::Other(format!("no revision {index}")));
+        };
+        self.record_revision();
+        let Revision { item: prior, .. } = revision;
+        self.label = prior.label;
+        self.kind = prior.kind;
+        self.attributes = prior.attributes;
+        self.secret = prior.secret;
+        self.content_type = prior.content_type;
+        self.fields = prior.fields;
+        self.favorite = prior.favorite;
+        self.tags = prior.tags;
+        self.expires = prior.expires;
+        self.modified = now();
+        Ok(())
+    }
 }
 
 /// A named group of items that locks and unlocks as a unit.
@@ -488,11 +755,55 @@ impl Collection {
     }
 }
 
+/// A soft-deleted item, held outside every collection.
+///
+/// Trash is a separate list rather than a flag on [`Item`] so that nothing
+/// serving items — the Secret Service, search, the SSH agent — has to
+/// remember to filter it. A trashed item is invisible to all of them by
+/// construction, which is what the delete dialog promises `libsecret`
+/// clients; only the trash UI and the restore path ever see it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashedItem {
+    pub item: Item,
+    pub deleted: Timestamp,
+    /// The collection it came from, so restore puts it back where it lived.
+    pub collection: Uuid,
+}
+
+/// Preferences that belong to the vault, not to one frontend.
+///
+/// Stored inside the encrypted body so the daemon, the GUI and the CLI agree
+/// on them wherever the file goes — a retention window enforced by only one
+/// of three processes would not be a retention window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultSettings {
+    /// Days a trashed item survives before it is purged on unlock.
+    /// `None` keeps trash forever, until emptied by hand.
+    #[serde(default = "default_trash_retention")]
+    pub trash_retention_days: Option<u32>,
+}
+
+fn default_trash_retention() -> Option<u32> {
+    Some(30)
+}
+
+impl Default for VaultSettings {
+    fn default() -> Self {
+        Self {
+            trash_retention_days: default_trash_retention(),
+        }
+    }
+}
+
 /// Everything inside the encrypted body of a vault file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultData {
     #[serde(default)]
     pub collections: Vec<Collection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trash: Vec<TrashedItem>,
+    #[serde(default)]
+    pub settings: VaultSettings,
 }
 
 impl Default for VaultData {
@@ -502,6 +813,8 @@ impl Default for VaultData {
         // ReadAlias("default") and returning `/` there makes clients give up.
         Self {
             collections: vec![Collection::new("Login").with_alias("default")],
+            trash: Vec::new(),
+            settings: VaultSettings::default(),
         }
     }
 }
@@ -545,7 +858,10 @@ impl VaultData {
         self.collections.iter().map(|c| c.items.len()).sum()
     }
 
-    /// Remove an item from whichever collection holds it.
+    /// Remove an item from whichever collection holds it, permanently.
+    ///
+    /// Most callers want [`VaultData::trash_item`]; this is the path for
+    /// purging and for deletes that have already been through the trash.
     pub fn remove_item(&mut self, id: Uuid) -> Option<Item> {
         for c in &mut self.collections {
             if let Some(pos) = c.items.iter().position(|i| i.id == id) {
@@ -554,6 +870,72 @@ impl VaultData {
             }
         }
         None
+    }
+
+    // -- trash ---------------------------------------------------------------
+
+    /// Soft-delete: move an item out of its collection and into the trash.
+    ///
+    /// Returns the collection it came from, or `None` if no live item has
+    /// this id. To everything except the trash UI the item is now gone.
+    pub fn trash_item(&mut self, id: Uuid) -> Option<Uuid> {
+        for c in &mut self.collections {
+            if let Some(pos) = c.items.iter().position(|i| i.id == id) {
+                let collection = c.id;
+                let item = c.items.remove(pos);
+                c.modified = now();
+                self.trash.push(TrashedItem {
+                    item,
+                    deleted: now(),
+                    collection,
+                });
+                return Some(collection);
+            }
+        }
+        None
+    }
+
+    pub fn trashed(&self, id: Uuid) -> Option<&TrashedItem> {
+        self.trash.iter().find(|t| t.item.id == id)
+    }
+
+    /// Put a trashed item back. It returns to the collection it came from,
+    /// or to the default collection if that one no longer exists — restoring
+    /// into nowhere would just lose it a second time.
+    pub fn restore_item(&mut self, id: Uuid) -> Option<Uuid> {
+        let pos = self.trash.iter().position(|t| t.item.id == id)?;
+        let TrashedItem {
+            item, collection, ..
+        } = self.trash.remove(pos);
+        let target = if self.collection(collection).is_some() {
+            collection
+        } else {
+            self.default_collection_mut().id
+        };
+        let c = self
+            .collection_mut(target)
+            .expect("restore target was just resolved to an existing collection");
+        c.items.push(item);
+        c.modified = now();
+        Some(target)
+    }
+
+    /// Delete a trashed item for good.
+    pub fn purge_item(&mut self, id: Uuid) -> Option<Item> {
+        let pos = self.trash.iter().position(|t| t.item.id == id)?;
+        Some(self.trash.remove(pos).item)
+    }
+
+    /// Drop everything that has been in the trash longer than the vault's
+    /// retention window. Returns how many were purged. Runs on unlock.
+    pub fn purge_expired_trash(&mut self, at: Timestamp) -> usize {
+        let Some(days) = self.settings.trash_retention_days else {
+            return 0;
+        };
+        let cutoff = at.saturating_sub(u64::from(days) * 86_400);
+        let before = self.trash.len();
+        self.trash.retain(|t| t.deleted > cutoff);
+        before - self.trash.len()
     }
 }
 
@@ -680,5 +1062,82 @@ mod tests {
     fn default_vault_has_a_default_alias() {
         let v = VaultData::default();
         assert!(v.collection_by_alias("default").is_some());
+    }
+
+    #[test]
+    fn dates_roundtrip_and_reject_nonsense() {
+        for date in ["1970-01-01", "2000-02-29", "2026-08-27", "2038-01-19", "9999-12-31"] {
+            let ts = parse_date(date).expect(date);
+            assert_eq!(format_date(ts), date);
+            assert_eq!(ts % 86_400, 0, "not midnight UTC");
+        }
+        // Cross-checked against `datetime(2026, 8, 27, tzinfo=UTC).timestamp()`.
+        assert_eq!(parse_date("2026-08-27"), Some(1_787_788_800));
+        for bad in ["", "tomorrow", "2026-13-01", "2026-00-10", "2026-01-32", "1969-12-31"] {
+            assert!(parse_date(bad).is_none(), "accepted `{bad}`");
+        }
+    }
+
+    #[test]
+    fn history_dedupes_and_stays_bounded() {
+        let mut item = Item::new(ItemKind::Login, "X").with_secret("v0");
+        item.record_revision();
+        item.record_revision(); // unchanged: must not double up
+        assert_eq!(item.history.len(), 1);
+
+        for n in 1..=(MAX_REVISIONS + 5) {
+            item.secret = format!("v{n}").into();
+            item.record_revision();
+        }
+        assert_eq!(item.history.len(), MAX_REVISIONS, "history grew past its bound");
+        // The newest states survived; the oldest were evicted.
+        assert_eq!(
+            item.history.last().unwrap().item.secret.expose(),
+            format!("v{}", MAX_REVISIONS + 5)
+        );
+    }
+
+    #[test]
+    fn forgetting_history_leaves_the_current_value_alone() {
+        let mut item = Item::new(ItemKind::Login, "Bank").with_secret("leaked");
+        item.record_revision();
+        item.secret = "rotated".into();
+        item.record_revision();
+        assert_eq!(item.history.len(), 2);
+        assert!(
+            item.history.iter().any(|r| r.item.secret.expose() == "leaked"),
+            "the fixture should hold the leaked value"
+        );
+
+        assert_eq!(item.forget_history(), 2);
+        assert!(item.history.is_empty());
+        assert!(
+            !item.history.iter().any(|r| r.item.secret.expose() == "leaked"),
+            "the rotated-away value survived"
+        );
+        assert_eq!(item.secret.expose(), "rotated", "forgetting changed the secret");
+        // Idempotent, and does not touch `modified` when there was nothing.
+        let modified = item.modified;
+        assert_eq!(item.forget_history(), 0);
+        assert_eq!(item.modified, modified);
+    }
+
+    #[test]
+    fn trash_restore_falls_back_to_default_when_the_collection_is_gone() {
+        let mut data = VaultData::default();
+        let mut work = Collection::new("Work");
+        let item = Item::new(ItemKind::Login, "Work login");
+        let id = item.id;
+        work.items.push(item);
+        let work_id = work.id;
+        data.collections.push(work);
+
+        data.trash_item(id).unwrap();
+        data.collections.retain(|c| c.id != work_id);
+
+        let restored_to = data.restore_item(id).expect("restore failed");
+        assert_ne!(restored_to, work_id);
+        let (c, _) = data.find_item(id).expect("item not restored");
+        assert_eq!(c.alias.as_deref(), Some("default"));
     }
 }

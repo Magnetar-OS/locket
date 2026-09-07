@@ -72,6 +72,13 @@ pub enum Error {
     #[error("invalid TOTP secret: {0}")]
     Totp(String),
 
+    #[error("attachment `{name}` is {size} bytes; the limit is {max}")]
+    AttachmentTooLarge {
+        name: String,
+        size: usize,
+        max: usize,
+    },
+
     #[error("{0}")]
     Other(String),
 }

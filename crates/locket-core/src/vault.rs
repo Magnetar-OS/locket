@@ -1,6 +1,6 @@
 //! The on-disk vault file: envelope format, open/create, atomic save.
 //!
-//! # File layout (format 3)
+//! # File layout (format 4)
 //!
 //! JSON with base64 fields — inspectable on purpose, so a recovery tool never
 //! has to reverse a binary format.
@@ -8,7 +8,7 @@
 //! ```json
 //! {
 //!   "magic": "locket-vault",
-//!   "format": 3,
+//!   "format": 4,
 //!   "slots": [ { "id": "...", "label": "Passphrase", "factor": {...},
 //!                "wrapped_key": { "nonce": "b64", "ciphertext": "b64" } } ],
 //!   "collections": [ { "id": "...", "label": "Login", "alias": "default" } ],
@@ -26,8 +26,11 @@
 //! why a locked Secret Service has to be able to answer that.
 //!
 //! Older files are read and upgraded in place on the next save: format 1 — a
-//! single inline `kdf` + `wrapped_key` — becomes a one-slot format 2 file, and
-//! format 2 gains the collection index.
+//! single inline `kdf` + `wrapped_key` — becomes a one-slot format 2 file,
+//! format 2 gains the collection index, and format 3 becomes format 4. The
+//! envelope did not change between 3 and 4; the version exists so a build
+//! that predates trash, history and attachments refuses the file instead of
+//! opening it and silently stripping data it does not know about on save.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -44,7 +47,12 @@ use crate::{
 };
 
 pub const MAGIC: &str = "locket-vault";
-pub const FORMAT_VERSION: u16 = 3;
+/// The magic the project wrote before it was renamed. It is bound into every
+/// slot's and the body's AEAD context, so a vault created under it keeps it
+/// for life: rewriting the string would lock every existing slot out of the
+/// key, and re-sealing them needs every factor the vault is enrolled with.
+pub const LEGACY_MAGIC: &str = "passman-vault";
+pub const FORMAT_VERSION: u16 = 4;
 
 /// A base64-encoded (nonce, ciphertext) pair.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,7 +142,7 @@ pub struct VaultFile {
 
 impl VaultFile {
     fn validate(&self, path: &Path) -> Result<()> {
-        if self.magic != MAGIC {
+        if self.magic != MAGIC && self.magic != LEGACY_MAGIC {
             return Err(Error::NotAVault {
                 path: path.to_path_buf(),
             });
@@ -288,13 +296,23 @@ impl Vault {
 
     /// Create a brand-new vault with a single passphrase slot.
     pub fn create(path: impl Into<PathBuf>, passphrase: &str, params: KdfParams) -> Result<Self> {
+        Self::create_with_magic(path, passphrase, params, MAGIC)
+    }
+
+    /// [`Vault::create`] under a given magic; only tests want anything but [`MAGIC`].
+    fn create_with_magic(
+        path: impl Into<PathBuf>,
+        passphrase: &str,
+        params: KdfParams,
+        magic: &str,
+    ) -> Result<Self> {
         let path = path.into();
         let dek = SymKey::random()?;
 
-        let slot = Slot::new_passphrase("Passphrase", passphrase, params, &dek, MAGIC, FORMAT_VERSION)?;
+        let slot = Slot::new_passphrase("Passphrase", passphrase, params, &dek, magic, FORMAT_VERSION)?;
 
         let file = VaultFile {
-            magic: MAGIC.to_owned(),
+            magic: magic.to_owned(),
             format: FORMAT_VERSION,
             slots: vec![slot],
             collections: Vec::new(),
@@ -363,7 +381,7 @@ impl Vault {
                     .map(|k| k.params)
                     .unwrap_or_else(KdfParams::default),
                 &dek,
-                MAGIC,
+                &file.magic,
                 FORMAT_VERSION,
             )?;
             // Decrypt the body under the *old* AAD before switching format.
@@ -416,14 +434,21 @@ impl Vault {
             &file.body.ciphertext_bytes("body.ciphertext")?,
             &file.body_aad(),
         )?;
-        let data: VaultData = serde_json::from_slice(&plaintext)?;
+        let mut data: VaultData = serde_json::from_slice(&plaintext)?;
+        // Unlock is where the trash retention window is enforced: every
+        // frontend opens through here, so "30 days" means 30 days no matter
+        // which process gets to the vault first.
+        let purged = data.purge_expired_trash(crate::model::now());
+        if purged > 0 {
+            tracing::info!(purged, "purged trashed items past the retention window");
+        }
         let stamp = Stamp::of(&path);
         Ok(Self {
             path,
             file,
             dek,
             data,
-            dirty: false,
+            dirty: purged > 0,
             stamp,
         })
     }
@@ -532,7 +557,7 @@ impl Vault {
         factor: SlotFactor,
         kek: &SymKey,
     ) -> Result<Uuid> {
-        let slot = Slot::new_with_kek(label, factor, kek, &self.dek, MAGIC, self.file.format)?;
+        let slot = Slot::new_with_kek(label, factor, kek, &self.dek, &self.file.magic, self.file.format)?;
         let id = slot.id;
         self.file.slots.push(slot);
         self.dirty = true;
@@ -567,7 +592,7 @@ impl Vault {
             new_passphrase,
             params,
             &self.dek,
-            MAGIC,
+            &self.file.magic,
             self.file.format,
         )?;
         self.file
@@ -730,10 +755,99 @@ impl Vault {
         self.data_mut().remove_item(id)
     }
 
+    /// Soft-delete into the trash. See [`VaultData::trash_item`].
+    pub fn trash_item(&mut self, id: Uuid) -> Option<Uuid> {
+        self.data_mut().trash_item(id)
+    }
+
+    /// Restore from the trash. See [`VaultData::restore_item`].
+    pub fn restore_item(&mut self, id: Uuid) -> Option<Uuid> {
+        self.data_mut().restore_item(id)
+    }
+
+    /// Permanently delete a trashed item. See [`VaultData::purge_item`].
+    pub fn purge_item(&mut self, id: Uuid) -> Option<Item> {
+        self.data_mut().purge_item(id)
+    }
+
+    /// Edit an item with its prior state captured into history first.
+    ///
+    /// This is the mutation path for anything a person would call "editing" —
+    /// the GUI editor, `locket edit`, a Secret Service replace-on-store. Raw
+    /// [`Vault::item_mut`] stays available for changes that are not edits of
+    /// the item's content (bookkeeping like `favorite`).
+    pub fn edit_item<R>(
+        &mut self,
+        id: Uuid,
+        f: impl FnOnce(&mut Item) -> R,
+    ) -> Result<R> {
+        let item = self.item_mut(id).ok_or(Error::NoSuchItem(id))?;
+        item.record_revision();
+        let out = f(item);
+        item.touch();
+        Ok(out)
+    }
+
     pub fn add_collection(&mut self, collection: Collection) -> Uuid {
         let id = collection.id;
         self.data_mut().collections.push(collection);
         id
+    }
+
+    /// Merge another vault's decrypted contents into this one.
+    ///
+    /// See [`crate::merge`] for the rules. The other side is consumed: merge
+    /// is for reconciling two copies of the *same* vault after file sync
+    /// forked them, not for importing between unrelated vaults.
+    pub fn merge_from(&mut self, other: VaultData) -> crate::merge::MergeReport {
+        crate::merge::merge(self.data_mut(), other)
+    }
+
+    /// Decrypt another copy of *this* vault with the key already held.
+    ///
+    /// Two forks of one vault share a DEK — a passphrase change only rewraps
+    /// it — so the sibling a file synchroniser left behind opens without
+    /// asking for anything. A file sealed under a different key (a genuinely
+    /// unrelated vault) fails to authenticate, which is the correct answer:
+    /// merge is for forks, not for imports.
+    pub fn open_sibling(&self, path: &Path) -> Result<VaultData> {
+        let file = Self::read_file(path)?;
+        let plaintext = self.dek.open(
+            &file.body.nonce_bytes("body.nonce")?,
+            &file.body.ciphertext_bytes("body.ciphertext")?,
+            &file.body_aad(),
+        )?;
+        Ok(serde_json::from_slice(&plaintext)?)
+    }
+
+    /// Files beside this vault that look like a synchroniser's fork of it —
+    /// Syncthing's `name.sync-conflict-….vault` naming, matched on the stem.
+    pub fn sync_conflict_siblings(&self) -> Vec<PathBuf> {
+        let Some(dir) = self.path.parent() else {
+            return Vec::new();
+        };
+        let Some(stem) = self.path.file_stem().and_then(|s| s.to_str()) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with(stem)
+                                && name.contains(".sync-conflict")
+                                && name.ends_with(".vault")
+                        })
+            })
+            .collect();
+        found.sort();
+        found
     }
 }
 
@@ -843,6 +957,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(by_device.item(id).unwrap().secret.expose(), "shared");
+    }
+
+    /// The project used to be called passman, and that name is bound into the
+    /// AEAD context of every slot and of the body. A vault written under it
+    /// must open, keep its magic across a save, and seal anything new under
+    /// that magic rather than the current one — or a passphrase change or a
+    /// hardware enrolment would lock it out of its own key.
+    #[test]
+    fn a_vault_from_before_the_rename_opens_and_keeps_its_magic() {
+        let (_d, path) = tmp();
+        let params = KdfParams::insecure_fast();
+        let mut v = Vault::create_with_magic(&path, "pw", params, LEGACY_MAGIC).unwrap();
+        let id = v.add_item_default(Item::new(ItemKind::Login, "GitHub").with_secret("hunter2"));
+        v.save().unwrap();
+        drop(v);
+
+        let mut v = Vault::open(&path, "pw").unwrap();
+        assert_eq!(v.item(id).unwrap().secret.expose(), "hunter2");
+        v.change_passphrase("new", params).unwrap();
+        let device_key = SymKey::random().unwrap();
+        v.add_slot(
+            "TPM 2.0",
+            SlotFactor::Tpm2 {
+                sealed: base64_encode(b"opaque"),
+                parent: Default::default(),
+                pcrs: vec![],
+                with_pin: false,
+            },
+            &device_key,
+        )
+        .unwrap();
+        drop(v);
+
+        let on_disk: VaultFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.magic, LEGACY_MAGIC, "save rewrote the magic");
+        assert_eq!(on_disk.format, FORMAT_VERSION);
+
+        let by_passphrase = Vault::open(&path, "new").unwrap();
+        assert_eq!(by_passphrase.item(id).unwrap().secret.expose(), "hunter2");
+        let by_device = Vault::open_with(
+            &path,
+            &RawKeyOpener {
+                kind: SlotKind::Tpm2,
+                key: device_key,
+            },
+        )
+        .unwrap();
+        assert_eq!(by_device.item(id).unwrap().secret.expose(), "hunter2");
     }
 
     #[test]
@@ -1173,6 +1335,225 @@ mod tests {
             expected,
             "format 2's AAD changed; every existing vault would fail to open"
         );
+    }
+
+    /// A format 3 file — written by the last release — must open with the
+    /// current build and leave disk as a format 4 file on the next save.
+    #[test]
+    fn format_3_vaults_are_read_and_upgraded() {
+        let (_d, path) = tmp();
+
+        // Build a format 3 file the way the previous release did: slot AAD
+        // and body AAD both bound to format 3.
+        let dek = SymKey::random().unwrap();
+        let slot = crate::slots::Slot::new_passphrase(
+            "Passphrase",
+            "pw",
+            KdfParams::insecure_fast(),
+            &dek,
+            MAGIC,
+            3,
+        )
+        .unwrap();
+        let mut data = VaultData::default();
+        data.default_collection_mut()
+            .items
+            .push(Item::new(ItemKind::Login, "From format 3").with_secret("survives"));
+        let mut file = VaultFile {
+            magic: MAGIC.to_owned(),
+            format: 3,
+            slots: vec![slot],
+            collections: data
+                .collections
+                .iter()
+                .map(|c| CollectionIndex {
+                    id: c.id,
+                    label: c.label.clone(),
+                    alias: c.alias.clone(),
+                })
+                .collect(),
+            kdf: None,
+            wrapped_key: None,
+            body: SealedBlob {
+                nonce: String::new(),
+                ciphertext: String::new(),
+            },
+        };
+        let (bn, bct) = dek
+            .seal(&serde_json::to_vec(&data).unwrap(), &file.body_aad())
+            .unwrap();
+        file.body = SealedBlob::new(bn, bct);
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+
+        let mut v = Vault::open(&path, "pw").expect("a format 3 vault failed to open");
+        assert_eq!(v.data().item_count(), 1);
+        v.save().unwrap();
+        drop(v);
+
+        let on_disk = Vault::read_file(&path).unwrap();
+        assert_eq!(on_disk.format, FORMAT_VERSION, "save did not upgrade the format");
+        let reopened = Vault::open(&path, "pw").unwrap();
+        assert_eq!(
+            reopened.data().all_items().next().unwrap().1.secret.expose(),
+            "survives"
+        );
+    }
+
+    #[test]
+    fn a_trashed_item_survives_the_roundtrip_and_restores() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let id = v.add_item_default(Item::new(ItemKind::Login, "Doomed").with_secret("s"));
+        v.trash_item(id).expect("live item went to the trash");
+        assert!(v.item(id).is_none(), "trashed item still visible as live");
+        v.save().unwrap();
+        drop(v);
+
+        let mut v2 = Vault::open(&path, "pw").unwrap();
+        assert!(v2.item(id).is_none());
+        assert!(v2.data().trashed(id).is_some(), "trash was lost on the roundtrip");
+        v2.restore_item(id).expect("restore failed");
+        assert_eq!(v2.item(id).unwrap().secret.expose(), "s");
+        assert!(v2.data().trashed(id).is_none());
+    }
+
+    #[test]
+    fn trash_past_the_retention_window_is_purged_on_open() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let old = v.add_item_default(Item::new(ItemKind::Login, "Old"));
+        let recent = v.add_item_default(Item::new(ItemKind::Login, "Recent"));
+        v.trash_item(old);
+        v.trash_item(recent);
+        // Backdate one deletion past the 30-day default window.
+        v.data_mut()
+            .trash
+            .iter_mut()
+            .find(|t| t.item.id == old)
+            .unwrap()
+            .deleted = crate::model::now() - 31 * 86_400;
+        v.save().unwrap();
+        drop(v);
+
+        let v2 = Vault::open(&path, "pw").unwrap();
+        assert!(v2.data().trashed(old).is_none(), "expired trash survived unlock");
+        assert!(v2.data().trashed(recent).is_some(), "fresh trash was purged");
+        assert!(v2.is_dirty(), "a purge must reach disk on the next save");
+    }
+
+    #[test]
+    fn editing_through_edit_item_records_history_and_restores() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let id = v.add_item_default(Item::new(ItemKind::Login, "Site").with_secret("first"));
+
+        v.edit_item(id, |item| item.secret = "second".into()).unwrap();
+        v.edit_item(id, |item| item.secret = "third".into()).unwrap();
+        v.save().unwrap();
+        drop(v);
+
+        let mut v2 = Vault::open(&path, "pw").unwrap();
+        let item = v2.item(id).unwrap();
+        assert_eq!(item.secret.expose(), "third");
+        assert_eq!(item.history.len(), 2, "history was lost on the roundtrip");
+        assert_eq!(item.history[0].item.secret.expose(), "first");
+        assert_eq!(item.history[1].item.secret.expose(), "second");
+
+        v2.edit_item(id, |item| item.restore_revision(0).unwrap()).unwrap();
+        let item = v2.item(id).unwrap();
+        assert_eq!(item.secret.expose(), "first", "restore did not take");
+        assert!(
+            item.history.iter().any(|r| r.item.secret.expose() == "third"),
+            "the state a restore replaced must itself be recoverable"
+        );
+    }
+
+    #[test]
+    fn an_attachment_survives_the_roundtrip_and_never_hits_disk_in_the_clear() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let id = v.add_item_default(Item::new(ItemKind::Login, "Bank"));
+        // Recognisable, non-UTF-8-safe bytes: a fake PDF header plus a canary.
+        let blob = b"%PDF-1.7 recovery-codes-canary \xff\xfe\x00".to_vec();
+        let attachment_id = v
+            .item_mut(id)
+            .unwrap()
+            .add_attachment("recovery.pdf", "application/pdf", blob.clone())
+            .unwrap();
+        v.save().unwrap();
+        drop(v);
+
+        let raw = std::fs::read(&path).unwrap();
+        let raw_text = String::from_utf8_lossy(&raw);
+        assert!(!raw_text.contains("recovery-codes-canary"), "attachment bytes leaked");
+        assert!(!raw_text.contains("recovery.pdf"), "attachment name leaked");
+
+        let v2 = Vault::open(&path, "pw").unwrap();
+        let attachment = v2.item(id).unwrap().attachment(attachment_id).unwrap();
+        assert_eq!(attachment.data.expose(), blob.as_slice());
+        assert_eq!(attachment.name, "recovery.pdf");
+    }
+
+    #[test]
+    fn an_oversized_attachment_is_refused_with_the_limit_stated() {
+        let mut item = Item::new(ItemKind::Login, "X");
+        let err = item
+            .add_attachment(
+                "huge.bin",
+                "application/octet-stream",
+                vec![0u8; crate::model::MAX_ATTACHMENT_BYTES + 1],
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::AttachmentTooLarge { .. }), "{err:?}");
+        assert!(item.attachments.is_empty());
+    }
+
+    #[test]
+    fn an_expired_item_knows_it_and_an_unexpiring_one_does_not() {
+        let now = crate::model::now();
+        let mut item = Item::new(ItemKind::Certificate, "TLS cert");
+        assert!(!item.is_expired(now));
+        item.expires = Some(now - 1);
+        assert!(item.is_expired(now));
+        item.expires = Some(now + 100);
+        assert!(!item.is_expired(now));
+        assert!(item.expires_within(now, 200));
+        assert!(!item.expires_within(now, 50));
+    }
+
+    #[test]
+    fn a_sync_conflict_sibling_opens_with_the_held_key_and_merges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("default.vault");
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        v.add_item_default(Item::new(ItemKind::Login, "Shared").with_secret("s"));
+        v.save().unwrap();
+
+        // The synchroniser's fork: a byte copy under its conflict name.
+        let fork = dir
+            .path()
+            .join("default.sync-conflict-20260827-101010-ABCDEF.vault");
+        std::fs::copy(&path, &fork).unwrap();
+
+        assert_eq!(v.sync_conflict_siblings(), vec![fork.clone()]);
+
+        // Edit the fork through its own handle, as the other machine would.
+        let mut forked = Vault::open(&fork, "pw").unwrap();
+        forked.add_item_default(Item::new(ItemKind::Login, "From the fork").with_secret("f"));
+        forked.save().unwrap();
+        drop(forked);
+
+        // No passphrase involved: the held DEK opens the sibling.
+        let other = v.open_sibling(&fork).expect("sibling did not open with the held key");
+        let report = v.merge_from(other);
+        assert_eq!(report.added, 1);
+        assert!(v.data().all_items().any(|(_, i)| i.label == "From the fork"));
+
+        // An unrelated vault is not a sibling, and must not decrypt.
+        let stranger_path = dir.path().join("other.vault");
+        let mut stranger = Vault::create(&stranger_path, "pw", KdfParams::insecure_fast()).unwrap();
+        stranger.save().unwrap();
+        assert!(v.open_sibling(&stranger_path).is_err(), "a foreign vault decrypted");
     }
 
     /// Format 1 files must keep opening, and be upgraded on save.
