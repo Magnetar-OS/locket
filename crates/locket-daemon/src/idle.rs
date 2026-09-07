@@ -9,6 +9,60 @@ use std::sync::Arc;
 use futures_util::StreamExt as _;
 use locket_secret::service::SharedState;
 
+/// `org.freedesktop.Notifications`, the one call we make.
+#[zbus::proxy(
+    interface = "org.freedesktop.Notifications",
+    default_service = "org.freedesktop.Notifications",
+    default_path = "/org/freedesktop/Notifications"
+)]
+trait Notifications {
+    #[allow(clippy::too_many_arguments)]
+    fn notify(
+        &self,
+        app_name: &str,
+        replaces_id: u32,
+        app_icon: &str,
+        summary: &str,
+        body: &str,
+        actions: Vec<&str>,
+        hints: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+        expire_timeout: i32,
+    ) -> zbus::Result<u32>;
+}
+
+/// Tell the desktop the vault just locked, and why.
+///
+/// The vault locking is the one daemon event that changes what every other
+/// application can do, and it happens with no window on screen to say so —
+/// an application "forgetting" its login half an hour later is the silent
+/// failure this line of text prevents. Best effort: a session without a
+/// notification service just gets the journal line.
+///
+/// The body carries the reason and nothing else — no labels, no counts,
+/// nothing read out of the vault.
+async fn notify_locked(why: &str) {
+    let result = async {
+        let connection = zbus::Connection::session().await?;
+        let proxy = NotificationsProxy::new(&connection).await?;
+        proxy
+            .notify(
+                "locket",
+                0,
+                "io.github.entro314labs.Locket",
+                "Vault locked",
+                why,
+                Vec::new(),
+                Default::default(),
+                5_000,
+            )
+            .await
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::debug!("could not send the lock notification: {e}");
+    }
+}
+
 /// Poll interval for the idle check.
 ///
 /// Coarse on purpose. The deadline moves every time anything touches the
@@ -25,6 +79,7 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(15);
 pub async fn auto_lock(
     state: SharedState,
     agent: Option<Arc<std::sync::Mutex<locket_agent::Agent>>>,
+    notify: bool,
 ) {
     loop {
         tokio::time::sleep(TICK).await;
@@ -55,6 +110,10 @@ pub async fn auto_lock(
         if idle >= seconds {
             tracing::info!(idle, "locking the vault after idling");
             state.lock().await.close_vault();
+            if notify {
+                notify_locked("Locked after being idle. Unlock in locket when you need it.")
+                    .await;
+            }
         }
     }
 }
@@ -103,7 +162,7 @@ trait LoginSession {
 /// `Lock` signal is what `loginctl lock-session` sends, while a compositor
 /// that locks its own screen announces it by setting `LockedHint`. Missing
 /// either would mean a locked screen with a readable vault behind it.
-pub async fn lock_with_session(state: SharedState) -> zbus::Result<()> {
+pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result<()> {
     let connection = zbus::Connection::system().await?;
     let manager = LoginManagerProxy::new(&connection).await?;
 
@@ -136,15 +195,15 @@ pub async fn lock_with_session(state: SharedState) -> zbus::Result<()> {
         tokio::select! {
             Some(signal) = sleeping.next() => {
                 if signal.args().map(|a| a.start).unwrap_or(false) {
-                    lock(&state, "the machine is suspending").await;
+                    lock(&state, "the machine is suspending", notify).await;
                 }
             }
             Some(_) = async { match locks.as_mut() { Some(s) => s.next().await, None => None } } => {
-                lock(&state, "the session was locked").await;
+                lock(&state, "the session was locked", notify).await;
             }
             Some(change) = async { match hints.as_mut() { Some(s) => s.next().await, None => None } } => {
                 if change.get().await.unwrap_or(false) {
-                    lock(&state, "the screen locker came up").await;
+                    lock(&state, "the screen locker came up", notify).await;
                 }
             }
             else => return Ok(()),
@@ -152,13 +211,20 @@ pub async fn lock_with_session(state: SharedState) -> zbus::Result<()> {
     }
 }
 
-async fn lock(state: &SharedState, why: &str) {
-    let mut guard = state.lock().await;
-    if guard.is_locked() {
-        return;
+async fn lock(state: &SharedState, why: &str, notify: bool) {
+    {
+        let mut guard = state.lock().await;
+        if guard.is_locked() {
+            return;
+        }
+        tracing::info!("locking the vault: {why}");
+        guard.close_vault();
     }
-    tracing::info!("locking the vault: {why}");
-    guard.close_vault();
+    // After suspend the notification lands on resume, which is exactly when
+    // someone would wonder why their applications re-ask for things.
+    if notify {
+        notify_locked(&format!("Locked because {why}.")).await;
+    }
 }
 
 /// This process's logind session, by id if the environment names one and by

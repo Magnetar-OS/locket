@@ -87,10 +87,19 @@ struct Args {
     /// readable by anything on the session bus is not a locked screen.
     #[arg(long)]
     no_lock_on_idle_session: bool,
+
+    /// Do not send a desktop notification when the vault locks.
+    ///
+    /// On by default: the vault locking changes what every other application
+    /// can do, and it happens with no window on screen to say so. The
+    /// notification carries the reason and nothing from the vault.
+    #[arg(long)]
+    no_lock_notifications: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    harden();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -215,13 +224,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // with the rest of the desktop's settings. The task runs either way, so
     // switching auto-lock on in Settings takes effect without a restart.
     state.lock().await.set_auto_lock_seconds(args.auto_lock);
-    tokio::spawn(idle::auto_lock(state.clone(), ssh_agent_handle.clone()));
+    let notify = !args.no_lock_notifications;
+    tokio::spawn(idle::auto_lock(
+        state.clone(),
+        ssh_agent_handle.clone(),
+        notify,
+    ));
     if !args.no_lock_on_idle_session {
         let state = state.clone();
         tokio::spawn(async move {
             // A missing logind is not an error worth failing startup over —
             // the daemon still works, it just cannot follow the session.
-            if let Err(e) = idle::lock_with_session(state).await {
+            if let Err(e) = idle::lock_with_session(state, notify).await {
                 tracing::warn!("not following the session's lock state: {e}");
             }
         });
@@ -394,6 +408,57 @@ fn token_signer() -> Option<Arc<dyn locket_agent::sk::TokenSigner>> {
 #[cfg(not(feature = "fido"))]
 fn token_signer() -> Option<Arc<dyn locket_agent::sk::TokenSigner>> {
     None
+}
+
+/// Process hardening, before anything secret exists to protect.
+///
+/// This is the process that holds the only unlocked copy of the
+/// data-encryption key, so:
+///
+/// - `PR_SET_DUMPABLE(0)`: no core dumps, and no `ptrace` /
+///   `process_vm_readv` from other processes running as this user — which is
+///   every process in the session, including whatever a browser just
+///   downloaded and ran.
+/// - `mlockall(MCL_CURRENT | MCL_FUTURE)`: nothing this process maps reaches
+///   swap, so the DEK cannot outlive the session on disk.
+///
+/// Both are best-effort with a log line, not preconditions: `mlockall` can
+/// exceed `RLIMIT_MEMLOCK` on a locked-down system, and a daemon that
+/// refuses to serve secrets because it could not lock memory would fail the
+/// user harder than swap ever would. `zeroize` on drop is unaffected either
+/// way.
+///
+/// This is the fallback half of the roadmap's key-residence work; moving the
+/// DEK itself into `memfd_secret` remains open (see ROADMAP.md, milestone 2).
+fn harden() {
+    // Safety: these calls take integers or a plain struct by pointer and
+    // affect solely this process's own attributes.
+    unsafe {
+        if libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 {
+            eprintln!("locketd: could not disable core dumps and ptrace attach");
+        }
+        // The default RLIMIT_MEMLOCK (8 MiB on most distros) cannot hold a
+        // whole tokio process, so lift the soft limit to whatever the hard
+        // limit allows before asking. The installed unit sets
+        // LimitMEMLOCK=infinity; elsewhere this locks as much as the admin
+        // permitted and says so.
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut lim) == 0 && lim.rlim_cur < lim.rlim_max {
+            lim.rlim_cur = lim.rlim_max;
+            let _ = libc::setrlimit(libc::RLIMIT_MEMLOCK, &lim);
+        }
+        if libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) != 0 {
+            // Runs before tracing is up, so plain stderr; the journal gets it.
+            eprintln!(
+                "locketd: mlockall failed (RLIMIT_MEMLOCK {} bytes is too small); \
+                 memory may reach swap. Core dumps and ptrace are still blocked.",
+                lim.rlim_max
+            );
+        }
+    }
 }
 
 async fn terminate() {

@@ -29,7 +29,8 @@ RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-write
+# ProtectHome is left unset: the vault lives under $HOME, and the only
+# values that would restrict it (read-only, tmpfs) would break the daemon.
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -39,6 +40,10 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 # Keep the vault out of a core dump.
 LimitCORE=0
+# Let the daemon mlockall itself so the unlocked key never reaches swap.
+# Takes effect where the user manager's own hard limit allows it; the daemon
+# logs what it actually got. Pairs with the PR_SET_DUMPABLE it sets itself.
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=graphical-session.target

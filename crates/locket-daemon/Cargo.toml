@@ -29,6 +29,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
 uuid.workspace = true
+# For the process hardening at startup: mlockall and PR_SET_DUMPABLE.
+libc = "0.2"
 clap.workspace = true
 dirs.workspace = true
 rpassword = "7"
