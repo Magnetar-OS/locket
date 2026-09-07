@@ -11,8 +11,12 @@
 //! The sequence is `username → Tab → password`, with no Enter on the end:
 //! submitting a form nobody has reviewed is a decision, not a keystroke.
 
-use ashpd::desktop::PersistMode;
-use ashpd::desktop::remote_desktop::{DeviceType, KeyState, RemoteDesktop};
+use ashpd::desktop::remote_desktop::{
+    DeviceType, KeyState, NotifyKeyboardKeysymOptions, RemoteDesktop, SelectDevicesOptions,
+    StartOptions,
+};
+use ashpd::desktop::{PersistMode, Session};
+use ashpd::enumflags2::BitFlags;
 use locket_core::SecretString;
 
 /// How long the person has to click the target field, after the portal has
@@ -51,18 +55,21 @@ pub async fn type_credentials(
     secret: SecretString,
 ) -> Result<(), String> {
     let proxy = RemoteDesktop::new().await.map_err(portal_error)?;
-    let session = proxy.create_session().await.map_err(portal_error)?;
+    let session = proxy
+        .create_session(Default::default())
+        .await
+        .map_err(portal_error)?;
     proxy
         .select_devices(
             &session,
-            DeviceType::Keyboard.into(),
-            None,
-            PersistMode::Application,
+            SelectDevicesOptions::default()
+                .set_devices(BitFlags::from(DeviceType::Keyboard))
+                .set_persist_mode(PersistMode::Application),
         )
         .await
         .map_err(portal_error)?;
     let devices = proxy
-        .start(&session, None)
+        .start(&session, None, StartOptions::default())
         .await
         .map_err(portal_error)?
         .response()
@@ -84,8 +91,8 @@ pub async fn type_credentials(
 }
 
 async fn type_text(
-    proxy: &RemoteDesktop<'_>,
-    session: &ashpd::desktop::Session<'_, RemoteDesktop<'_>>,
+    proxy: &RemoteDesktop,
+    session: &Session<RemoteDesktop>,
     text: &str,
 ) -> Result<(), String> {
     for c in text.chars() {
@@ -97,16 +104,26 @@ async fn type_text(
 }
 
 async fn press(
-    proxy: &RemoteDesktop<'_>,
-    session: &ashpd::desktop::Session<'_, RemoteDesktop<'_>>,
+    proxy: &RemoteDesktop,
+    session: &Session<RemoteDesktop>,
     keysym: i32,
 ) -> Result<(), String> {
     proxy
-        .notify_keyboard_keysym(session, keysym, KeyState::Pressed)
+        .notify_keyboard_keysym(
+            session,
+            keysym,
+            KeyState::Pressed,
+            NotifyKeyboardKeysymOptions::default(),
+        )
         .await
         .map_err(portal_error)?;
     proxy
-        .notify_keyboard_keysym(session, keysym, KeyState::Released)
+        .notify_keyboard_keysym(
+            session,
+            keysym,
+            KeyState::Released,
+            NotifyKeyboardKeysymOptions::default(),
+        )
         .await
         .map_err(portal_error)?;
     tokio::time::sleep(std::time::Duration::from_millis(KEY_DELAY_MS)).await;

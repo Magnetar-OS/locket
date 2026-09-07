@@ -83,7 +83,15 @@ zxcvbn = "3.1"
 # The one network client in the workspace, used only by locket-hibp for the
 # opt-in Have I Been Pwned range check. rustls so nothing links OpenSSL for
 # it; no default features so no cookie jar, no proxy discovery, no surprises.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
+# reqwest 0.13 split the old `rustls-tls` feature: `rustls` brings the stack,
+# and the trust anchors are now chosen separately. `rustls-native-certs` uses
+# the system store, so an enterprise or user-added root works here the same
+# way it does for every other program on the machine.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "rustls-native-certs",
+    "http2",
+] }
 
 # --- SSH -------------------------------------------------------------------
 # Same generation as ssh-key's own `rsa`, so an RSA keypair converts across
@@ -104,7 +112,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = { version = "2", features = ["serde"] }
-dirs = "6"
+dirs = "7"
 clap = { version = "4", features = ["derive"] }
 
 [profile.release]
