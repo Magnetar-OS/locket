@@ -44,7 +44,28 @@ pub struct Applet {
     /// Where to ask for an activation token. `None` until the subscription
     /// has started, or on a compositor without the protocol.
     token: Option<calloop::channel::Sender<TokenRequest>>,
+
+    /// The quick-search box's contents, and what it last found. Entries are
+    /// metadata only — see [`locket_secret::quick`]; a secret is fetched at
+    /// the moment Copy is pressed and never held here.
+    query: String,
+    results: Vec<locket_secret::quick::Entry>,
+    /// What we last put on the clipboard, so the clear timer can check it is
+    /// still ours before wiping it — the same rule the main window follows.
+    clipboard_copy: Option<String>,
+    notice: Option<String>,
 }
+
+/// How many results the popup will show. A panel popup is not a browser;
+/// past a handful the answer is to open the window and search properly.
+const MAX_RESULTS: usize = 8;
+
+/// Seconds before a copied secret is taken off the clipboard.
+///
+/// The applet cannot read the desktop's locket settings — those live in the
+/// main application's `cosmic-config` store — so this is the same default
+/// the window ships with rather than a second, quieter policy.
+const CLIPBOARD_CLEAR_SECS: u64 = 30;
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -55,6 +76,13 @@ pub enum Message {
     Lock,
     OpenApp,
     Token(TokenUpdate),
+    SearchChanged(String),
+    Searched(Vec<locket_secret::quick::Entry>),
+    /// Copy the secret behind this path; the label is for the notice.
+    Copy(String, String),
+    Copied(String, Option<String>),
+    ClearClipboard,
+    ClipboardChecked(Option<String>),
 }
 
 /// Launch the main window, handing on an activation token if we have one.
@@ -118,6 +146,10 @@ impl cosmic::Application for Applet {
             popup: None,
             status: None,
             token: None,
+            query: String::new(),
+            results: Vec::new(),
+            clipboard_copy: None,
+            notice: None,
         };
         // Ask immediately so the icon is right before the first tick.
         (
@@ -140,6 +172,12 @@ impl cosmic::Application for Applet {
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
                     self.popup = None;
+                    // Reopening with the last query still in the box would
+                    // say what somebody was looking for to whoever opens it
+                    // next.
+                    self.query.clear();
+                    self.results.clear();
+                    self.notice = None;
                 }
             }
             Message::Tick => {
@@ -149,6 +187,9 @@ impl cosmic::Application for Applet {
             }
             Message::Status(status) => self.status = status,
             Message::Lock => {
+                self.results.clear();
+                self.query.clear();
+                self.notice = None;
                 return cosmic::task::future(async {
                     locket_secret::client::lock().await;
                     // Re-read rather than assuming the lock took.
@@ -171,6 +212,67 @@ impl cosmic::Application for Applet {
                         }
                     }
                     None => return launch(None),
+                }
+            }
+
+            Message::SearchChanged(query) => {
+                self.query = query.clone();
+                self.notice = None;
+                // Searching only reads labels, so it is cheap enough to redo
+                // per keystroke; a locked vault answers with nothing, which
+                // the view reports as locked rather than as "no matches".
+                if !self.status.is_some_and(|s| !s.locked) {
+                    self.results.clear();
+                    return Task::none();
+                }
+                return cosmic::task::future(async move {
+                    Message::Searched(locket_secret::quick::search(&query, MAX_RESULTS).await)
+                });
+            }
+
+            Message::Searched(results) => self.results = results,
+
+            Message::Copy(path, label) => {
+                return cosmic::task::future(async move {
+                    Message::Copied(label, locket_secret::quick::secret_of(&path).await)
+                });
+            }
+
+            Message::Copied(label, secret) => {
+                let Some(secret) = secret else {
+                    self.notice = Some(fl!("copy-failed", label = label));
+                    return Task::none();
+                };
+                self.notice = Some(fl!(
+                    "copied",
+                    label = label,
+                    seconds = CLIPBOARD_CLEAR_SECS
+                ));
+                self.clipboard_copy = Some(secret.clone());
+                let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
+                let clear = cosmic::task::future(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(CLIPBOARD_CLEAR_SECS)).await;
+                    Message::ClearClipboard
+                });
+                return Task::batch([copy, clear]);
+            }
+
+            Message::ClearClipboard => {
+                // Look before wiping: the person may have copied something of
+                // their own since, and clearing that would be its own small
+                // disaster. Same check the main window makes.
+                return cosmic::iced::clipboard::read()
+                    .map(|current| cosmic::Action::App(Message::ClipboardChecked(current)));
+            }
+
+            Message::ClipboardChecked(current) => {
+                let ours = self.clipboard_copy.take();
+                if current.is_some() && current == ours {
+                    // Overwrite rather than clear: some clipboard managers
+                    // treat an empty payload as "no change".
+                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
+                        String::new(),
+                    );
                 }
             }
 
@@ -254,7 +356,7 @@ impl Applet {
         let unlocked = self.status.is_some_and(|s| !s.locked);
         let running = self.status.is_some();
 
-        let mut column = widget::column::with_capacity(4)
+        let mut column = widget::column::with_capacity(8 + MAX_RESULTS)
             .spacing(spacing.space_xs)
             .padding(spacing.space_s)
             .push(widget::text::body(self.summary()));
@@ -264,6 +366,57 @@ impl Applet {
         }
 
         column = column.push(widget::divider::horizontal::default());
+
+        // Quick search: the 90% of interactions that do not deserve a window.
+        // Only while unlocked — a search box over a locked vault would return
+        // nothing and read as an empty vault rather than a locked one.
+        if unlocked {
+            column = column.push(
+                widget::text_input(fl!("search-placeholder"), &self.query)
+                    .on_input(Message::SearchChanged)
+                    .width(Length::Fill),
+            );
+
+            if let Some(notice) = &self.notice {
+                column = column.push(widget::text::caption(notice.clone()));
+            }
+
+            for entry in &self.results {
+                let subtitle = if entry.subtitle.is_empty() {
+                    entry.label.clone()
+                } else {
+                    entry.subtitle.clone()
+                };
+                column = column.push(
+                    widget::row::with_capacity(2)
+                        .spacing(spacing.space_xs)
+                        .align_y(cosmic::iced::Alignment::Center)
+                        .push(
+                            widget::column::with_capacity(2)
+                                .push(widget::text::body(entry.label.clone()))
+                                .push(widget::text::caption(subtitle))
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            widget::button::standard(fl!("copy")).on_press(Message::Copy(
+                                entry.path.clone(),
+                                entry.label.clone(),
+                            )),
+                        ),
+                );
+            }
+
+            if self.results.is_empty() && !self.query.is_empty() {
+                column = column.push(widget::text::caption(fl!(
+                    "search-no-match",
+                    query = self.query.clone()
+                )));
+            }
+
+            column = column.push(widget::divider::horizontal::default());
+        } else if running {
+            column = column.push(widget::text::caption(fl!("search-locked")));
+        }
 
         if unlocked {
             column = column.push(
