@@ -1,0 +1,63 @@
+# Fuzz targets for the four places untrusted bytes enter locket:
+# the vault file parser, the SSH agent's wire protocol, the Secret Service
+# session transport, and the importers.
+#
+#   cargo +nightly fuzz run vault_file -- -max_total_time=60
+#
+# Its own workspace on purpose: libfuzzer's build flags must not leak into
+# the real tree, and the real lockfile must not resolve around it.
+
+[package]
+name = "locket-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+locket-core = { path = "../crates/locket-core", default-features = false }
+locket-secret = { path = "../crates/locket-secret" }
+locket-agent = { path = "../crates/locket-agent", default-features = false }
+locket-import = { path = "../crates/locket-import" }
+
+[[bin]]
+name = "vault_file"
+path = "fuzz_targets/vault_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_wire"
+path = "fuzz_targets/agent_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secret_session"
+path = "fuzz_targets/secret_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "totp"
+path = "fuzz_targets/totp.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dotenv"
+path = "fuzz_targets/dotenv.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

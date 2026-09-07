@@ -61,6 +61,35 @@ jobs:
       - run: cargo build -p locket-cosmic -p locket-applet
       - run: cargo test -p locket-cosmic -p locket-applet
 
+  # A bounded pass over the fuzz targets: sixty seconds each over the four
+  # places untrusted bytes enter (vault file, agent wire, session transport,
+  # importers). Not a soak — that runs longer and elsewhere — but enough to
+  # catch a parser regression the day it lands, and to keep the targets
+  # themselves compiling.
+  fuzz:
+    name: Fuzz (bounded)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libtss2-dev libudev-dev libssl-dev
+      - name: Nightly toolchain for libfuzzer
+        run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run each target for a minute
+        working-directory: fuzz
+        run: |
+          for target in vault_file agent_wire secret_session totp dotenv; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=60 -timeout=10
+          done
+
   # Cheap checks that catch the things nobody notices until a packager does.
   packaging:
     name: Metadata
