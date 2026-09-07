@@ -130,6 +130,24 @@ short line of symbols. The unlock screen also gained *Open a different
 vault…*, because the menu bar is hidden while locked and somebody whose
 vault lives elsewhere was otherwise stuck.
 
+**Locking with the session actually works now.** Following logind's lock
+signal was written, shipped and silently doing nothing in the arrangement
+the unit creates: a systemd *user* unit runs under `user@<uid>.service`,
+which logind classes as a manager session, so neither `XDG_SESSION_ID` nor
+`GetSessionByPID` resolved a session. The daemon logged one warning and
+watched suspend only — a locked screen left every secret readable by
+anything on the session bus. It now asks logind for the user's display
+session as a third fallback, and logs the session it followed, because the
+only previous sign of failure was a warning nobody reads.
+
+**The browser host installs without an extension id.** `--browser` used to
+demand one, but only Chromium-family browsers key on an id, and that id
+does not exist until the extension has been loaded unpacked — so Firefox
+users had to invent a value. It is optional now, and the manifest written
+without one omits `allowed_origins` rather than claiming an empty origin
+a Chromium browser would silently ignore. Vivaldi and Edge were missing
+from the list of browsers written to; both are there now.
+
 **The vault says when it locks.** Locking on idle, on session lock and on
 suspend already existed; now each sends a desktop notification naming the
 reason — nothing from the vault, just why — so an application quietly

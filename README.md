@@ -828,7 +828,9 @@ prefers.
 ## Browser autofill
 
 ```sh
-# load extension/ unpacked, then pass the id chrome://extensions shows you
+scripts/locket-setup --browser                  # Firefox: no id needed
+# Chromium, Brave, Vivaldi, Edge key on an extension id, which only exists
+# once the extension has been loaded unpacked. Pass it then:
 scripts/locket-setup --browser <extension-id>
 ```
 

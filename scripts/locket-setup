@@ -47,6 +47,7 @@ VAULT="${LOCKET_VAULT:-$HOME/.local/share/locket/default.vault}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY=0
 DO_PAM=0
+DO_BROWSER=0
 EXT_ID=""
 ACTION=install
 
@@ -74,7 +75,10 @@ locket-setup — install locket as the system secret store
 
   --pam           also install pam_locket.so and add it to the login stack
                   (needs root; unlocks the vault at login)
-  --browser ID    install the native messaging host for a browser extension.
+  --browser [ID]  install the native messaging host for the browser extension.
+                  The id is only needed by Chromium-family browsers, and is
+                  not knowable until the extension has been loaded unpacked;
+                  Firefox works without it.
                   ID is the unpacked extension's id from chrome://extensions
                   (Firefox uses the id baked into the manifest and ignores it)
   --uninstall     remove everything and hand the Secret Service back to
@@ -111,7 +115,17 @@ fi
 while [ $# -gt 0 ]; do
     case "$1" in
         --pam) DO_PAM=1 ;;
-        --browser) shift; EXT_ID="${1:-}"; [ -n "$EXT_ID" ] || die "--browser needs an extension id" ;;
+        --browser)
+            DO_BROWSER=1
+            # The id is optional: Firefox matches on the id baked into the
+            # extension's own manifest, so it needs nothing from here. Only
+            # the Chromium family keys on an id, and that one is not knowable
+            # until the extension has been loaded unpacked.
+            case "${2:-}" in
+                ''|-*) ;;
+                *) shift; EXT_ID="$1" ;;
+            esac
+            ;;
         --uninstall) ACTION=uninstall ;;
         --status) ACTION=status ;;
         --dry-run) DRY=1 ;;
@@ -371,7 +385,7 @@ install_files() {
 
     install_secret_portal
 
-    if [ -n "$EXT_ID" ]; then
+    if [ "$DO_BROWSER" = 1 ]; then
         say "Installing the native messaging host"
         run env -C "$REPO" cargo build --release -p locket-nmh || die "host build failed"
         run install -m 755 "$REPO/target/release/locket-native-host" "$BIN_DIR/locket-native-host"
@@ -381,6 +395,8 @@ install_files() {
         for d in "$HOME/.config/google-chrome/NativeMessagingHosts" \
                  "$HOME/.config/chromium/NativeMessagingHosts" \
                  "$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts" \
+                 "$HOME/.config/vivaldi/NativeMessagingHosts" \
+                 "$HOME/.config/microsoft-edge/NativeMessagingHosts" \
                  "$HOME/.mozilla/native-messaging-hosts"; do
             if [ "$DRY" = 1 ]; then
                 printf '   would write %s/io.github.entro314labs.locket.json\n' "$d"
@@ -391,8 +407,22 @@ install_files() {
                 -e "s|@EXTENSION_ID@|$EXT_ID|" \
                 "$REPO/res/native-messaging-host.json.in" \
                 > "$d/io.github.entro314labs.locket.json"
+            # Without an id there is no origin to allow, and a manifest
+            # claiming `chrome-extension:///` would be a lie a Chromium
+            # browser silently ignores. Drop the key instead, which leaves a
+            # manifest Firefox uses and Chromium correctly refuses.
+            if [ -z "$EXT_ID" ]; then
+                grep -v '"allowed_origins"' "$d/io.github.entro314labs.locket.json" \
+                    > "$d/.locket.json.tmp" \
+                    && mv "$d/.locket.json.tmp" "$d/io.github.entro314labs.locket.json"
+            fi
         done
         ok "native messaging host installed"
+        if [ -z "$EXT_ID" ]; then
+            warn "no extension id given: Firefox is ready, Chromium browsers are not"
+            printf '     load the extension unpacked, then re-run:\n'
+            printf '     scripts/locket-setup --browser <extension-id>\n'
+        fi
     fi
 
     say "Installing the systemd user unit"

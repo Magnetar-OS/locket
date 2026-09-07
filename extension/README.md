@@ -32,7 +32,11 @@ cp manifest.firefox.json manifest.json    # in a copy of this directory
 
 Then `about:debugging` → **This Firefox** → **Load Temporary Add-on** and pick
 the `manifest.json`. Firefox matches on the id baked into
-`browser_specific_settings`, so `--browser` takes any value.
+`browser_specific_settings`, so it needs no id from the installer:
+
+```sh
+scripts/locket-setup --browser        # no id: Firefox is ready
+```
 
 ## What it will and will not do
 
