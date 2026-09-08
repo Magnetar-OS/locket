@@ -90,9 +90,9 @@
     <!-- Kept in step with `version` in Cargo.toml: the About page reads the
          crate's version, and two numbers that disagree are a bug report nobody
          can act on. -->
-    <release version="1.0.0" type="development" date="2026-08-24">
+    <release version="1.0.0" date="2026-09-08">
       <description>
-        <p>Not released. The version the repository carries while it is still developed against a single machine.</p>
+        <p>The first release. Locket keeps passwords, keys and secrets for the COSMIC desktop, serving org.freedesktop.secrets and an SSH agent from a single encrypted vault.</p>
       </description>
     </release>
   </releases>
