@@ -64,7 +64,9 @@ impl PamLocket {
 fn lookup_uid(user: &str) -> Option<u32> {
     let c_user = std::ffi::CString::new(user).ok()?;
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0i8; 4096];
+    // `c_char`, not `i8`: it is signed on x86_64 and unsigned on aarch64, and
+    // hardcoding either one fails to compile on the other architecture.
+    let mut buf = vec![0 as libc::c_char; 4096];
     let mut result: *mut libc::passwd = std::ptr::null_mut();
 
     // SAFETY: `getpwnam_r` writes into `pwd` and `buf`, both of which outlive
