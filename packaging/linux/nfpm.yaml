@@ -43,6 +43,14 @@ contents:
   # Everything `just rootdir=.release-kit/pkgroot install` staged: binaries,
   # desktop entries, icons, metainfo, services — applets and daemons
   # included. Modes are preserved from the staging tree.
-  - src: .release-kit/pkgroot/
-    dst: /
+  # `dst: /usr`, not `/`: with a root destination nfpm's Arch packager writes
+  # a tar entry whose filename is the empty string, which bsdtar skips with
+  # "Archive entry has empty or unreadable filename" and repo-add then rejects
+  # the whole file as "not a package file". The deb packager normalises the
+  # same root to `./` and is unaffected, so this only ever showed up in the
+  # pacman leg. Everything the justfile installs lives under /usr (prefix), so
+  # naming that directory avoids the root entry without changing a single
+  # installed path.
+  - src: .release-kit/pkgroot/usr
+    dst: /usr
     type: tree
