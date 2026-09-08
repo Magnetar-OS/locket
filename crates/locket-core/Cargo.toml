@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["password", "vault", "secrets", "cryptography", "keyring"]
+categories = ["cryptography", "authentication"]
+readme = "README.md"
 
 [dependencies]
 argon2.workspace = true

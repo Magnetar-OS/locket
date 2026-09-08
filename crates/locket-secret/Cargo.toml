@@ -6,10 +6,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["secret-service", "dbus", "keyring", "freedesktop", "libsecret"]
+categories = ["os::linux-apis", "authentication"]
+readme = "README.md"
 
 [dependencies]
 locket-core.workspace = true
-locket-ipc = { path = "../locket-ipc" }
+locket-ipc.workspace = true
 zbus.workspace = true
 tokio.workspace = true
 futures-util.workspace = true

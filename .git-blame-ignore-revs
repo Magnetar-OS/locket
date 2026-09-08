@@ -1,0 +1,9 @@
+# Revisions that changed formatting only, and would otherwise sit on top of
+# every line in `git blame`. Tell git to look through them:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub reads this file automatically.
+
+# style: make the tree rustfmt-clean
+77a31a86e8f9d68f376580fddffc4a1909413f8d

@@ -14,6 +14,8 @@
 //!
 //! SHA-1 is fine here: it is the dataset's index, not a security boundary.
 
+#![forbid(unsafe_code)]
+
 use sha1::{Digest, Sha1};
 use zeroize::Zeroizing;
 

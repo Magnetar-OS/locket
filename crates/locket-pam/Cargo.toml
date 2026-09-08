@@ -6,13 +6,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# Not published: a cdylib is not consumable as a crates.io dependency,
+# and `cargo install` cannot place pam_locket.so in /lib/security.
+# Ships as a distro package.
+publish = false
 
 [lib]
 name = "pam_locket"
 crate-type = ["cdylib"]
 
 [dependencies]
-locket-ipc = { path = "../locket-ipc" }
+locket-ipc.workspace = true
 pam-bindings = "0.3"
 libc = "0.2"
 zeroize.workspace = true

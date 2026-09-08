@@ -6,6 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# Not published: the native messaging host is only reachable once its
+# manifest is registered with a browser, which the distro package does.
+# `cargo install` would leave a binary no browser can find.
+publish = false
 
 [[bin]]
 name = "locket-native-host"

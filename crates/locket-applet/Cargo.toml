@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# Not publishable: same libcosmic git dependency as locket-cosmic.
+# Ships as a distro package.
+publish = false
 
 [[bin]]
 name = "locket-applet"

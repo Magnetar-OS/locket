@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["password", "vault", "cli", "secrets", "keyring"]
+categories = ["command-line-utilities", "authentication"]
+readme = "README.md"
 
 [[bin]]
 name = "locket-cli"
@@ -15,7 +20,7 @@ path = "src/main.rs"
 locket-core.workspace = true
 locket-hibp.workspace = true
 locket-secret.workspace = true
-locket-import = { path = "../locket-import" }
+locket-import.workspace = true
 tokio.workspace = true
 zbus.workspace = true
 clap.workspace = true

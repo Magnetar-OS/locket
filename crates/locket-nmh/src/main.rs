@@ -7,6 +7,8 @@
 //!
 //! See [`protocol`] for why the message set is shaped the way it is.
 
+#![forbid(unsafe_code)]
+
 mod protocol;
 
 use protocol::{Match, Request, Response};

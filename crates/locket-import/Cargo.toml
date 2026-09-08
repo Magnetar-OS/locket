@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["import", "keepass", "bitwarden", "password", "migration"]
+categories = ["parser-implementations", "authentication"]
+readme = "README.md"
 
 [dependencies]
 locket-core.workspace = true

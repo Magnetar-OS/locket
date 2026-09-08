@@ -3,6 +3,8 @@
 //! Operates directly on the vault file. It deliberately does not talk to
 //! `locketd`, so it keeps working for recovery when the daemon will not start.
 
+#![forbid(unsafe_code)]
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};

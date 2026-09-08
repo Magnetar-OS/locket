@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["hibp", "pwned", "password", "breach", "k-anonymity"]
+categories = ["authentication", "network-programming"]
+readme = "README.md"
 
 [dependencies]
 sha1.workspace = true

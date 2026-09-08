@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["fido2", "webauthn", "hmac-secret", "security-key", "ctap"]
+categories = ["authentication", "cryptography"]
+readme = "README.md"
 
 [dependencies]
 locket-core.workspace = true

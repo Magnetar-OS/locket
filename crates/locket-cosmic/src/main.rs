@@ -1,5 +1,7 @@
 //! locket — a password and secrets manager for COSMIC.
 
+#![forbid(unsafe_code)]
+
 mod app;
 mod autotype;
 mod config;

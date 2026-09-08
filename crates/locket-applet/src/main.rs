@@ -10,6 +10,8 @@
 //! and users are trained to type into whatever appears near the panel. Locking
 //! is safe to expose because a spoofed "lock" button costs nothing.
 
+#![forbid(unsafe_code)]
+
 mod i18n;
 
 use cosmic::app::{Core, Task};

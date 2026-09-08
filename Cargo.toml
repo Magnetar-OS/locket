@@ -25,13 +25,26 @@ edition = "2024"
 rust-version = "1.98.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/entro314-labs/locket"
+homepage = "https://github.com/entro314-labs/locket"
+authors = ["Dominikos Pritis <dominikos.pritis@gmail.com>"]
 
 [workspace.dependencies]
-locket-core = { path = "crates/locket-core" }
-locket-hibp = { path = "crates/locket-hibp" }
-locket-secret = { path = "crates/locket-secret" }
-locket-import = { path = "crates/locket-import" }
-locket-agent = { path = "crates/locket-agent" }
+# Every inter-crate dependency lives here, and every one carries a
+# `version` next to its `path`. cargo rewrites the path away when packaging
+# and publishes the version instead, so a member without one cannot be
+# published at all. Declaring them once means the number that goes to
+# crates.io is edited in a single place at release time.
+locket-core = { path = "crates/locket-core", version = "1.0.0" }
+locket-ipc = { path = "crates/locket-ipc", version = "1.0.0" }
+locket-hibp = { path = "crates/locket-hibp", version = "1.0.0" }
+locket-secret = { path = "crates/locket-secret", version = "1.0.0" }
+locket-import = { path = "crates/locket-import", version = "1.0.0" }
+# `default-features = false`: locket-daemon is the only consumer and it
+# re-exports the `fido` feature under its own name. A member cannot turn
+# off an inherited default, so the default is off here and opted into there.
+locket-agent = { path = "crates/locket-agent", version = "1.0.0", default-features = false }
+locket-fido = { path = "crates/locket-fido", version = "1.0.0" }
+locket-tpm = { path = "crates/locket-tpm", version = "1.0.0" }
 
 # --- Async / IPC -----------------------------------------------------------
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }

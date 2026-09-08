@@ -6,6 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# Not published: a session daemon whose correct installation is the
+# systemd user unit and D-Bus service file the distro package places.
+# A stray `cargo install` copy shadowing the packaged one is a support
+# problem nobody needs from a process that holds the vault key.
+publish = false
 
 [[bin]]
 name = "locketd"
@@ -19,7 +27,7 @@ fido = ["locket-agent/fido"]
 [dependencies]
 locket-core.workspace = true
 locket-secret.workspace = true
-locket-agent = { path = "../locket-agent", default-features = false }
+locket-agent.workspace = true
 zbus.workspace = true
 tokio.workspace = true
 futures-util.workspace = true

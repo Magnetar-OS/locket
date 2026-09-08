@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["unlock", "ipc", "unix-socket", "pam"]
+categories = ["os::linux-apis", "authentication"]
+readme = "README.md"
 
 # Deliberately dependency-light: this is linked into a PAM module that loads
 # on every login, so it must not drag in an async runtime or a D-Bus stack.
