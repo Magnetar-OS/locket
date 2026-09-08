@@ -57,7 +57,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libtss2-dev libudev-dev libssl-dev \
-            libxkbcommon-dev libwayland-dev libfontconfig-1-dev
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev
       # Toolchain comes from rust-toolchain.toml, as above.
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p locket-cosmic -p locket-applet
@@ -104,6 +104,22 @@ jobs:
         # a fork or a pre-publication branch will not have.
         run: appstreamcli validate --no-net res/com.magnetaros.Locket.metainfo.xml
       - name: Desktop entries
-        run: desktop-file-validate res/*.desktop
+        # The applet ships `Categories=COSMIC;`, as does every System76 COSMIC
+        # applet installed on a COSMIC session, and cosmic-panel's settings
+        # page is what reads it. Newer desktop-file-utils calls that
+        # unregistered value an error rather than a hint. Matching the platform
+        # matters more than satisfying the validator, so that one error is
+        # tolerated for the applet and nothing else is — the main entry is
+        # still validated strictly.
+        run: |
+          desktop-file-validate res/com.magnetaros.Locket.desktop
+          out=$(desktop-file-validate res/com.magnetaros.LocketApplet.desktop || true)
+          printf '%s\n' "$out"
+          unexpected=$(printf '%s\n' "$out" | grep 'error:' | grep -v 'unregistered value "COSMIC"' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::unexpected desktop-file-validate error in the applet entry"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
       - name: Installer script
         run: shellcheck -S warning scripts/locket-setup scripts/locket-reimport-keyring

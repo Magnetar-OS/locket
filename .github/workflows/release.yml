@@ -61,7 +61,7 @@ jobs:
     with:
       tag: ${{ inputs.tag || '' }}
       product_name: 'locket'
-      repo_name: 'entro314labs'
+      repo_name: 'magnetaros'
       pages_repo: 'Magnetar-OS/arch-repo'
     secrets: inherit
 

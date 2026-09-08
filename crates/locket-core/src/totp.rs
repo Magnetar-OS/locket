@@ -67,10 +67,17 @@ impl Totp {
         if input.starts_with("otpauth://") {
             Self::parse_uri(input)
         } else {
-            Ok(Self {
+            // `validate` here for the same reason `parse_uri` calls it: an
+            // empty string is valid base32 that decodes to no bytes, and
+            // without this a bare "" became a Totp with an empty HMAC key
+            // that cheerfully produced codes and could not reparse its own
+            // `to_uri` output.
+            let totp = Self {
                 secret: decode_base32(input)?,
                 ..Default::default()
-            })
+            };
+            totp.validate()?;
+            Ok(totp)
         }
     }
 
@@ -279,6 +286,29 @@ fn decode_base32(input: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Found by the `totp` fuzz target: the empty input decodes as valid
+    // base32 to zero bytes, so `parse` accepted it while `to_uri`'s output
+    // was correctly rejected on the way back in.
+    #[test]
+    fn an_empty_seed_is_rejected_rather_than_parsed_into_an_empty_key() {
+        for input in ["", " ", "\n", "  \t "] {
+            assert!(
+                Totp::parse(input).is_err(),
+                "empty seed {input:?} parsed into a Totp with no key"
+            );
+        }
+    }
+
+    #[test]
+    fn a_parsed_seed_reparses_from_its_own_uri() {
+        let totp = Totp::parse("JBSWY3DPEHPK3PXP").expect("valid base32 seed");
+        let uri = totp.to_uri();
+        let back = Totp::parse(&uri).expect("a seed's own URI must reparse");
+        assert_eq!(totp.secret, back.secret);
+        assert_eq!(totp.digits, back.digits);
+        assert_eq!(totp.period, back.period);
+    }
 
     // RFC 6238 Appendix B test vectors. Secret is "12345678901234567890".
     const RFC_SECRET: &[u8] = b"12345678901234567890";
