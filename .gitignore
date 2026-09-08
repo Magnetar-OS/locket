@@ -5,6 +5,7 @@
 
 # Stray daemon logs from local test runs.
 *.log
+.release-kit/
 
 # Build artifacts from the fuzz workspace.
 fuzz/target/
