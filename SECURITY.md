@@ -8,7 +8,7 @@ a description of what has been checked and how to tell me when it is not.
 ## Reporting a vulnerability
 
 Report privately first, via GitHub's [private vulnerability
-reporting](https://github.com/entro314-labs/locket/security/advisories/new) on
+reporting](https://github.com/Magnetar-OS/locket/security/advisories/new) on
 this repository. If that is unavailable to you, open an issue saying only that
 you have a security report and how to reach you — no details in the issue.
 

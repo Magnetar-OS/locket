@@ -15,8 +15,8 @@ release: "1"
 section: utils
 priority: optional
 maintainer: Dominikos Pritis <dominikos.pritis@gmail.com>
-vendor: entro314-labs
-homepage: https://github.com/entro314-labs/locket
+vendor: Magnetar-OS
+homepage: https://github.com/Magnetar-OS/locket
 license: GPL-3.0-or-later
 description: |
   Keep passwords, keys and secrets for your desktop

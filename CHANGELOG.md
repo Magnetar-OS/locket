@@ -186,7 +186,7 @@ changed about deletion. `SECURITY.md` points at it.
 The project is now **Locket**. Everything moved with it: the binaries
 (`locket`, `locketd`, `locket-cli`, `locket-applet`, `locket-native-host`,
 `pam_locket.so`), the crates, the application id
-(`io.github.entro314labs.Locket`), the development bus name
+(`com.magnetaros.Locket`), the development bus name
 (`org.locket.secrets`), the manager interface (`org.locket.Manager1` at
 `/org/locket/Manager`), the portal backend, the systemd unit and the scripts.
 `org.freedesktop.secrets` is untouched — that name belongs to the
@@ -221,10 +221,10 @@ login and keep finding nothing there — the exact silent failure this release
 spent its time removing elsewhere.
 
 **The application id moved to the namespace the rest of the suite uses**:
-`io.github.entro314labs.Locket`, with `io.github.entro314labs.LocketApplet` for
-the panel indicator, `io.github.entro314labs.locket` for the browser's native
-messaging host and `locket@entro314labs.github.io` for the Firefox extension.
-Slate, Circle and Envelope are all `io.github.entro314labs.*`; Locket was the
+`com.magnetaros.Locket`, with `com.magnetaros.LocketApplet` for
+the panel indicator, `com.magnetaros.locket` for the browser's native
+messaging host and `locket@magnetaros.com` for the Firefox extension.
+Slate, Circle and Envelope are all `com.magnetaros.*`; Locket was the
 one that was not, while its own `Cargo.toml` pointed at that organisation.
 
 Settings are carried across again, from both older ids, and the keys inside the

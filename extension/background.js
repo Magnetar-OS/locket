@@ -1,7 +1,7 @@
 // Talks to locket-native-host. Nothing here caches secrets: a password is
 // requested only when the user picks an entry, and is handed straight to the
 // content script for that one fill.
-const HOST = "io.github.entro314labs.locket";
+const HOST = "com.magnetaros.locket";
 
 async function ask(message) {
   try {

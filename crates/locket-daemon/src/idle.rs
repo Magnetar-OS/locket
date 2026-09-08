@@ -48,7 +48,7 @@ async fn notify_locked(why: &str) {
             .notify(
                 "locket",
                 0,
-                "io.github.entro314labs.Locket",
+                "com.magnetaros.Locket",
                 "Vault locked",
                 why,
                 Vec::new(),

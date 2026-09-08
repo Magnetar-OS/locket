@@ -4,7 +4,7 @@ Name=Locket
 GenericName=Password Manager
 Comment=Passwords, keys and secrets for the COSMIC desktop
 Exec=locket
-Icon=io.github.entro314labs.Locket
+Icon=com.magnetaros.Locket
 Terminal=false
 # `Security` is an additional category whose spec-blessed partners are
 # `Settings` and `System`; pairing it with `Utility` earns a hint from
@@ -13,5 +13,5 @@ Terminal=false
 Categories=Utility;Security;
 Keywords=password;secret;keyring;keychain;ssh;otp;totp;credential;
 StartupNotify=true
-StartupWMClass=io.github.entro314labs.Locket
+StartupWMClass=com.magnetaros.Locket
 X-GNOME-UsesNotifications=true

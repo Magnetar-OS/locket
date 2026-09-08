@@ -1,6 +1,6 @@
 [Unit]
 Description=locket secrets daemon
-Documentation=https://github.com/entro314-labs/locket
+Documentation=https://github.com/Magnetar-OS/locket
 # The unlock socket lives in %t (/run/user/<uid>), so the runtime dir must
 # exist first. pam_systemd is what creates it.
 After=dbus.socket

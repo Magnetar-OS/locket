@@ -1,5 +1,5 @@
 {
-  "versionFiles": ["Cargo.toml", "Cargo.lock", "res/io.github.entro314labs.Locket.metainfo.xml"],
+  "versionFiles": ["Cargo.toml", "Cargo.lock", "res/com.magnetaros.Locket.metainfo.xml"],
   "publish": null,
   "steps": ["version", "changelog", "tag", "push"]
 }

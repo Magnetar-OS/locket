@@ -1,8 +1,8 @@
 {
-  "name": "io.github.entro314labs.locket",
+  "name": "com.magnetaros.locket",
   "description": "locket native messaging host",
   "path": "@HOST_PATH@",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://@EXTENSION_ID@/"],
-  "allowed_extensions": ["locket@entro314labs.github.io"]
+  "allowed_extensions": ["locket@magnetaros.com"]
 }

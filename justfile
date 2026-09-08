@@ -15,8 +15,8 @@ native-host := 'locket-native-host'
 pam-module := 'libpam_locket.so'
 
 # The unique ids of the two desktop components.
-export APPID := 'io.github.entro314labs.Locket'
-applet-appid := 'io.github.entro314labs.LocketApplet'
+export APPID := 'com.magnetaros.Locket'
+applet-appid := 'com.magnetaros.LocketApplet'
 
 # Path to root file system, which defaults to `/`.
 rootdir := ''

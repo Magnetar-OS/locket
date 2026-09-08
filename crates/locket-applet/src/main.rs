@@ -26,7 +26,7 @@ use cosmic::widget;
 use cosmic::{Element, iced::window};
 use locket_secret::client::Status;
 
-const ID: &str = "io.github.entro314labs.LocketApplet";
+const ID: &str = "com.magnetaros.LocketApplet";
 
 /// The main window's binary, as the desktop entry spells it.
 const APP_EXEC: &str = "locket";

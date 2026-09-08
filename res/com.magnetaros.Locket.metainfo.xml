@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- Copyright 2026 Dominikos Pritis -->
 <component type="desktop-application">
-  <id>io.github.entro314labs.Locket</id>
+  <id>com.magnetaros.Locket</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
 
@@ -31,7 +31,7 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">io.github.entro314labs.Locket.desktop</launchable>
+  <launchable type="desktop-id">com.magnetaros.Locket.desktop</launchable>
 
   <provides>
     <!-- How a COSMIC application says so; the store and the app library filter
@@ -70,11 +70,11 @@
     <keyword>credential</keyword>
   </keywords>
 
-  <url type="homepage">https://github.com/entro314-labs/locket</url>
-  <url type="bugtracker">https://github.com/entro314-labs/locket/issues</url>
-  <url type="vcs-browser">https://github.com/entro314-labs/locket</url>
+  <url type="homepage">https://github.com/Magnetar-OS/locket</url>
+  <url type="bugtracker">https://github.com/Magnetar-OS/locket/issues</url>
+  <url type="vcs-browser">https://github.com/Magnetar-OS/locket</url>
 
-  <developer id="io.github.entro314labs">
+  <developer id="com.magnetaros">
     <name>Dominikos Pritis</name>
   </developer>
 

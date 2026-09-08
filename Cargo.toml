@@ -24,8 +24,8 @@ version = "1.0.0"
 edition = "2024"
 rust-version = "1.98.0"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/entro314-labs/locket"
-homepage = "https://github.com/entro314-labs/locket"
+repository = "https://github.com/Magnetar-OS/locket"
+homepage = "https://github.com/Magnetar-OS/locket"
 authors = ["Dominikos Pritis <dominikos.pritis@gmail.com>"]
 
 [workspace.dependencies]

@@ -1,9 +1,9 @@
 # Checks the build and the test suite somewhere other than the author's laptop,
 # which until now was the only machine any of this had ever run on.
 #
-# `cargo fmt --check` is deliberately absent: the tree is not rustfmt-clean and
-# making it so is a decision about house style, not something CI should force
-# by failing every pull request until someone reformats 36 files.
+# The tree is rustfmt-clean as of the `style:` commit that reformatted it, so
+# `cargo fmt --check` runs here to keep it that way. That commit is listed in
+# `.git-blame-ignore-revs` so it does not sit on top of every blame.
 name: CI
 
 on:
@@ -41,6 +41,8 @@ jobs:
         run: cargo test --workspace --exclude locket-cosmic --exclude locket-applet
       - name: Clippy
         run: cargo clippy --workspace --exclude locket-cosmic --exclude locket-applet --all-targets -- -D warnings
+      - name: Formatting
+        run: cargo fmt --check
 
   # The GUI and the panel applet pull in libcosmic, and with it wayland, xkb and
   # a font stack. Built but not tested: the tests there drive state machines,
@@ -100,7 +102,7 @@ jobs:
       - name: AppStream metainfo
         # --no-net because the URLs it wants to reach are this repository, which
         # a fork or a pre-publication branch will not have.
-        run: appstreamcli validate --no-net res/io.github.entro314labs.Locket.metainfo.xml
+        run: appstreamcli validate --no-net res/com.magnetaros.Locket.metainfo.xml
       - name: Desktop entries
         run: desktop-file-validate res/*.desktop
       - name: Installer script

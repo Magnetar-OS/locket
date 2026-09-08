@@ -39,7 +39,7 @@ use crate::security::{self, Security};
 /// Embedded rather than looked up by name so it is there in an uninstalled
 /// build, where nothing has been written into an icon theme yet.
 const APP_ICON: &[u8] =
-    include_bytes!("../../../res/icons/hicolor/scalable/apps/io.github.entro314labs.Locket.svg");
+    include_bytes!("../../../res/icons/hicolor/scalable/apps/com.magnetaros.Locket.svg");
 
 /// Id of the search box, so a shortcut can focus it.
 static SEARCH_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("locket-search"));
@@ -1465,7 +1465,7 @@ impl cosmic::Application for App {
     type Flags = Flags;
     type Message = Message;
 
-    const APP_ID: &'static str = "io.github.entro314labs.Locket";
+    const APP_ID: &'static str = "com.magnetaros.Locket";
 
     fn core(&self) -> &Core {
         &self.core

@@ -76,7 +76,7 @@ jobs:
       pkgname: 'locket-bin'
       product_name: 'locket'
       pkgdesc: 'Keep passwords, keys and secrets for your desktop'
-      url: 'https://github.com/entro314-labs/locket'
+      url: 'https://github.com/Magnetar-OS/locket'
       license: 'GPL-3.0-or-later'
       depends: 'libxkbcommon tpm2-tss'
       provides: 'locket'

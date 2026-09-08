@@ -3,7 +3,7 @@ Type=Application
 Name=Locket Indicator
 Comment=Vault lock state in the COSMIC panel
 Exec=locket-applet
-Icon=io.github.entro314labs.Locket
+Icon=com.magnetaros.Locket
 Terminal=false
 Categories=COSMIC;
 # Marks this as a panel applet rather than a launchable application, so it
