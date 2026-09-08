@@ -371,7 +371,10 @@ fn spawn_frontend() -> std::io::Result<String> {
         .map(|_| candidate.to_string_lossy().into_owned())
 }
 
-async fn wait_until_unlocked(state: &Arc<Mutex<ServiceState>>, timeout: std::time::Duration) -> bool {
+async fn wait_until_unlocked(
+    state: &Arc<Mutex<ServiceState>>,
+    timeout: std::time::Duration,
+) -> bool {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
     loop {

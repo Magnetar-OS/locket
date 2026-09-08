@@ -103,10 +103,7 @@ fn encode(s: &str) -> String {
 
 /// Pull the issuer and account out of an `otpauth://` URI for labelling.
 fn describe(uri: &str) -> (Option<String>, String) {
-    let after_scheme = uri
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(uri);
+    let after_scheme = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
     let path = after_scheme
         .split_once('/')
         .map(|(_, rest)| rest)
@@ -178,9 +175,9 @@ pub fn parse_aegis(text: &str) -> Result<Vec<Entry>> {
     let json: serde_json::Value =
         serde_json::from_str(text).map_err(|e| Error::Database(e.to_string()))?;
 
-    let db = json.get("db").ok_or_else(|| {
-        Error::Database("not an Aegis export: no `db`".to_owned())
-    })?;
+    let db = json
+        .get("db")
+        .ok_or_else(|| Error::Database("not an Aegis export: no `db`".to_owned()))?;
     if db.is_string() {
         return Err(Error::Decrypt(
             "this Aegis export is encrypted; export again without a password".to_owned(),
@@ -209,7 +206,9 @@ pub fn parse_aegis(text: &str) -> Result<Vec<Entry>> {
                 account,
                 secret,
                 info.get("algo").and_then(|v| v.as_str()),
-                info.get("digits").and_then(|v| v.as_u64()).map(|d| d as u32),
+                info.get("digits")
+                    .and_then(|v| v.as_u64())
+                    .map(|d| d as u32),
                 info.get("period").and_then(|v| v.as_u64()),
             );
             Totp::parse(&uri).ok()?;
@@ -404,7 +403,10 @@ mod tests {
         );
         let entries = parse_andotp(&json).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].account, "ada", "the issuer prefix was kept in the account");
+        assert_eq!(
+            entries[0].account, "ada",
+            "the issuer prefix was kept in the account"
+        );
     }
 
     #[test]
@@ -468,8 +470,12 @@ mod tests {
         .unwrap();
 
         let vpath = dir.path().join("v.vault");
-        let mut v =
-            Vault::create(&vpath, "pw", locket_core::crypto::KdfParams::insecure_fast()).unwrap();
+        let mut v = Vault::create(
+            &vpath,
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
 
         assert_eq!(import_file(&mut v, &file, None).unwrap().imported, 1);
         let second = import_file(&mut v, &file, None).unwrap();

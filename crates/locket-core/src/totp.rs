@@ -76,7 +76,10 @@ impl Totp {
 
     fn parse_uri(uri: &str) -> Result<Self> {
         let parsed = url::Url::parse(uri).map_err(|e| Error::Totp(e.to_string()))?;
-        if !parsed.host_str().is_some_and(|h| h.eq_ignore_ascii_case("totp")) {
+        if !parsed
+            .host_str()
+            .is_some_and(|h| h.eq_ignore_ascii_case("totp"))
+        {
             return Err(Error::Totp(
                 "only otpauth://totp/ URIs are supported (HOTP is not)".into(),
             ));
@@ -224,10 +227,7 @@ impl Totp {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         query.append_pair(
             "secret",
-            &base32::encode(
-                base32::Alphabet::Rfc4648 { padding: false },
-                &self.secret,
-            ),
+            &base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &self.secret),
         );
         if let Some(issuer) = &self.issuer {
             query.append_pair("issuer", issuer);

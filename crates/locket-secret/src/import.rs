@@ -41,7 +41,10 @@ trait SourceService {
     fn collections(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
 }
 
-#[zbus::proxy(interface = "org.freedesktop.Secret.Collection", assume_defaults = false)]
+#[zbus::proxy(
+    interface = "org.freedesktop.Secret.Collection",
+    assume_defaults = false
+)]
 trait SourceCollection {
     #[zbus(property)]
     fn items(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
@@ -122,11 +125,18 @@ fn tidy_label(label: &str, attributes: &std::collections::BTreeMap<String, Strin
 
     // Whatever the source used to identify this entry, in the order a person
     // would recognise it.
-    let identifier = ["app_id", "application", "service", "server", "url", "username"]
-        .iter()
-        .find_map(|k| attributes.get(*k))
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty());
+    let identifier = [
+        "app_id",
+        "application",
+        "service",
+        "server",
+        "url",
+        "username",
+    ]
+    .iter()
+    .find_map(|k| attributes.get(*k))
+    .map(|v| v.trim())
+    .filter(|v| !v.is_empty());
 
     match (trimmed.is_empty(), identifier) {
         (_, Some(id)) if dangling => format!("{trimmed} {id}"),
@@ -192,8 +202,7 @@ fn infer_kind(
         Some(s) if s.contains("ssh") || s.contains("Ssh") => return ItemKind::SshKey,
         _ => {}
     }
-    if attributes.contains_key("xdg:schema")
-        && attributes["xdg:schema"].contains("NetworkManager")
+    if attributes.contains_key("xdg:schema") && attributes["xdg:schema"].contains("NetworkManager")
     {
         return ItemKind::WifiNetwork;
     }
@@ -223,7 +232,6 @@ fn matching_item(
         .find(|(_, i)| &i.attributes == attributes)
         .map(|(_, i)| i.id)
 }
-
 
 /// Import everything readable from `bus_name` into `vault`.
 ///
@@ -263,7 +271,10 @@ pub async fn import_from(
             .build()
             .await?;
 
-        let label = collection.label().await.unwrap_or_else(|_| "Imported".into());
+        let label = collection
+            .label()
+            .await
+            .unwrap_or_else(|_| "Imported".into());
         if collection.locked().await.unwrap_or(false) {
             tracing::warn!("skipping locked collection `{label}`");
             continue;

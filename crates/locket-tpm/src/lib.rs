@@ -430,7 +430,10 @@ mod tests {
         let (factor, kek) = enroll(Some("123456")).expect("enrolment failed");
         let recovered = unseal(&factor, Some("123456")).expect("unseal failed");
         assert_eq!(kek.expose(), recovered.expose());
-        assert!(unseal(&factor, Some("654321")).is_err(), "wrong PIN unsealed");
+        assert!(
+            unseal(&factor, Some("654321")).is_err(),
+            "wrong PIN unsealed"
+        );
     }
 
     #[test]

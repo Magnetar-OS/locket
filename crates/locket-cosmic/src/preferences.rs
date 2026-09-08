@@ -120,11 +120,19 @@ pub fn view<'a>(
         .title(fl!("settings-section-security"))
         .add(widget::settings::item(
             fl!("settings-auto-lock"),
-            widget::dropdown(AUTO_LOCK_LABELS.as_slice(), auto_lock, Message::AutoLockSelected),
+            widget::dropdown(
+                AUTO_LOCK_LABELS.as_slice(),
+                auto_lock,
+                Message::AutoLockSelected,
+            ),
         ))
         .add(widget::settings::item(
             fl!("settings-clipboard"),
-            widget::dropdown(CLIPBOARD_LABELS.as_slice(), clipboard, Message::ClipboardSelected),
+            widget::dropdown(
+                CLIPBOARD_LABELS.as_slice(),
+                clipboard,
+                Message::ClipboardSelected,
+            ),
         ))
         .add(widget::settings::item(
             fl!("settings-conceal-on-blur"),
@@ -137,8 +145,7 @@ pub fn view<'a>(
             widget::settings::item::builder(fl!("settings-compact-list"))
                 .description(fl!("settings-compact-list-detail"))
                 .control(
-                    widget::toggler(settings.compact_list)
-                        .on_toggle(Message::CompactListToggled),
+                    widget::toggler(settings.compact_list).on_toggle(Message::CompactListToggled),
                 ),
         );
 

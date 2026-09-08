@@ -381,11 +381,7 @@ pub fn item_path(collection: Uuid, item: Uuid) -> OwnedObjectPath {
 /// Returns `None` for aliases that are not valid object-path elements, rather
 /// than panicking on a name a bus peer chose.
 pub fn alias_path(alias: &str) -> Option<OwnedObjectPath> {
-    if alias.is_empty()
-        || !alias
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if alias.is_empty() || !alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
     OwnedObjectPath::try_from(format!("{}/{alias}", crate::ALIAS_PREFIX)).ok()
@@ -405,7 +401,9 @@ fn uuid_from_element(element: &str, prefix: char) -> Option<Uuid> {
 /// Parse a collection path into its UUID.
 pub fn parse_collection_path(path: &str) -> Option<Uuid> {
     let s = path;
-    let rest = s.strip_prefix(crate::COLLECTION_PREFIX)?.strip_prefix('/')?;
+    let rest = s
+        .strip_prefix(crate::COLLECTION_PREFIX)?
+        .strip_prefix('/')?;
     if rest.contains('/') {
         return None;
     }
@@ -415,7 +413,9 @@ pub fn parse_collection_path(path: &str) -> Option<Uuid> {
 /// Parse an item path into `(collection, item)`.
 pub fn parse_item_path(path: &str) -> Option<(Uuid, Uuid)> {
     let s = path;
-    let rest = s.strip_prefix(crate::COLLECTION_PREFIX)?.strip_prefix('/')?;
+    let rest = s
+        .strip_prefix(crate::COLLECTION_PREFIX)?
+        .strip_prefix('/')?;
     let (c, i) = rest.split_once('/')?;
     Some((uuid_from_element(c, 'c')?, uuid_from_element(i, 'i')?))
 }
@@ -425,7 +425,9 @@ pub fn parse_item_path(path: &str) -> Option<(Uuid, Uuid)> {
 // ---------------------------------------------------------------------------
 
 fn take_string(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
-    props.get(key).and_then(|v| String::try_from(v.clone()).ok())
+    props
+        .get(key)
+        .and_then(|v| String::try_from(v.clone()).ok())
 }
 
 fn take_attributes(
@@ -765,8 +767,7 @@ impl CollectionIface {
             // Deleting a collection deletes every item in it — through the
             // trash, item by item, because a whole collection wiped by one
             // call is exactly the accident the trash exists to survive.
-            let item_ids: Vec<Uuid> =
-                data.collections[pos].items.iter().map(|i| i.id).collect();
+            let item_ids: Vec<Uuid> = data.collections[pos].items.iter().map(|i| i.id).collect();
             for id in &item_ids {
                 data.trash_item(*id);
             }
@@ -798,9 +799,10 @@ impl CollectionIface {
         // IsLocked error *name*, so libsecret knows to unlock and retry rather
         // than treating it as a hard failure or an absent secret.
         let vault = state.vault().map_err(crate::error::SecretError::from)?;
-        let collection = vault.data().collection(self.id).ok_or_else(|| {
-            crate::error::SecretError::NoSuchObject("no such collection".into())
-        })?;
+        let collection = vault
+            .data()
+            .collection(self.id)
+            .ok_or_else(|| crate::error::SecretError::NoSuchObject("no such collection".into()))?;
 
         let query: std::collections::BTreeMap<String, String> = attributes.into_iter().collect();
         Ok(collection
@@ -901,7 +903,9 @@ impl CollectionIface {
                     ItemIface {
                         state: self.state.clone(),
                         collection: self.id,
-                        id: parse_item_path(path.as_str()).map(|(_, i)| i).unwrap_or_default(),
+                        id: parse_item_path(path.as_str())
+                            .map(|(_, i)| i)
+                            .unwrap_or_default(),
                     },
                 )
                 .await?;
@@ -1385,7 +1389,10 @@ mod tests {
     #[test]
     fn kind_inference_recognises_known_schemas() {
         let mut attrs = std::collections::BTreeMap::new();
-        attrs.insert("xdg:schema".to_owned(), "org.freedesktop.Secret.Note".to_owned());
+        attrs.insert(
+            "xdg:schema".to_owned(),
+            "org.freedesktop.Secret.Note".to_owned(),
+        );
         assert_eq!(infer_kind(&attrs), ItemKind::Note);
 
         attrs.insert(
@@ -1398,6 +1405,9 @@ mod tests {
         login.insert("username".to_owned(), "ada".to_owned());
         assert_eq!(infer_kind(&login), ItemKind::Login);
 
-        assert_eq!(infer_kind(&std::collections::BTreeMap::new()), ItemKind::Application);
+        assert_eq!(
+            infer_kind(&std::collections::BTreeMap::new()),
+            ItemKind::Application
+        );
     }
 }

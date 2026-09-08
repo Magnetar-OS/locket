@@ -127,7 +127,10 @@ pub fn to_csv(vault: &Vault, path: &Path) -> Result<(usize, usize)> {
             field_names::NOTES,
         ];
         if !item.attachments.is_empty()
-            || item.fields.iter().any(|f| !carried.contains(&f.name.as_str()))
+            || item
+                .fields
+                .iter()
+                .any(|f| !carried.contains(&f.name.as_str()))
         {
             lossy += 1;
         }
@@ -225,18 +228,11 @@ pub fn to_kdbx(vault: &Vault, path: &Path, passphrase: &str) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use locket_core::{
-        Field, FieldKind, Item, ItemKind,
-        crypto::KdfParams,
-    };
+    use locket_core::{Field, FieldKind, Item, ItemKind, crypto::KdfParams};
 
     fn vault(dir: &tempfile::TempDir) -> Vault {
-        let mut v = Vault::create(
-            dir.path().join("v.vault"),
-            "pw",
-            KdfParams::insecure_fast(),
-        )
-        .unwrap();
+        let mut v =
+            Vault::create(dir.path().join("v.vault"), "pw", KdfParams::insecure_fast()).unwrap();
         let mut item = Item::new(ItemKind::Login, "GitHub")
             .with_secret("hunter2")
             .with_field(Field::text(field_names::USERNAME, "ada"))
@@ -308,7 +304,10 @@ mod tests {
             .expect("the login survived the round trip");
         assert_eq!(item.secret.expose(), "hunter2");
         assert_eq!(item.field_value(field_names::USERNAME), Some("ada"));
-        assert!(item.field(field_names::TOTP).is_some(), "the TOTP seed was lost");
+        assert!(
+            item.field(field_names::TOTP).is_some(),
+            "the TOTP seed was lost"
+        );
         assert_eq!(
             item.field("recovery").map(|f| f.kind),
             Some(FieldKind::Secret),

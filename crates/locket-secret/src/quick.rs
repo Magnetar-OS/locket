@@ -69,17 +69,29 @@ pub struct Entry {
 /// Label and the handful of attributes a person would recognise. Secret
 /// values are not searched — and could not be, since nothing here has read
 /// one — which is the same rule the vault's own search follows.
-fn matches(needle: &str, label: &str, attributes: &std::collections::HashMap<String, String>) -> bool {
+fn matches(
+    needle: &str,
+    label: &str,
+    attributes: &std::collections::HashMap<String, String>,
+) -> bool {
     if needle.is_empty() {
         return true;
     }
     let needle = needle.to_lowercase();
     let hay = |s: &str| s.to_lowercase().contains(&needle);
     hay(label)
-        || ["username", "user", "service", "url", "uri", "host", "application"]
-            .iter()
-            .filter_map(|k| attributes.get(*k))
-            .any(|v| hay(v))
+        || [
+            "username",
+            "user",
+            "service",
+            "url",
+            "uri",
+            "host",
+            "application",
+        ]
+        .iter()
+        .filter_map(|k| attributes.get(*k))
+        .any(|v| hay(v))
 }
 
 fn subtitle_of(attributes: &std::collections::HashMap<String, String>) -> String {
@@ -91,9 +103,7 @@ fn subtitle_of(attributes: &std::collections::HashMap<String, String>) -> String
     String::new()
 }
 
-async fn service(
-    connection: &zbus::Connection,
-) -> Option<QuickServiceProxy<'static>> {
+async fn service(connection: &zbus::Connection) -> Option<QuickServiceProxy<'static>> {
     for name in crate::client::BUS_NAMES {
         if let Ok(builder) = QuickServiceProxy::builder(connection).destination(*name)
             && let Ok(builder) = builder.path("/org/freedesktop/secrets")
@@ -131,7 +141,9 @@ pub async fn search(needle: &str, limit: usize) -> Vec<Entry> {
         if found.len() >= limit {
             break;
         }
-        let Ok(builder) = QuickItemProxy::builder(&connection).destination(service.inner().destination().to_owned()) else {
+        let Ok(builder) = QuickItemProxy::builder(&connection)
+            .destination(service.inner().destination().to_owned())
+        else {
             continue;
         };
         let Ok(builder) = builder.path(path.clone()) else {

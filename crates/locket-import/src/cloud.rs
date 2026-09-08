@@ -321,7 +321,11 @@ pub fn gh_entries(text: &str) -> Vec<(String, Option<String>, String)> {
                 if let Some(host) = host.clone() {
                     // A token nested under `users:` belongs to that account;
                     // one at host level belongs to `user`.
-                    out.push((host, current_account.clone().or_else(|| user.clone()), value.to_owned()));
+                    out.push((
+                        host,
+                        current_account.clone().or_else(|| user.clone()),
+                        value.to_owned(),
+                    ));
                 }
             }
             // A key with no value that is not one we know is an account name
@@ -580,7 +584,10 @@ mod tests {
         );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].secret.expose(), "0.AXkA-refresh");
-        assert_eq!(items[0].attributes.get("azure:account").unwrap(), "abc.tenant");
+        assert_eq!(
+            items[0].attributes.get("azure:account").unwrap(),
+            "abc.tenant"
+        );
     }
 
     #[test]
@@ -595,7 +602,11 @@ mod tests {
         );
         assert_eq!(
             entries,
-            vec![("github.com".to_owned(), Some("ada".to_owned()), "gho_nested".to_owned())]
+            vec![(
+                "github.com".to_owned(),
+                Some("ada".to_owned()),
+                "gho_nested".to_owned()
+            )]
         );
     }
 
@@ -623,7 +634,10 @@ mod tests {
         );
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].secret.expose(), "gho_a");
-        assert_eq!(items[1].attributes.get("gh:host").unwrap(), "ghe.corp.example");
+        assert_eq!(
+            items[1].attributes.get("gh:host").unwrap(),
+            "ghe.corp.example"
+        );
     }
 
     #[test]
@@ -685,8 +699,8 @@ mod tests {
     fn vault() -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.vault");
-        let v = Vault::create(&path, "pw", locket_core::crypto::KdfParams::insecure_fast())
-            .unwrap();
+        let v =
+            Vault::create(&path, "pw", locket_core::crypto::KdfParams::insecure_fast()).unwrap();
         (dir, v)
     }
 
@@ -705,7 +719,11 @@ mod tests {
     fn a_missing_sqlite3_costs_only_the_gcloud_store() {
         let home = home_with_files();
         std::fs::create_dir_all(home.path().join(".config/gcloud")).unwrap();
-        std::fs::write(home.path().join(".config/gcloud/credentials.db"), b"not-a-db").unwrap();
+        std::fs::write(
+            home.path().join(".config/gcloud/credentials.db"),
+            b"not-a-db",
+        )
+        .unwrap();
 
         let (_d, mut v) = vault();
         let summary =

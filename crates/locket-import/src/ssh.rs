@@ -82,7 +82,9 @@ impl KeyFile {
 
 /// `~/.ssh`, if this user has one.
 pub fn default_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".ssh")).filter(|p| p.is_dir())
+    dirs::home_dir()
+        .map(|h| h.join(".ssh"))
+        .filter(|p| p.is_dir())
 }
 
 /// Whether `text` looks like an SSH private key.
@@ -247,8 +249,11 @@ pub fn scan(dir: &Path) -> Result<Vec<KeyFile>> {
 /// the key's *passphrase* — an encrypted key is useless to the agent without
 /// somewhere to put that.
 pub fn item_for(key: &KeyFile, pem: &str) -> Item {
-    let mut item = Item::new(ItemKind::SshKey, key.name.clone())
-        .with_field(Field::new(field_names::PRIVATE_KEY, FieldKind::Note, pem));
+    let mut item = Item::new(ItemKind::SshKey, key.name.clone()).with_field(Field::new(
+        field_names::PRIVATE_KEY,
+        FieldKind::Note,
+        pem,
+    ));
 
     if let Some(public) = &key.public {
         item = item.with_field(Field::new(
@@ -272,10 +277,8 @@ pub fn item_for(key: &KeyFile, pem: &str) -> Item {
         ));
     }
 
-    item.attributes.insert(
-        "ssh:path".to_owned(),
-        key.path.display().to_string(),
-    );
+    item.attributes
+        .insert("ssh:path".to_owned(), key.path.display().to_string());
     item.attributes
         .insert("ssh:encrypted".to_owned(), key.encrypted.to_string());
     item.tags = vec!["ssh".to_owned()];
@@ -398,7 +401,10 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
             Some("sk-ssh-ed25519@openssh.com")
         );
         // The PEM formats name it nowhere useful, and none of them are sk keys.
-        assert_eq!(algorithm_of("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n"), None);
+        assert_eq!(
+            algorithm_of("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n"),
+            None
+        );
         assert_eq!(algorithm_of("not a key at all"), None);
     }
 
@@ -428,7 +434,10 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
         assert!(found[0].is_token_bound());
 
         let item = item_for(&found[0], SECURITY_KEY);
-        assert_eq!(item.attributes.get("ssh:token-bound").map(String::as_str), Some("true"));
+        assert_eq!(
+            item.attributes.get("ssh:token-bound").map(String::as_str),
+            Some("true")
+        );
         assert_eq!(
             item.attributes.get("ssh:algorithm").map(String::as_str),
             Some("sk-ssh-ed25519@openssh.com")
@@ -437,7 +446,10 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
         let note = item
             .field_value(field_names::NOTES)
             .expect("no note explaining what this item is");
-        assert!(note.contains("not a backup"), "the note buries the lede: {note}");
+        assert!(
+            note.contains("not a backup"),
+            "the note buries the lede: {note}"
+        );
     }
 
     #[test]
@@ -482,13 +494,13 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
     fn tree() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("id_ed25519"), UNENCRYPTED).unwrap();
+        std::fs::write(dir.path().join("id_ed25519.pub"), UNENCRYPTED_PUB).unwrap();
+        // Things that live in ~/.ssh but are not keys.
         std::fs::write(
-            dir.path().join("id_ed25519.pub"),
-            UNENCRYPTED_PUB,
+            dir.path().join("known_hosts"),
+            "github.com ssh-ed25519 AAA\n",
         )
         .unwrap();
-        // Things that live in ~/.ssh but are not keys.
-        std::fs::write(dir.path().join("known_hosts"), "github.com ssh-ed25519 AAA\n").unwrap();
         std::fs::write(dir.path().join("config"), "Host *\n  User ada\n").unwrap();
         std::fs::write(dir.path().join("authorized_keys"), "ssh-ed25519 AAA x\n").unwrap();
         dir
@@ -530,7 +542,10 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
         let dir = tree();
         let key = &scan(dir.path()).unwrap()[0];
         let item = item_for(key, UNENCRYPTED);
-        assert_eq!(item.field_value(field_names::PRIVATE_KEY), Some(UNENCRYPTED));
+        assert_eq!(
+            item.field_value(field_names::PRIVATE_KEY),
+            Some(UNENCRYPTED)
+        );
         assert_eq!(
             item.secret.expose(),
             "",

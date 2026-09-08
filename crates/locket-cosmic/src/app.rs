@@ -26,12 +26,12 @@ use uuid::Uuid;
 use std::sync::LazyLock;
 
 use crate::config::{self, Settings};
-use crate::fl;
-use crate::labels;
 use crate::daemon::{self, DaemonEvent};
-use crate::import;
-use crate::preferences::{self, Status};
 use crate::editor::{Editor, EditorMessage, Outcome};
+use crate::fl;
+use crate::import;
+use crate::labels;
+use crate::preferences::{self, Status};
 use crate::security::{self, Security};
 
 /// The application icon, for the About page.
@@ -49,8 +49,7 @@ static SEARCH_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("locke
 /// nothing focused: there is no focus ring to show where typing would land,
 /// and the placeholder reads like a label that refuses to clear because the
 /// user has not actually typed into anything yet.
-static PASSPHRASE_ID: LazyLock<widget::Id> =
-    LazyLock::new(|| widget::Id::new("locket-passphrase"));
+static PASSPHRASE_ID: LazyLock<widget::Id> = LazyLock::new(|| widget::Id::new("locket-passphrase"));
 
 /// Sidebar entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -562,7 +561,9 @@ impl App {
     }
 
     fn toast(&mut self, text: impl Into<String>) -> Task<Message> {
-        self.toasts.push(widget::Toast::new(text.into())).map(cosmic::Action::App)
+        self.toasts
+            .push(widget::Toast::new(text.into()))
+            .map(cosmic::Action::App)
     }
 
     /// Fold a diverged copy of the open vault into it, using the DEK already
@@ -588,7 +589,10 @@ impl App {
             Ok(task) => task,
             Err(e) => return self.toast(e),
         };
-        let mut tasks = vec![saved, self.toast(fl!("toast-merged", report = report.to_string()))];
+        let mut tasks = vec![
+            saved,
+            self.toast(fl!("toast-merged", report = report.to_string())),
+        ];
         if report.attachments_dropped > 0 {
             tasks.push(self.toast(fl!(
                 "toast-merge-attachments",
@@ -682,9 +686,7 @@ impl App {
             };
             let caption = widget::text::caption(fl!("strength-meter", strength = named));
             form = form
-                .push(
-                    widget::determinate_linear(strength.fraction()).width(Length::Fill),
-                )
+                .push(widget::determinate_linear(strength.fraction()).width(Length::Fill))
                 .push(if strength.is_flagged() {
                     caption.class(cosmic::theme::Text::Color(
                         cosmic::theme::active().cosmic().destructive_color().into(),
@@ -702,9 +704,11 @@ impl App {
         }
 
         if let Some(error) = &self.error {
-            form = form.push(widget::text::body(error.clone()).class(cosmic::theme::Text::Color(
-                cosmic::theme::active().cosmic().destructive_color().into(),
-            )));
+            form = form.push(
+                widget::text::body(error.clone()).class(cosmic::theme::Text::Color(
+                    cosmic::theme::active().cosmic().destructive_color().into(),
+                )),
+            );
         }
 
         let busy = self.screen == Screen::Unlocking;
@@ -747,9 +751,9 @@ impl App {
             fl!("search-placeholder", category = category.label()),
             &self.search,
         )
-            .id(SEARCH_ID.clone())
-            .on_input(Message::SearchChanged)
-            .on_clear(Message::SearchChanged(String::new()));
+        .id(SEARCH_ID.clone())
+        .on_input(Message::SearchChanged)
+        .on_clear(Message::SearchChanged(String::new()));
 
         let list: Element<'_, Message> = if items.is_empty() {
             // An empty state should say which emptiness this is, and offer the
@@ -833,11 +837,18 @@ impl App {
                 };
 
                 let row = widget::row::with_capacity(3)
-                    .spacing(if compact { spacing.space_xs } else { spacing.space_s })
+                    .spacing(if compact {
+                        spacing.space_xs
+                    } else {
+                        spacing.space_s
+                    })
                     .align_y(Alignment::Center)
                     .push(
-                        widget::icon::from_name(item.kind.icon_name())
-                            .size(if compact { 16 } else { 24 }),
+                        widget::icon::from_name(item.kind.icon_name()).size(if compact {
+                            16
+                        } else {
+                            24
+                        }),
                     )
                     .push(text)
                     .push_maybe({
@@ -845,13 +856,14 @@ impl App {
                         // about to stop working deserves a mark in the list,
                         // not only in the detail pane.
                         let now = locket_core::model::now();
-                        (item.is_expired(now) || item.expires_within(now, 30 * 86_400)).then(
-                            || widget::icon::from_name("appointment-missed-symbolic").size(16),
-                        )
+                        (item.is_expired(now) || item.expires_within(now, 30 * 86_400)).then(|| {
+                            widget::icon::from_name("appointment-missed-symbolic").size(16)
+                        })
                     })
-                    .push_maybe(item.favorite.then(|| {
-                        widget::icon::from_name("starred-symbolic").size(16)
-                    }));
+                    .push_maybe(
+                        item.favorite
+                            .then(|| widget::icon::from_name("starred-symbolic").size(16)),
+                    );
 
                 column = column.add(
                     widget::button::custom(row)
@@ -904,7 +916,7 @@ impl App {
                 } else {
                     fl!("detail-reveal")
                 })
-                    .on_press(Message::ToggleReveal(name.clone())),
+                .on_press(Message::ToggleReveal(name.clone())),
             );
         }
         let what = if sensitive {
@@ -1166,16 +1178,14 @@ impl App {
             .spacing(spacing.space_s)
             .padding(spacing.space_s)
             .push(widget::scrollable(column).height(Length::Fill))
-            .push(
-                widget::settings::section().add(widget::settings::item(
-                    fl!("trash-retention-label"),
-                    widget::dropdown(
-                        RETENTION_LABELS.as_slice(),
-                        selected,
-                        Message::RetentionSelected,
-                    ),
-                )),
-            )
+            .push(widget::settings::section().add(widget::settings::item(
+                fl!("trash-retention-label"),
+                widget::dropdown(
+                    RETENTION_LABELS.as_slice(),
+                    selected,
+                    Message::RetentionSelected,
+                ),
+            )))
             .push(widget::text::caption(fl!("trash-retention-detail")))
             .push(
                 widget::button::destructive(fl!("trash-empty-button"))
@@ -1208,8 +1218,7 @@ impl App {
                 .push(widget::button::standard(fl!("detail-edit")).on_press(Message::EditSelected))
                 // Auto-type wants something to type: a secret, at least.
                 .push_maybe((!item.secret.is_empty()).then(|| {
-                    widget::button::standard(fl!("detail-autotype"))
-                        .on_press(Message::AutoType)
+                    widget::button::standard(fl!("detail-autotype")).on_press(Message::AutoType)
                 }))
                 .push(
                     widget::button::standard(if item.favorite {
@@ -1337,18 +1346,16 @@ impl App {
                             })
                             .on_press(Message::ToggleQr(field.name.clone())),
                         );
-                        if let Some((_, data)) = self.qr.as_ref().filter(|(shown, _)| {
-                            *shown == field.name
-                        }) {
+                        if let Some((_, data)) =
+                            self.qr.as_ref().filter(|(shown, _)| *shown == field.name)
+                        {
                             column = column.push(
                                 widget::column::with_capacity(2)
                                     .spacing(spacing.space_xxs)
                                     .align_x(Alignment::Center)
                                     .width(Length::Fill)
                                     .push(widget::qr_code::QRCode::new(data).cell_size(5.0))
-                                    .push(
-                                        widget::text::caption(fl!("qr-caption")).center(),
-                                    ),
+                                    .push(widget::text::caption(fl!("qr-caption")).center()),
                             );
                         }
                     }
@@ -1405,9 +1412,8 @@ impl App {
                     ),
             );
         }
-        column = column.push(
-            widget::button::standard(fl!("attachment-add")).on_press(Message::AttachmentAdd),
-        );
+        column = column
+            .push(widget::button::standard(fl!("attachment-add")).on_press(Message::AttachmentAdd));
         if !item.attachments.is_empty() {
             column = column.push(
                 widget::text::caption(fl!("attachment-note")).wrapping(Wrapping::WordOrGlyph),
@@ -1813,9 +1819,7 @@ impl cosmic::Application for App {
                     // Overwrite rather than clear: some clipboard managers
                     // treat an empty payload as "no change" and keep serving
                     // the old value.
-                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
-                        String::new(),
-                    );
+                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(String::new());
                 }
                 tracing::debug!("clipboard holds something else now; leaving it alone");
             }
@@ -1864,7 +1868,8 @@ impl cosmic::Application for App {
                 if settings == self.settings {
                     return Task::none();
                 }
-                let auto_lock_changed = settings.auto_lock_seconds != self.settings.auto_lock_seconds;
+                let auto_lock_changed =
+                    settings.auto_lock_seconds != self.settings.auto_lock_seconds;
                 self.settings = settings;
                 // Anything already on screen was rendered against the old
                 // values; re-conceal rather than leave a secret revealed under
@@ -2112,7 +2117,8 @@ impl cosmic::Application for App {
                         // only signs with hardware present, say. One toast per
                         // note, so none of them is buried in a summary line.
                         let mut tasks = vec![self.update_title()];
-                        tasks.push(self.toast(fl!("toast-imported", summary = summary.to_string())));
+                        tasks
+                            .push(self.toast(fl!("toast-imported", summary = summary.to_string())));
                         for note in &summary.notes {
                             tasks.push(self.toast(note.clone()));
                         }
@@ -2260,9 +2266,7 @@ impl cosmic::Application for App {
                         let outcome = tokio::task::spawn_blocking(move || {
                             let mut vault = vault;
                             let result = match factor {
-                                security::Factor::TpmPin => {
-                                    security::enroll_tpm(&mut vault, &pin)
-                                }
+                                security::Factor::TpmPin => security::enroll_tpm(&mut vault, &pin),
                                 security::Factor::SecurityKey => {
                                     security::enroll_fido(&mut vault, &pin)
                                 }
@@ -2312,9 +2316,7 @@ impl cosmic::Application for App {
                 self.vault = slot.lock().ok().and_then(|mut g| g.take());
                 match error {
                     Some(e) => self.security.error = Some(e),
-                    None => {
-                        self.security.notice = Some(fl!("toast-factor-added"))
-                    }
+                    None => self.security.notice = Some(fl!("toast-factor-added")),
                 }
                 if self.vault.is_none() {
                     // Failing safe: without a vault there is nothing to show.
@@ -2354,10 +2356,7 @@ impl cosmic::Application for App {
                 let Some(vault) = self.vault.as_mut() else {
                     return Task::none();
                 };
-                let label = vault
-                    .data()
-                    .trashed(id)
-                    .map(|t| t.item.label.clone());
+                let label = vault.data().trashed(id).map(|t| t.item.label.clone());
                 if vault.restore_item(id).is_none() {
                     return Task::none();
                 }
@@ -2527,7 +2526,10 @@ impl cosmic::Application for App {
                     Ok(task) => task,
                     Err(e) => return self.toast(e),
                 };
-                return Task::batch([saved, self.toast(fl!("toast-attachment-added", name = name))]);
+                return Task::batch([
+                    saved,
+                    self.toast(fl!("toast-attachment-added", name = name)),
+                ]);
             }
 
             Message::AttachmentSave(attachment_id) => {
@@ -2753,9 +2755,7 @@ impl cosmic::Application for App {
                                 }
                                 Task::batch(tasks)
                             }
-                            Err(e) => {
-                                self.toast(fl!("toast-export-failed", error = e.to_string()))
-                            }
+                            Err(e) => self.toast(fl!("toast-export-failed", error = e.to_string())),
                         };
                     }
                     ExportFormat::Kdbx => {
@@ -2926,7 +2926,9 @@ impl cosmic::Application for App {
         }
         let item = self.selected_item()?;
         let title = item.label.clone();
-        Some(context_drawer::context_drawer(self.detail_view()?, Message::CloseContext).title(title))
+        Some(
+            context_drawer::context_drawer(self.detail_view()?, Message::CloseContext).title(title),
+        )
     }
 
     /// The menu bar.
@@ -3103,7 +3105,10 @@ impl cosmic::Application for App {
                         .and_then(|v| v.data().trashed(id))
                         .map(|t| t.item.label.clone())
                         .unwrap_or_else(|| fl!("dialog-delete-fallback-label"));
-                    (fl!("dialog-purge-title"), fl!("dialog-purge-body", label = label))
+                    (
+                        fl!("dialog-purge-title"),
+                        fl!("dialog-purge-body", label = label),
+                    )
                 }
                 PurgeTarget::All => {
                     let count = self
@@ -3195,8 +3200,7 @@ impl cosmic::Application for App {
                 .title(fl!("dialog-conflict-title"))
                 .body(fl!("dialog-conflict-body", name = name))
                 .primary_action(
-                    widget::button::suggested(fl!("dialog-merge"))
-                        .on_press(Message::MergeConflict),
+                    widget::button::suggested(fl!("dialog-merge")).on_press(Message::MergeConflict),
                 )
                 .secondary_action(
                     widget::button::standard(fl!("dialog-later"))
@@ -3293,14 +3297,12 @@ impl cosmic::Application for App {
                 if status != cosmic::iced::event::Status::Ignored {
                     return None;
                 }
-                let cosmic::iced::Event::Keyboard(
-                    cosmic::iced::keyboard::Event::KeyPressed {
-                        key,
-                        physical_key,
-                        modifiers,
-                        ..
-                    },
-                ) = event
+                let cosmic::iced::Event::Keyboard(cosmic::iced::keyboard::Event::KeyPressed {
+                    key,
+                    physical_key,
+                    modifiers,
+                    ..
+                }) = event
                 else {
                     return None;
                 };
@@ -3315,8 +3317,7 @@ impl cosmic::Application for App {
         if self.screen == Screen::Browsing && self.selected_item().is_some_and(has_totp) {
             // Only tick while a live one-time code is on screen.
             subs.push(
-                cosmic::iced::time::every(std::time::Duration::from_secs(1))
-                    .map(|_| Message::Tick),
+                cosmic::iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick),
             );
         }
 
@@ -3504,9 +3505,8 @@ impl App {
                                 // Glob rather than MIME: a .kdbx has no
                                 // registered type on most systems, and a .csv
                                 // is reported inconsistently.
-                                dialog = dialog.filter(
-                                    FileFilter::new(&label).glob(&format!("*.{ext}")),
-                                );
+                                dialog = dialog
+                                    .filter(FileFilter::new(&label).glob(&format!("*.{ext}")));
                             }
                             dialog.open_file().await.ok()
                         }
@@ -3535,10 +3535,7 @@ impl App {
                     if job.is_async() {
                         let mut vault = vault;
                         let outcome = import::run_keyring(&mut vault, &job).await;
-                        return Message::ImportFinished(
-                            Arc::new(Mutex::new(Some(vault))),
-                            outcome,
-                        );
+                        return Message::ImportFinished(Arc::new(Mutex::new(Some(vault))), outcome);
                     }
                     // Back onto a blocking thread: gpg, Argon2 and a few
                     // thousand file reads have no business on the executor's

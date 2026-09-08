@@ -173,9 +173,11 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> Item {
         item.attributes.insert("username".into(), username.into());
     }
     if let Some(email) = content.email.as_deref().filter(|s| !s.is_empty())
-        && content.username.as_deref().is_some_and(|u| !u.is_empty()) {
-            item.fields.push(Field::new("email", FieldKind::Email, email));
-        }
+        && content.username.as_deref().is_some_and(|u| !u.is_empty())
+    {
+        item.fields
+            .push(Field::new("email", FieldKind::Email, email));
+    }
     if let Some(password) = content.password.as_deref().filter(|s| !s.is_empty()) {
         item.secret = password.into();
     }
@@ -384,7 +386,10 @@ mod tests {
         assert_eq!(login.secret.expose(), "hunter2");
         assert_eq!(login.field_value(field_names::USERNAME), Some("ada"));
         assert_eq!(login.field_value("email"), Some("ada@example.com"));
-        assert_eq!(login.field(field_names::TOTP).unwrap().kind, FieldKind::Totp);
+        assert_eq!(
+            login.field(field_names::TOTP).unwrap().kind,
+            FieldKind::Totp
+        );
         assert_eq!(login.field("recovery").unwrap().kind, FieldKind::Secret);
         assert!(login.favorite);
         assert!(login.tags.contains(&"Personal".to_owned()));

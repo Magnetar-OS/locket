@@ -115,9 +115,7 @@ pub fn passphrase(wordlist: &[&str], words: usize, separator: char) -> Result<Se
     for _ in 0..words {
         parts.push(*choose(wordlist)?);
     }
-    Ok(SecretString::new(
-        parts.join(&separator.to_string()),
-    ))
+    Ok(SecretString::new(parts.join(&separator.to_string())))
 }
 
 /// Uniformly pick one element, without modulo bias.
@@ -182,7 +180,11 @@ mod tests {
             ..Default::default()
         };
         let pw = password(&recipe).unwrap();
-        assert!(pw.expose().chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(
+            pw.expose()
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
     }
 
     #[test]
@@ -199,7 +201,13 @@ mod tests {
     #[test]
     fn rejects_impossible_recipes() {
         // Four classes cannot fit in three characters.
-        assert!(password(&PasswordRecipe { length: 3, ..Default::default() }).is_err());
+        assert!(
+            password(&PasswordRecipe {
+                length: 3,
+                ..Default::default()
+            })
+            .is_err()
+        );
         assert!(
             password(&PasswordRecipe {
                 lowercase: false,
@@ -225,7 +233,10 @@ mod tests {
     fn required_characters_are_not_pinned_to_the_front() {
         // If the guaranteed picks were simply appended in class order, the
         // first character would always be lowercase.
-        let recipe = PasswordRecipe { length: 8, ..Default::default() };
+        let recipe = PasswordRecipe {
+            length: 8,
+            ..Default::default()
+        };
         let all_lower_first = (0..64).all(|_| {
             password(&recipe)
                 .unwrap()
@@ -234,7 +245,10 @@ mod tests {
                 .next()
                 .is_some_and(|c| c.is_ascii_lowercase())
         });
-        assert!(!all_lower_first, "class order leaked into character positions");
+        assert!(
+            !all_lower_first,
+            "class order leaked into character positions"
+        );
     }
 
     #[test]

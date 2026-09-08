@@ -120,7 +120,10 @@ pub fn parse(text: &str) -> Vec<Var> {
             continue;
         };
         let key = key.trim();
-        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
         {
             continue;
         }
@@ -218,9 +221,28 @@ fn strip_inline_comment(s: &str) -> &str {
 
 /// Key fragments that mean "this is a credential".
 const SECRET_KEY_MARKERS: &[&str] = &[
-    "SECRET", "TOKEN", "PASSWORD", "PASSWD", "PWD", "PASSPHRASE", "CREDENTIAL", "PRIVATE",
-    "APIKEY", "API_KEY", "ACCESS_KEY", "SIGNING", "SIGNATURE", "SALT", "CERT", "DSN", "AUTH",
-    "SESSION", "COOKIE", "ENCRYPT", "WEBHOOK", "CLIENT_ID",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "PWD",
+    "PASSPHRASE",
+    "CREDENTIAL",
+    "PRIVATE",
+    "APIKEY",
+    "API_KEY",
+    "ACCESS_KEY",
+    "SIGNING",
+    "SIGNATURE",
+    "SALT",
+    "CERT",
+    "DSN",
+    "AUTH",
+    "SESSION",
+    "COOKIE",
+    "ENCRYPT",
+    "WEBHOOK",
+    "CLIENT_ID",
 ];
 
 /// Keys that look secret by the rule above but are conventionally public.
@@ -245,9 +267,30 @@ const NOT_SECRET_KEYS: &[&str] = &[
 
 /// Value prefixes that identify a credential regardless of the key's name.
 const SECRET_VALUE_PREFIXES: &[&str] = &[
-    "sk-", "sk_live_", "sk_test_", "rk_live_", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_",
-    "xoxb-", "xoxp-", "xapp-", "AKIA", "ASIA", "AIza", "ya29.", "eyJ", "-----BEGIN", "glpat-",
-    "npm_", "dop_v1_", "shpat_", "SG.", "hf_",
+    "sk-",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xapp-",
+    "AKIA",
+    "ASIA",
+    "AIza",
+    "ya29.",
+    "eyJ",
+    "-----BEGIN",
+    "glpat-",
+    "npm_",
+    "dop_v1_",
+    "shpat_",
+    "SG.",
+    "hf_",
 ];
 
 /// Whether a variable holds something worth encrypting.
@@ -272,7 +315,10 @@ pub fn is_secret(key: &str, value: &str) -> bool {
     // A connection string with embedded credentials: postgres://u:pw@host/db
     if let Some((scheme, rest)) = value.split_once("://")
         && !scheme.is_empty()
-        && rest.split('/').next().is_some_and(|a| a.contains(':') && a.contains('@'))
+        && rest
+            .split('/')
+            .next()
+            .is_some_and(|a| a.contains(':') && a.contains('@'))
     {
         return true;
     }
@@ -549,7 +595,11 @@ EMPTY=
         assert_eq!(get("QUOTED"), Some("hello world"));
         assert_eq!(get("SINGLE"), Some("raw $NOT_EXPANDED"));
         assert_eq!(get("TRAILING"), Some("value"));
-        assert_eq!(get("HASH_IN_VALUE"), Some("ab#cd"), "a `#` inside a value was eaten");
+        assert_eq!(
+            get("HASH_IN_VALUE"),
+            Some("ab#cd"),
+            "a `#` inside a value was eaten"
+        );
         assert_eq!(get("EMPTY"), Some(""));
     }
 
@@ -658,7 +708,11 @@ EMPTY=
         assert_eq!(item.kind, ItemKind::Environment);
         assert_eq!(item.fields.len(), 2, "both variables should be fields");
 
-        let secret = item.fields.iter().find(|f| f.name == "STRIPE_SECRET_KEY").unwrap();
+        let secret = item
+            .fields
+            .iter()
+            .find(|f| f.name == "STRIPE_SECRET_KEY")
+            .unwrap();
         assert_eq!(secret.kind, FieldKind::Secret);
         let port = item.fields.iter().find(|f| f.name == "PORT").unwrap();
         assert_ne!(port.kind, FieldKind::Secret, "PORT was masked as a secret");
@@ -674,7 +728,11 @@ EMPTY=
             .data()
             .all_items()
             .map(|(_, i)| i)
-            .find(|i| i.attributes.get("env:key").is_some_and(|k| k == "STRIPE_SECRET_KEY"))
+            .find(|i| {
+                i.attributes
+                    .get("env:key")
+                    .is_some_and(|k| k == "STRIPE_SECRET_KEY")
+            })
             .expect("no item for STRIPE_SECRET_KEY");
         assert_eq!(item.secret.expose(), "sk_test_1");
         assert_eq!(item.attributes.get("env:service").unwrap(), "STRIPE");
@@ -693,13 +751,20 @@ EMPTY=
 
         let (_d, mut v) = vault();
         let s = import_dir(&mut v, dir.path(), Grouping::PerService, None).unwrap();
-        assert_eq!(s.imported, 2, "expected one item for STRIPE and one for AWS");
+        assert_eq!(
+            s.imported, 2,
+            "expected one item for STRIPE and one for AWS"
+        );
 
         let stripe = v
             .data()
             .all_items()
             .map(|(_, i)| i)
-            .find(|i| i.attributes.get("env:service").is_some_and(|s| s == "STRIPE"))
+            .find(|i| {
+                i.attributes
+                    .get("env:service")
+                    .is_some_and(|s| s == "STRIPE")
+            })
             .unwrap();
         assert_eq!(stripe.fields.len(), 2);
     }

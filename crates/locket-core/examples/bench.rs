@@ -51,17 +51,21 @@ fn time<T>(label: &str, budget_ms: u128, f: impl FnOnce() -> T) -> T {
 fn main() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = dir.path().join("bench.vault");
-    println!("locket performance — {ITEMS} items, {}\n", std::env::consts::ARCH);
+    println!(
+        "locket performance — {ITEMS} items, {}\n",
+        std::env::consts::ARCH
+    );
 
     // Creation runs the KDF once at the shipped cost. This is the number
     // behind "unlocking is supposed to take a moment".
     let mut vault = time("create + derive KEK (Argon2id 64 MiB, t=3)", 1_000, || {
-        Vault::create(&path, "correct horse battery staple", KdfParams::default())
-            .expect("create")
+        Vault::create(&path, "correct horse battery staple", KdfParams::default()).expect("create")
     });
 
     time("build 10k items in memory", 2_000, || fill(&mut vault));
-    time("encrypt + write 10k items", 2_000, || vault.save().expect("save"));
+    time("encrypt + write 10k items", 2_000, || {
+        vault.save().expect("save")
+    });
     drop(vault);
 
     let vault = time("open: KDF + decrypt + parse 10k items", 1_500, || {

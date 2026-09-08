@@ -35,7 +35,14 @@ const ALIASES: &[(Logical, &[&str])] = &[
     ),
     (
         Logical::Url,
-        &["url", "login_uri", "website", "uri", "login uri", "web site"],
+        &[
+            "url",
+            "login_uri",
+            "website",
+            "uri",
+            "login uri",
+            "web site",
+        ],
     ),
     (
         Logical::Username,
@@ -179,17 +186,17 @@ pub fn map_row(mapping: &Mapping, row: &[String]) -> Option<Item> {
     item.attributes.insert("locket:source".into(), "csv".into());
     item.attributes.insert(
         "csv:key".into(),
-        format!("{title}\u{1f}{}", item.field_value(field_names::USERNAME).unwrap_or("")),
+        format!(
+            "{title}\u{1f}{}",
+            item.field_value(field_names::USERNAME).unwrap_or("")
+        ),
     );
     Some(item)
 }
 
 /// Strip a URL down to its host, for exports with no name column.
 fn host_of(url: &str) -> &str {
-    let rest = url
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(url);
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     host.split('@').next_back().unwrap_or(host)
 }
@@ -200,9 +207,7 @@ pub fn import_reader<R: std::io::Read>(
     reader: R,
     into_collection: Option<&str>,
 ) -> Result<ImportSummary> {
-    let mut rdr = csv::ReaderBuilder::new()
-        .flexible(true)
-        .from_reader(reader);
+    let mut rdr = csv::ReaderBuilder::new().flexible(true).from_reader(reader);
 
     let header: Vec<String> = rdr
         .headers()
@@ -292,7 +297,10 @@ mod tests {
         assert_eq!(item.label, "github.com");
         assert_eq!(item.secret.expose(), "hunter2");
         assert_eq!(item.field_value(field_names::USERNAME), Some("ada"));
-        assert_eq!(item.field_value(field_names::URL), Some("https://github.com/login"));
+        assert_eq!(
+            item.field_value(field_names::URL),
+            Some("https://github.com/login")
+        );
         assert_eq!(item.field_value(field_names::NOTES), Some("my note"));
     }
 
@@ -305,7 +313,10 @@ mod tests {
         );
         assert_eq!(s.imported, 1);
         let (_, item) = v.data().all_items().next().unwrap();
-        assert_eq!(item.label, "mail.example.org", "host did not stand in for a name");
+        assert_eq!(
+            item.label, "mail.example.org",
+            "host did not stand in for a name"
+        );
         assert_eq!(item.secret.expose(), "hunter2");
         // Unmapped columns survive rather than being dropped.
         assert_eq!(item.field_value("guid"), Some("{abc}"));
@@ -359,7 +370,10 @@ mod tests {
         let (_, item) = v.data().all_items().next().unwrap();
         assert_eq!(item.label, "Acme, Inc");
         assert_eq!(item.secret.expose(), "pa,ss");
-        assert_eq!(item.field_value(field_names::NOTES), Some("line one\nline two"));
+        assert_eq!(
+            item.field_value(field_names::NOTES),
+            Some("line one\nline two")
+        );
     }
 
     #[test]
@@ -384,7 +398,11 @@ mod tests {
     fn a_csv_that_is_not_a_password_export_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = vault(&dir);
-        let err = import_reader(&mut v, "date,amount,payee\n2026-01-01,5,shop\n".as_bytes(), None);
+        let err = import_reader(
+            &mut v,
+            "date,amount,payee\n2026-01-01,5,shop\n".as_bytes(),
+            None,
+        );
         assert!(err.is_err(), "a bank statement was accepted as passwords");
     }
 

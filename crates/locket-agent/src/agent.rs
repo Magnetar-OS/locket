@@ -10,11 +10,11 @@ use signature::Signer;
 use ssh_key::{PrivateKey, Signature, private::KeypairData};
 use zeroize::Zeroizing;
 
+use crate::confirm::SigningConfirmer;
 use crate::error::{Error, Result};
 use crate::protocol::{self, Request};
 use crate::signing::{self, RsaHash};
 use crate::sk::{self, SkAlgorithm, SkSignRequest, TokenSigner};
-use crate::confirm::SigningConfirmer;
 use crate::wire::Writer;
 
 /// `SSH_SK_USER_VERIFICATION_REQD` — the key was created `verify-required`, so
@@ -218,9 +218,7 @@ impl AgentKey {
             };
 
             let mut inner = Writer::new();
-            inner
-                .write_string(algorithm.as_bytes())
-                .write_string(&raw);
+            inner.write_string(algorithm.as_bytes()).write_string(&raw);
             return Ok(inner.into_bytes());
         };
 
@@ -369,7 +367,10 @@ impl Agent {
     /// locked the vault, which is precisely what locking is meant to stop.
     pub fn forget_keys(&mut self) {
         if !self.keys.is_empty() {
-            tracing::info!(keys = self.keys.len(), "vault locked; dropping SSH identities");
+            tracing::info!(
+                keys = self.keys.len(),
+                "vault locked; dropping SSH identities"
+            );
         }
         self.keys.clear();
     }
@@ -457,9 +458,7 @@ impl Agent {
                 ),
                 Ok(key) => {
                     let mut key = key
-                        .with_token_pin(
-                            item.field_value(field_names::TOKEN_PIN).map(str::to_owned),
-                        )
+                        .with_token_pin(item.field_value(field_names::TOKEN_PIN).map(str::to_owned))
                         .confirm_each_use(is_truthy(
                             item.field_value(field_names::CONFIRM_EACH_USE),
                         ));
@@ -554,19 +553,19 @@ impl Agent {
                 key_blob,
                 data,
                 flags,
-            } => {
-                match self.sign_response(&key_blob, &data, flags) {
-                    Ok(response) => response,
-                    Err(e) => {
-                        tracing::debug!("refusing to sign: {e}");
-                        protocol::failure()
-                    }
+            } => match self.sign_response(&key_blob, &data, flags) {
+                Ok(response) => response,
+                Err(e) => {
+                    tracing::debug!("refusing to sign: {e}");
+                    protocol::failure()
                 }
-            }
+            },
 
             // Mutating the vault over the agent socket is refused on purpose:
             // every process running as this user can reach the socket.
-            Request::AddIdentity | Request::RemoveIdentity { .. } | Request::RemoveAllIdentities => {
+            Request::AddIdentity
+            | Request::RemoveIdentity { .. }
+            | Request::RemoveAllIdentities => {
                 tracing::info!("refused an agent request to modify the identity set");
                 protocol::failure()
             }
@@ -606,8 +605,9 @@ mod tests {
     use crate::sk::TokenAssertion;
     use crate::wire::Reader;
     use ssh_key::{
-        Algorithm, LineEnding, public,
+        Algorithm, LineEnding,
         private::{self, KeypairData},
+        public,
         rand_core::OsRng,
         sha2::{Digest, Sha256},
     };
@@ -862,7 +862,8 @@ mod tests {
     fn unlocking_an_unlocked_agent_is_refused() {
         let mut agent = Agent::with_keys(vec![test_key("a")]);
         let mut w = Writer::new();
-        w.write_u8(protocol::SSH_AGENTC_UNLOCK).write_string(b"anything");
+        w.write_u8(protocol::SSH_AGENTC_UNLOCK)
+            .write_string(b"anything");
         assert_eq!(agent.handle(w.as_slice()), protocol::failure());
     }
 
@@ -951,7 +952,11 @@ mod tests {
                 .write_string(b"data")
                 .write_u32(flags);
             let (kind, rest) = body_of(&agent.handle(w.as_slice()));
-            assert_eq!(kind, protocol::SSH_AGENT_SIGN_RESPONSE, "refused flags {flags}");
+            assert_eq!(
+                kind,
+                protocol::SSH_AGENT_SIGN_RESPONSE,
+                "refused flags {flags}"
+            );
 
             let mut r = Reader::new(&rest);
             let sig_blob = r.read_string().unwrap();
@@ -1000,14 +1005,22 @@ mod tests {
         let mut agent = Agent::with_keys(vec![key]);
         let (_, rest) = body_of(&agent.handle(&[protocol::SSH_AGENTC_REQUEST_IDENTITIES]));
         let mut r = Reader::new(&rest);
-        assert_eq!(r.read_u32().unwrap(), 2, "a certified key is two identities");
+        assert_eq!(
+            r.read_u32().unwrap(),
+            2,
+            "a certified key is two identities"
+        );
 
         let first = r.read_string().unwrap().to_vec();
         assert_eq!(r.read_utf8().unwrap(), "user@host");
         let second = r.read_string().unwrap().to_vec();
         assert_eq!(r.read_utf8().unwrap(), "user@host");
 
-        assert_eq!(first, cert.to_bytes().unwrap(), "the certificate is not offered first");
+        assert_eq!(
+            first,
+            cert.to_bytes().unwrap(),
+            "the certificate is not offered first"
+        );
         assert_eq!(second, plain);
     }
 
@@ -1046,7 +1059,10 @@ mod tests {
         let err = key
             .attach_certificate(&other_cert.to_openssh().unwrap())
             .unwrap_err();
-        assert!(err.to_string().contains("different key"), "unexpected: {err}");
+        assert!(
+            err.to_string().contains("different key"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -1125,7 +1141,10 @@ mod tests {
 
         let mut agent = Agent::with_keys(vec![key]).with_confirmer(asker.clone());
         assert!(sign_through(&mut agent, &blob, b"data").is_some());
-        assert_eq!(asker.asked.lock().unwrap().as_slice(), &["gated".to_owned()]);
+        assert_eq!(
+            asker.asked.lock().unwrap().as_slice(),
+            &["gated".to_owned()]
+        );
     }
 
     #[test]
@@ -1293,7 +1312,10 @@ mod tests {
 
         let seen = token.seen.lock().unwrap();
         let asked = seen.first().unwrap();
-        assert!(!asked.user_verification, "a touch-only key demanded user verification");
+        assert!(
+            !asked.user_verification,
+            "a touch-only key demanded user verification"
+        );
         assert_eq!(asked.pin, None);
     }
 

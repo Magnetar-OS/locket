@@ -106,9 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // `locket_agent` is in the default set because that is where
                 // "touch your security key" is logged. A signature that waits
                 // silently for hardware looks like a hang.
-                .unwrap_or_else(|_| {
-                    "locketd=info,locket_secret=info,locket_agent=info".into()
-                }),
+                .unwrap_or_else(|_| "locketd=info,locket_secret=info,locket_agent=info".into()),
         )
         .init();
 

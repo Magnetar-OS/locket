@@ -103,12 +103,11 @@ struct CustomField {
 /// Parse the export and convert every entry, without touching a vault.
 /// Public so it can be tested — and fuzzed — on bytes alone.
 pub fn parse(text: &str) -> Result<Vec<Item>> {
-    let export: Export =
-        serde_json::from_str(text).map_err(|e| Error::Database(format!("not a Bitwarden JSON export: {e}")))?;
+    let export: Export = serde_json::from_str(text)
+        .map_err(|e| Error::Database(format!("not a Bitwarden JSON export: {e}")))?;
     if export.encrypted {
         return Err(Error::Decrypt(
-            "this is a password-protected export; export again without a file password"
-                .into(),
+            "this is a password-protected export; export again without a file password".into(),
         ));
     }
 
@@ -306,7 +305,10 @@ mod tests {
         assert_eq!(login.kind, ItemKind::Login);
         assert_eq!(login.secret.expose(), "hunter2");
         assert_eq!(login.field_value(field_names::USERNAME), Some("ada"));
-        assert_eq!(login.field_value(field_names::URL), Some("https://github.com"));
+        assert_eq!(
+            login.field_value(field_names::URL),
+            Some("https://github.com")
+        );
         assert!(login.favorite);
         assert_eq!(login.tags, vec!["Work"]);
         let totp = login.field(field_names::TOTP).unwrap();

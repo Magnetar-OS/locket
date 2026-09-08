@@ -71,16 +71,28 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
-    Status { unlocked: bool, daemon: bool },
+    Status {
+        unlocked: bool,
+        daemon: bool,
+    },
     /// Deliberately carries no passwords.
-    Matches { items: Vec<Match> },
-    Secret { id: String, password: String },
+    Matches {
+        items: Vec<Match>,
+    },
+    Secret {
+        id: String,
+        password: String,
+    },
     /// The save landed; `updated` says whether an existing entry was
     /// changed (its old value now in history) rather than a new one made.
-    Saved { updated: bool },
+    Saved {
+        updated: bool,
+    },
     /// The vault is locked; the user must unlock in locket itself.
     Locked,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// One candidate credential, without its secret.
@@ -169,7 +181,14 @@ mod tests {
     #[test]
     fn framing_roundtrips() {
         let mut buf = Vec::new();
-        write_message(&mut buf, &Response::Status { unlocked: true, daemon: true }).unwrap();
+        write_message(
+            &mut buf,
+            &Response::Status {
+                unlocked: true,
+                daemon: true,
+            },
+        )
+        .unwrap();
 
         // The length prefix is native-endian, not big-endian.
         let len = u32::from_ne_bytes(buf[..4].try_into().unwrap()) as usize;
@@ -204,13 +223,22 @@ mod tests {
         buf.extend_from_slice(&(body.len() as u32).to_ne_bytes());
         buf.extend_from_slice(body);
         let mut cursor = std::io::Cursor::new(buf);
-        assert!(matches!(read_message(&mut cursor), Err(Error::Malformed(_))));
+        assert!(matches!(
+            read_message(&mut cursor),
+            Err(Error::Malformed(_))
+        ));
     }
 
     #[test]
     fn requests_parse_from_the_wire_shape_the_extension_sends() {
-        let search: Request = serde_json::from_str(r#"{"type":"search","url":"https://github.com/login"}"#).unwrap();
-        assert_eq!(search, Request::Search { url: "https://github.com/login".into() });
+        let search: Request =
+            serde_json::from_str(r#"{"type":"search","url":"https://github.com/login"}"#).unwrap();
+        assert_eq!(
+            search,
+            Request::Search {
+                url: "https://github.com/login".into()
+            }
+        );
         let get: Request =
             serde_json::from_str(r#"{"type":"get","id":"abc","url":"https://github.com/"}"#)
                 .unwrap();
@@ -225,7 +253,10 @@ mod tests {
 
     #[test]
     fn origin_extraction_handles_the_shapes_pages_send() {
-        assert_eq!(origin_of("https://www.example.com/login?next=1"), "example.com");
+        assert_eq!(
+            origin_of("https://www.example.com/login?next=1"),
+            "example.com"
+        );
         assert_eq!(origin_of("http://Example.COM:8443/"), "example.com");
         assert_eq!(origin_of("example.com"), "example.com");
         assert_eq!(origin_of(""), "");
@@ -234,7 +265,10 @@ mod tests {
     #[test]
     fn subdomains_match_but_lookalikes_do_not() {
         assert!(origin_matches("example.com", "example.com"));
-        assert!(origin_matches("https://example.com", "https://mail.example.com/x"));
+        assert!(origin_matches(
+            "https://example.com",
+            "https://mail.example.com/x"
+        ));
 
         // The attacks this guards against.
         assert!(!origin_matches("example.com", "notexample.com"));

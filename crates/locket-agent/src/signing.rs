@@ -79,17 +79,16 @@ fn private_key(keypair: &RsaKeypair) -> Result<rsa::RsaPrivateKey> {
     let big = |m: &Mpint, what: &'static str| -> Result<BigUint> {
         m.as_positive_bytes()
             .map(BigUint::from_bytes_be)
-            .ok_or_else(|| Error::BadKey(format!("RSA component `{what}` is not a positive integer")))
+            .ok_or_else(|| {
+                Error::BadKey(format!("RSA component `{what}` is not a positive integer"))
+            })
     };
 
     rsa::RsaPrivateKey::from_components(
         big(&keypair.public.n, "n")?,
         big(&keypair.public.e, "e")?,
         big(&keypair.private.d, "d")?,
-        vec![
-            big(&keypair.private.p, "p")?,
-            big(&keypair.private.q, "q")?,
-        ],
+        vec![big(&keypair.private.p, "p")?, big(&keypair.private.q, "q")?],
     )
     .map_err(|e| Error::BadKey(format!("RSA key components do not form a usable key: {e}")))
 }

@@ -198,7 +198,11 @@ impl PamHooks for PamLocket {
         PamResultCode::PAM_SUCCESS
     }
 
-    fn sm_close_session(_pamh: &mut PamHandle, _args: Vec<&CStr>, _flags: PamFlag) -> PamResultCode {
+    fn sm_close_session(
+        _pamh: &mut PamHandle,
+        _args: Vec<&CStr>,
+        _flags: PamFlag,
+    ) -> PamResultCode {
         // Locking on logout is the daemon's business — it knows whether other
         // sessions are still open. Doing it here would lock the vault out from
         // under a second, still-live login.
@@ -217,7 +221,11 @@ fn log(message: &str) {
     if let Ok(c) = std::ffi::CString::new(message) {
         // SAFETY: `syslog` copies the formatted string; `c` outlives the call.
         unsafe {
-            libc::syslog(libc::LOG_AUTHPRIV | libc::LOG_INFO, c"%s".as_ptr(), c.as_ptr());
+            libc::syslog(
+                libc::LOG_AUTHPRIV | libc::LOG_INFO,
+                c"%s".as_ptr(),
+                c.as_ptr(),
+            );
         }
     }
 }

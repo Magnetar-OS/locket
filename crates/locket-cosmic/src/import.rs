@@ -290,12 +290,14 @@ impl Import {
 
         if self.source == Source::DotEnv {
             let selected = GROUPINGS.iter().position(|g| *g == self.grouping);
-            form = form.push(
-                widget::settings::section().add(widget::settings::item(
-                    fl!("import-group-variables"),
-                    widget::dropdown(GROUPING_LABELS.as_slice(), selected, Message::GroupingSelected),
-                )),
-            );
+            form = form.push(widget::settings::section().add(widget::settings::item(
+                fl!("import-group-variables"),
+                widget::dropdown(
+                    GROUPING_LABELS.as_slice(),
+                    selected,
+                    Message::GroupingSelected,
+                ),
+            )));
         }
 
         if self.source == Source::KeePass {
@@ -318,11 +320,11 @@ impl Import {
         );
 
         if let Some(error) = &self.error {
-            form = form.push(widget::text::body(error.clone()).class(
-                cosmic::theme::Text::Color(
+            form = form.push(
+                widget::text::body(error.clone()).class(cosmic::theme::Text::Color(
                     cosmic::theme::active().cosmic().destructive_color().into(),
-                ),
-            ));
+                )),
+            );
         }
 
         let run = widget::button::suggested(if self.busy {
@@ -413,21 +415,14 @@ pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
         }
         Source::KeePass => {
             let path = path.ok_or_else(|| fl!("import-error-no-database"))?;
-            locket_import::keepass::import_kdbx(
-                vault,
-                path,
-                &job.database_password,
-                None,
-                into,
-            )
+            locket_import::keepass::import_kdbx(vault, path, &job.database_password, None, into)
         }
         Source::SshKeys => {
             let path = path.ok_or_else(|| fl!("import-error-no-folder"))?;
             locket_import::ssh::import_dir(vault, path, into)
         }
         Source::CloudClis => {
-            let home = locket_import::cloud::home()
-                .ok_or_else(|| fl!("import-error-no-home"))?;
+            let home = locket_import::cloud::home().ok_or_else(|| fl!("import-error-no-home"))?;
             locket_import::cloud::import_home(vault, &home, "sqlite3", into)
         }
         Source::Totp => {
@@ -505,7 +500,10 @@ mod tests {
     fn the_keyring_import_needs_no_path() {
         let mut form = Import::default();
         form.select_source(
-            Source::ALL.iter().position(|s| *s == Source::Keyring).unwrap(),
+            Source::ALL
+                .iter()
+                .position(|s| *s == Source::Keyring)
+                .unwrap(),
         );
         assert!(form.is_runnable(), "the keyring import demanded a file");
     }
@@ -516,8 +514,16 @@ mod tests {
             path: Some(PathBuf::from("/tmp/export.csv")),
             ..Default::default()
         };
-        form.select_source(Source::ALL.iter().position(|s| *s == Source::DotEnv).unwrap());
-        assert_eq!(form.path, None, "a .csv path survived into a directory import");
+        form.select_source(
+            Source::ALL
+                .iter()
+                .position(|s| *s == Source::DotEnv)
+                .unwrap(),
+        );
+        assert_eq!(
+            form.path, None,
+            "a .csv path survived into a directory import"
+        );
         assert_eq!(form.collection, "Environment");
     }
 
@@ -525,7 +531,12 @@ mod tests {
     fn each_source_asks_for_the_right_kind_of_dialog() {
         let mut form = Import::default();
         assert!(matches!(form.picker(), Picker::File { .. }));
-        form.select_source(Source::ALL.iter().position(|s| *s == Source::DotEnv).unwrap());
+        form.select_source(
+            Source::ALL
+                .iter()
+                .position(|s| *s == Source::DotEnv)
+                .unwrap(),
+        );
         assert!(matches!(form.picker(), Picker::Folder { .. }));
         form.select_source(
             Source::ALL

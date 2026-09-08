@@ -108,7 +108,10 @@ pub(crate) fn already_present(vault: &Vault, attributes: &BTreeMap<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use locket_core::{crypto::KdfParams, model::{Item, ItemKind}};
+    use locket_core::{
+        crypto::KdfParams,
+        model::{Item, ItemKind},
+    };
 
     #[test]
     fn target_collection_is_reused_not_duplicated() {

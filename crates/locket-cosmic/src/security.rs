@@ -164,9 +164,8 @@ pub const KDF_PRESETS: &[fn() -> locket_core::crypto::KdfParams] = &[
 ];
 
 /// Dropdown labels, cached because the widget borrows them per frame.
-pub static KDF_LABELS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
-    vec![fl!("kdf-balanced"), fl!("kdf-stronger"), fl!("kdf-lighter")]
-});
+pub static KDF_LABELS: std::sync::LazyLock<Vec<String>> =
+    std::sync::LazyLock::new(|| vec![fl!("kdf-balanced"), fl!("kdf-stronger"), fl!("kdf-lighter")]);
 
 /// State for the security screen.
 #[derive(Default)]
@@ -269,8 +268,13 @@ impl Security {
             .push(widget::text::caption_heading(fl!("security-add-heading")));
 
         column = column.push(
-            widget::text_input::secure_input(fl!("security-pin-placeholder"), &self.pin, None, true)
-                .on_input(Message::PinChanged),
+            widget::text_input::secure_input(
+                fl!("security-pin-placeholder"),
+                &self.pin,
+                None,
+                true,
+            )
+            .on_input(Message::PinChanged),
         );
 
         let mut buttons = widget::row::with_capacity(2).spacing(spacing.space_xs);
@@ -303,7 +307,9 @@ impl Security {
         // -- change the passphrase -------------------------------------------
         column = column
             .push(widget::divider::horizontal::default())
-            .push(widget::text::caption_heading(fl!("security-passphrase-heading")))
+            .push(widget::text::caption_heading(fl!(
+                "security-passphrase-heading"
+            )))
             .push(widget::text::caption(fl!("security-passphrase-blurb")))
             .push(
                 // The current passphrase is required even though the vault is
@@ -428,7 +434,9 @@ mod tests {
     /// sentence. They are invisible on screen; they are not invisible to
     /// `contains`.
     fn without_isolates(s: &str) -> String {
-        s.chars().filter(|c| !matches!(c, '\u{2068}' | '\u{2069}')).collect()
+        s.chars()
+            .filter(|c| !matches!(c, '\u{2068}' | '\u{2069}'))
+            .collect()
     }
 
     #[test]

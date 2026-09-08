@@ -130,7 +130,11 @@ impl Eq for SecretString {}
 
 impl std::fmt::Debug for SecretString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SecretString([redacted; {} chars])", self.0.chars().count())
+        write!(
+            f,
+            "SecretString([redacted; {} chars])",
+            self.0.chars().count()
+        )
     }
 }
 

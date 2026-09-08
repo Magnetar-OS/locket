@@ -16,10 +16,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use locket_core::{
-    Field, FieldKind, Item, ItemKind, Vault,
-    model::field_names,
-};
+use locket_core::{Field, FieldKind, Item, ItemKind, Vault, model::field_names};
 
 use crate::{Error, ImportSummary, Result};
 
@@ -66,14 +63,16 @@ pub fn parse_entry(name: &str, plaintext: &str) -> Item {
             const URL_SCHEMES: &[&str] = &[
                 "http", "https", "ftp", "ftps", "file", "mailto", "ssh", "sftp", "otpauth",
             ];
-            let looks_like_a_url = value.starts_with("//")
-                || URL_SCHEMES.contains(&key.to_lowercase().as_str());
+            let looks_like_a_url =
+                value.starts_with("//") || URL_SCHEMES.contains(&key.to_lowercase().as_str());
 
             let key_is_fieldlike = !key.is_empty()
                 && key.len() <= 32
                 && !key.contains(char::is_whitespace)
                 && !looks_like_a_url
-                && key.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_');
+                && key
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_');
 
             if key_is_fieldlike && !value.is_empty() {
                 let lower = key.to_lowercase();
@@ -111,7 +110,8 @@ pub fn parse_entry(name: &str, plaintext: &str) -> Item {
         let user = user.to_owned();
         item.attributes.insert("username".into(), user);
     }
-    item.attributes.insert("locket:source".into(), "pass".into());
+    item.attributes
+        .insert("locket:source".into(), "pass".into());
     item.attributes.insert("pass:path".into(), name.to_owned());
     item
 }
@@ -232,7 +232,10 @@ mod tests {
         let item = parse_entry("web/social/github.com", "pw\n");
         assert_eq!(item.label, "github.com");
         assert_eq!(item.tags, vec!["web", "social"]);
-        assert_eq!(item.attributes.get("pass:path").unwrap(), "web/social/github.com");
+        assert_eq!(
+            item.attributes.get("pass:path").unwrap(),
+            "web/social/github.com"
+        );
     }
 
     #[test]
@@ -259,7 +262,10 @@ mod tests {
 
         // A bare URL line must not become a field called "https".
         let bare = parse_entry("x", "pw\nhttps://example.org/login\n");
-        assert!(bare.field("https").is_none(), "URL scheme became a field name");
+        assert!(
+            bare.field("https").is_none(),
+            "URL scheme became a field name"
+        );
         assert_eq!(
             bare.field_value(field_names::NOTES),
             Some("https://example.org/login")
@@ -268,14 +274,20 @@ mod tests {
         // Same for schemes with no double slash.
         let mail = parse_entry("x", "pw\nmailto:ada@example.org\n");
         assert!(mail.field("mailto").is_none());
-        assert!(mail.field_value(field_names::NOTES).unwrap().contains("ada@"));
+        assert!(
+            mail.field_value(field_names::NOTES)
+                .unwrap()
+                .contains("ada@")
+        );
     }
 
     #[test]
     fn prose_with_a_colon_stays_prose() {
         let item = parse_entry("x", "pw\nnote to self: rotate this in June\n");
         assert!(
-            item.field_value(field_names::NOTES).unwrap().contains("rotate this"),
+            item.field_value(field_names::NOTES)
+                .unwrap()
+                .contains("rotate this"),
             "a sentence was mistaken for a field"
         );
     }
@@ -283,7 +295,10 @@ mod tests {
     #[test]
     fn secret_looking_keys_are_masked() {
         let item = parse_entry("x", "pw\nrecovery-token: abc123\ncomment: hello\n");
-        assert_eq!(item.field("recovery-token").unwrap().kind, FieldKind::Secret);
+        assert_eq!(
+            item.field("recovery-token").unwrap().kind,
+            FieldKind::Secret
+        );
         assert_eq!(item.field("comment").unwrap().kind, FieldKind::Text);
     }
 
@@ -313,7 +328,11 @@ mod tests {
         std::fs::write(root.join("README.md"), b"not a secret").unwrap();
         std::fs::write(root.join(".git/config"), b"[core]").unwrap();
 
-        let names: Vec<String> = entry_names(root).unwrap().into_iter().map(|(n, _)| n).collect();
+        let names: Vec<String> = entry_names(root)
+            .unwrap()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         assert_eq!(names, vec!["bank", "web/github.com"]);
     }
 }

@@ -238,8 +238,14 @@ fn lock_file(path: &Path, exclusive: bool) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    let file = opts.open(&lock_path).map_err(|e| Error::io(&lock_path, e))?;
-    let locked = if exclusive { file.lock() } else { file.lock_shared() };
+    let file = opts
+        .open(&lock_path)
+        .map_err(|e| Error::io(&lock_path, e))?;
+    let locked = if exclusive {
+        file.lock()
+    } else {
+        file.lock_shared()
+    };
     locked.map_err(|e| Error::io(&lock_path, e))?;
     Ok(file)
 }
@@ -309,7 +315,14 @@ impl Vault {
         let path = path.into();
         let dek = SymKey::random()?;
 
-        let slot = Slot::new_passphrase("Passphrase", passphrase, params, &dek, magic, FORMAT_VERSION)?;
+        let slot = Slot::new_passphrase(
+            "Passphrase",
+            passphrase,
+            params,
+            &dek,
+            magic,
+            FORMAT_VERSION,
+        )?;
 
         let file = VaultFile {
             magic: magic.to_owned(),
@@ -557,7 +570,14 @@ impl Vault {
         factor: SlotFactor,
         kek: &SymKey,
     ) -> Result<Uuid> {
-        let slot = Slot::new_with_kek(label, factor, kek, &self.dek, &self.file.magic, self.file.format)?;
+        let slot = Slot::new_with_kek(
+            label,
+            factor,
+            kek,
+            &self.dek,
+            &self.file.magic,
+            self.file.format,
+        )?;
         let id = slot.id;
         self.file.slots.push(slot);
         self.dirty = true;
@@ -776,11 +796,7 @@ impl Vault {
     /// the GUI editor, `locket edit`, a Secret Service replace-on-store. Raw
     /// [`Vault::item_mut`] stays available for changes that are not edits of
     /// the item's content (bookkeeping like `favorite`).
-    pub fn edit_item<R>(
-        &mut self,
-        id: Uuid,
-        f: impl FnOnce(&mut Item) -> R,
-    ) -> Result<R> {
+    pub fn edit_item<R>(&mut self, id: Uuid, f: impl FnOnce(&mut Item) -> R) -> Result<R> {
         let item = self.item_mut(id).ok_or(Error::NoSuchItem(id))?;
         item.record_revision();
         let out = f(item);
@@ -837,13 +853,11 @@ impl Vault {
             .map(|e| e.path())
             .filter(|p| {
                 p.is_file()
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|name| {
-                            name.starts_with(stem)
-                                && name.contains(".sync-conflict")
-                                && name.ends_with(".vault")
-                        })
+                    && p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+                        name.starts_with(stem)
+                            && name.contains(".sync-conflict")
+                            && name.ends_with(".vault")
+                    })
             })
             .collect();
         found.sort();
@@ -866,8 +880,12 @@ mod tests {
     #[test]
     fn create_open_roundtrip() {
         let (_d, path) = tmp();
-        let mut v = Vault::create(&path, "correct horse battery staple", KdfParams::insecure_fast())
-            .unwrap();
+        let mut v = Vault::create(
+            &path,
+            "correct horse battery staple",
+            KdfParams::insecure_fast(),
+        )
+        .unwrap();
         let id = v.add_item_default(
             Item::new(ItemKind::Login, "GitHub")
                 .with_secret("hunter2")
@@ -901,7 +919,10 @@ mod tests {
         v.save().unwrap();
 
         let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
-        assert!(!raw.contains("s3kr1t-canary-value"), "secret leaked in the clear");
+        assert!(
+            !raw.contains("s3kr1t-canary-value"),
+            "secret leaked in the clear"
+        );
         assert!(!raw.contains("Bank"), "label leaked in the clear");
     }
 
@@ -915,7 +936,10 @@ mod tests {
         v.change_passphrase("new", params).unwrap();
         drop(v);
 
-        assert!(matches!(Vault::open(&path, "old"), Err(Error::WrongPassphrase)));
+        assert!(matches!(
+            Vault::open(&path, "old"),
+            Err(Error::WrongPassphrase)
+        ));
         let v2 = Vault::open(&path, "new").unwrap();
         assert_eq!(v2.item(id).unwrap().secret.expose(), "body");
         assert_eq!(v2.slots().len(), 1, "passphrase change left a stale slot");
@@ -1090,14 +1114,20 @@ mod tests {
 
         // Surfaces as a rejected factor: a slot whose AAD no longer matches is
         // indistinguishable from one the supplied passphrase never fitted.
-        assert!(matches!(Vault::open(&path, "pw"), Err(Error::WrongPassphrase)));
+        assert!(matches!(
+            Vault::open(&path, "pw"),
+            Err(Error::WrongPassphrase)
+        ));
     }
 
     #[test]
     fn opening_a_non_vault_file_is_diagnosable() {
         let (_d, path) = tmp();
         std::fs::write(&path, b"this is not a vault").unwrap();
-        assert!(matches!(Vault::open(&path, "pw"), Err(Error::NotAVault { .. })));
+        assert!(matches!(
+            Vault::open(&path, "pw"),
+            Err(Error::NotAVault { .. })
+        ));
     }
 
     #[test]
@@ -1126,17 +1156,26 @@ mod tests {
         // No passphrase involved: this is what a locked daemon can answer.
         let index = Vault::read_index(&path).unwrap();
         let labels: Vec<&str> = index.iter().map(|c| c.label.as_str()).collect();
-        assert!(labels.contains(&"Login"), "default collection missing from the index");
+        assert!(
+            labels.contains(&"Login"),
+            "default collection missing from the index"
+        );
         assert!(labels.contains(&"Work"));
         assert_eq!(
-            index.iter().find(|c| c.alias.as_deref() == Some("default")).map(|c| &c.label),
+            index
+                .iter()
+                .find(|c| c.alias.as_deref() == Some("default"))
+                .map(|c| &c.label),
             Some(&"Login".to_owned()),
             "the default alias must be resolvable while locked"
         );
 
         // Item-level data must NOT be in the clear, only collection names.
         let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
-        assert!(raw.contains("Work"), "collection labels are deliberately plaintext");
+        assert!(
+            raw.contains("Work"),
+            "collection labels are deliberately plaintext"
+        );
         assert!(
             !raw.contains("Secret Label"),
             "an item label leaked into the plaintext index"
@@ -1152,7 +1191,10 @@ mod tests {
         file.collections[0].label = "Renamed".into();
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
 
-        assert!(matches!(Vault::open(&path, "pw"), Err(Error::Unauthenticated)));
+        assert!(matches!(
+            Vault::open(&path, "pw"),
+            Err(Error::Unauthenticated)
+        ));
     }
 
     #[cfg(unix)]
@@ -1207,7 +1249,11 @@ mod tests {
         // The first writer's item is still there.
         let disk = Vault::open(&path, "pw").unwrap();
         assert_eq!(disk.data().item_count(), 1);
-        assert!(disk.data().all_items().any(|(_, i)| i.label == "from the daemon"));
+        assert!(
+            disk.data()
+                .all_items()
+                .any(|(_, i)| i.label == "from the daemon")
+        );
     }
 
     #[test]
@@ -1225,7 +1271,11 @@ mod tests {
         assert!(second.changed_on_disk());
         second.reload().unwrap();
         assert!(!second.changed_on_disk());
-        assert_eq!(second.data().item_count(), 1, "reload did not pick up the write");
+        assert_eq!(
+            second.data().item_count(),
+            1,
+            "reload did not pick up the write"
+        );
 
         second.add_item_default(Item::new(ItemKind::Login, "second"));
         second.save().expect("save after reload should succeed");
@@ -1260,7 +1310,9 @@ mod tests {
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
         for n in 0..3 {
             vault.add_item_default(Item::new(ItemKind::Login, format!("item {n}")));
-            vault.save().expect("own writes must not look like someone else's");
+            vault
+                .save()
+                .expect("own writes must not look like someone else's");
         }
         assert_eq!(Vault::open(&path, "pw").unwrap().data().item_count(), 3);
     }
@@ -1283,8 +1335,8 @@ mod tests {
         // format 2 — and only then save, so the body is sealed over these
         // slots at the current format. That is the on-disk shape a real
         // upgraded vault has: new header and body, old slot.
-        let dek = Vault::unwrap_with(&vault.file, &crate::slots::PassphraseOpener::new("pw"))
-            .unwrap();
+        let dek =
+            Vault::unwrap_with(&vault.file, &crate::slots::PassphraseOpener::new("pw")).unwrap();
         vault.file.slots = vec![
             crate::slots::Slot::new_passphrase(
                 "Passphrase",
@@ -1328,8 +1380,7 @@ mod tests {
 
         let mut file = vault.file.clone();
         file.format = 2;
-        let expected =
-            serde_json::to_vec(&(&file.magic, 2u16, &file.slots)).unwrap();
+        let expected = serde_json::to_vec(&(&file.magic, 2u16, &file.slots)).unwrap();
         assert_eq!(
             file.body_aad(),
             expected,
@@ -1391,10 +1442,20 @@ mod tests {
         drop(v);
 
         let on_disk = Vault::read_file(&path).unwrap();
-        assert_eq!(on_disk.format, FORMAT_VERSION, "save did not upgrade the format");
+        assert_eq!(
+            on_disk.format, FORMAT_VERSION,
+            "save did not upgrade the format"
+        );
         let reopened = Vault::open(&path, "pw").unwrap();
         assert_eq!(
-            reopened.data().all_items().next().unwrap().1.secret.expose(),
+            reopened
+                .data()
+                .all_items()
+                .next()
+                .unwrap()
+                .1
+                .secret
+                .expose(),
             "survives"
         );
     }
@@ -1411,7 +1472,10 @@ mod tests {
 
         let mut v2 = Vault::open(&path, "pw").unwrap();
         assert!(v2.item(id).is_none());
-        assert!(v2.data().trashed(id).is_some(), "trash was lost on the roundtrip");
+        assert!(
+            v2.data().trashed(id).is_some(),
+            "trash was lost on the roundtrip"
+        );
         v2.restore_item(id).expect("restore failed");
         assert_eq!(v2.item(id).unwrap().secret.expose(), "s");
         assert!(v2.data().trashed(id).is_none());
@@ -1436,8 +1500,14 @@ mod tests {
         drop(v);
 
         let v2 = Vault::open(&path, "pw").unwrap();
-        assert!(v2.data().trashed(old).is_none(), "expired trash survived unlock");
-        assert!(v2.data().trashed(recent).is_some(), "fresh trash was purged");
+        assert!(
+            v2.data().trashed(old).is_none(),
+            "expired trash survived unlock"
+        );
+        assert!(
+            v2.data().trashed(recent).is_some(),
+            "fresh trash was purged"
+        );
         assert!(v2.is_dirty(), "a purge must reach disk on the next save");
     }
 
@@ -1447,8 +1517,10 @@ mod tests {
         let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
         let id = v.add_item_default(Item::new(ItemKind::Login, "Site").with_secret("first"));
 
-        v.edit_item(id, |item| item.secret = "second".into()).unwrap();
-        v.edit_item(id, |item| item.secret = "third".into()).unwrap();
+        v.edit_item(id, |item| item.secret = "second".into())
+            .unwrap();
+        v.edit_item(id, |item| item.secret = "third".into())
+            .unwrap();
         v.save().unwrap();
         drop(v);
 
@@ -1459,11 +1531,14 @@ mod tests {
         assert_eq!(item.history[0].item.secret.expose(), "first");
         assert_eq!(item.history[1].item.secret.expose(), "second");
 
-        v2.edit_item(id, |item| item.restore_revision(0).unwrap()).unwrap();
+        v2.edit_item(id, |item| item.restore_revision(0).unwrap())
+            .unwrap();
         let item = v2.item(id).unwrap();
         assert_eq!(item.secret.expose(), "first", "restore did not take");
         assert!(
-            item.history.iter().any(|r| r.item.secret.expose() == "third"),
+            item.history
+                .iter()
+                .any(|r| r.item.secret.expose() == "third"),
             "the state a restore replaced must itself be recoverable"
         );
     }
@@ -1485,7 +1560,10 @@ mod tests {
 
         let raw = std::fs::read(&path).unwrap();
         let raw_text = String::from_utf8_lossy(&raw);
-        assert!(!raw_text.contains("recovery-codes-canary"), "attachment bytes leaked");
+        assert!(
+            !raw_text.contains("recovery-codes-canary"),
+            "attachment bytes leaked"
+        );
         assert!(!raw_text.contains("recovery.pdf"), "attachment name leaked");
 
         let v2 = Vault::open(&path, "pw").unwrap();
@@ -1544,16 +1622,25 @@ mod tests {
         drop(forked);
 
         // No passphrase involved: the held DEK opens the sibling.
-        let other = v.open_sibling(&fork).expect("sibling did not open with the held key");
+        let other = v
+            .open_sibling(&fork)
+            .expect("sibling did not open with the held key");
         let report = v.merge_from(other);
         assert_eq!(report.added, 1);
-        assert!(v.data().all_items().any(|(_, i)| i.label == "From the fork"));
+        assert!(
+            v.data()
+                .all_items()
+                .any(|(_, i)| i.label == "From the fork")
+        );
 
         // An unrelated vault is not a sibling, and must not decrypt.
         let stranger_path = dir.path().join("other.vault");
         let mut stranger = Vault::create(&stranger_path, "pw", KdfParams::insecure_fast()).unwrap();
         stranger.save().unwrap();
-        assert!(v.open_sibling(&stranger_path).is_err(), "a foreign vault decrypted");
+        assert!(
+            v.open_sibling(&stranger_path).is_err(),
+            "a foreign vault decrypted"
+        );
     }
 
     /// Format 1 files must keep opening, and be upgraded on save.

@@ -233,7 +233,10 @@ mod tests {
         let a = SymKey::random().unwrap();
         let b = SymKey::random().unwrap();
         let (nonce, ct) = a.seal(b"hunter2", b"").unwrap();
-        assert!(matches!(b.open(&nonce, &ct, b""), Err(Error::Unauthenticated)));
+        assert!(matches!(
+            b.open(&nonce, &ct, b""),
+            Err(Error::Unauthenticated)
+        ));
     }
 
     #[test]

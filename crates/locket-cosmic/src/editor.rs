@@ -41,7 +41,10 @@ pub enum Outcome {
     /// Keep editing.
     Continue,
     /// Commit `item`; `id` is `None` when it is a new item.
-    Save { id: Option<Uuid>, item: Box<Item> },
+    Save {
+        id: Option<Uuid>,
+        item: Box<Item>,
+    },
     Cancel,
 }
 
@@ -196,9 +199,9 @@ impl Editor {
 
         let expires = match self.expires.trim() {
             "" => None,
-            date => Some(
-                locket_core::model::parse_date(date).ok_or_else(|| fl!("editor-bad-expiry"))?,
-            ),
+            date => {
+                Some(locket_core::model::parse_date(date).ok_or_else(|| fl!("editor-bad-expiry"))?)
+            }
         };
 
         let mut item = Item::new(self.kind(), self.label.trim());
@@ -290,7 +293,10 @@ impl Editor {
 
             EditorMessage::Save => match self.to_item() {
                 Ok(item) => {
-                    return Outcome::Save { id: self.id, item: Box::new(item) };
+                    return Outcome::Save {
+                        id: self.id,
+                        item: Box::new(item),
+                    };
                 }
                 Err(e) => self.error = Some(e),
             },
@@ -311,9 +317,11 @@ impl Editor {
         }));
 
         if let Some(error) = &self.error {
-            form = form.push(widget::text::body(error.clone()).class(cosmic::theme::Text::Color(
-                cosmic::theme::active().cosmic().destructive_color().into(),
-            )));
+            form = form.push(
+                widget::text::body(error.clone()).class(cosmic::theme::Text::Color(
+                    cosmic::theme::active().cosmic().destructive_color().into(),
+                )),
+            );
         }
 
         form = form
@@ -336,25 +344,27 @@ impl Editor {
             );
 
         // -- primary secret + generator ------------------------------------
-        form = form.push(widget::text::caption_heading(fl!("editor-secret"))).push(
-            widget::row::with_capacity(2)
-                .spacing(spacing.space_xxs)
-                .align_y(Alignment::Center)
-                .push(
-                    widget::text_input::secure_input(
-                        "",
-                        &self.secret,
-                        Some(EditorMessage::ToggleSecretReveal),
-                        !self.secret_revealed,
+        form = form
+            .push(widget::text::caption_heading(fl!("editor-secret")))
+            .push(
+                widget::row::with_capacity(2)
+                    .spacing(spacing.space_xxs)
+                    .align_y(Alignment::Center)
+                    .push(
+                        widget::text_input::secure_input(
+                            "",
+                            &self.secret,
+                            Some(EditorMessage::ToggleSecretReveal),
+                            !self.secret_revealed,
+                        )
+                        .on_input(EditorMessage::Secret)
+                        .width(Length::Fill),
                     )
-                    .on_input(EditorMessage::Secret)
-                    .width(Length::Fill),
-                )
-                .push(
-                    widget::button::standard(fl!("editor-generate"))
-                        .on_press(EditorMessage::Generate),
-                ),
-        );
+                    .push(
+                        widget::button::standard(fl!("editor-generate"))
+                            .on_press(EditorMessage::Generate),
+                    ),
+            );
 
         if self.secret_is_binary {
             // Say which of the two states the field is in: still the original
@@ -381,9 +391,13 @@ impl Editor {
                     bits = format!("{:.0}", recipe.entropy_bits())
                 )))
                 .push(
-                    widget::slider(8.0..=64.0, self.generator_length, EditorMessage::LengthChanged)
-                        .step(1.0)
-                        .width(Length::Fill),
+                    widget::slider(
+                        8.0..=64.0,
+                        self.generator_length,
+                        EditorMessage::LengthChanged,
+                    )
+                    .step(1.0)
+                    .width(Length::Fill),
                 )
                 .push(
                     widget::toggler(self.generator_symbols)
@@ -448,8 +462,9 @@ impl Editor {
             );
         }
 
-        form = form
-            .push(widget::button::standard(fl!("editor-add-field")).on_press(EditorMessage::AddField));
+        form = form.push(
+            widget::button::standard(fl!("editor-add-field")).on_press(EditorMessage::AddField),
+        );
 
         // Attributes are carried through untouched; say so rather than
         // silently keeping hidden state.
@@ -465,8 +480,7 @@ impl Editor {
                 .spacing(spacing.space_xs)
                 .push(widget::button::suggested(fl!("editor-save")).on_press(EditorMessage::Save))
                 .push(
-                    widget::button::standard(fl!("editor-cancel"))
-                        .on_press(EditorMessage::Cancel),
+                    widget::button::standard(fl!("editor-cancel")).on_press(EditorMessage::Cancel),
                 ),
         );
 
@@ -628,7 +642,10 @@ mod tests {
         e.update(EditorMessage::Generate);
         let item = saved(&mut e).unwrap();
         assert!(!item.secret_is_binary());
-        assert_eq!(item.secret_bytes().as_slice(), item.secret.expose().as_bytes());
+        assert_eq!(
+            item.secret_bytes().as_slice(),
+            item.secret.expose().as_bytes()
+        );
     }
 
     #[test]

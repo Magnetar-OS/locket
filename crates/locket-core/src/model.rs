@@ -464,9 +464,10 @@ impl Item {
         hay(&self.label)
             || self.tags.iter().any(|t| hay(t))
             || self.attributes.iter().any(|(k, v)| hay(k) || hay(v))
-            || self.fields.iter().any(|f| {
-                hay(&f.name) || (!f.kind.is_sensitive() && hay(f.value.expose()))
-            })
+            || self
+                .fields
+                .iter()
+                .any(|f| hay(&f.name) || (!f.kind.is_sensitive() && hay(f.value.expose())))
     }
 
     /// The primary secret as the bytes an application stored.
@@ -482,7 +483,12 @@ impl Item {
     /// replaces each invalid byte with U+FFFD, which is neither reversible nor
     /// detectable by the application getting it back.
     pub fn secret_bytes(&self) -> Zeroizing<Vec<u8>> {
-        if self.attributes.get(attr::SECRET_ENCODING).map(String::as_str) == Some(BASE64) {
+        if self
+            .attributes
+            .get(attr::SECRET_ENCODING)
+            .map(String::as_str)
+            == Some(BASE64)
+        {
             use base64ct::Encoding as _;
             if let Ok(raw) = base64ct::Base64::decode_vec(self.secret.expose()) {
                 return Zeroizing::new(raw);
@@ -498,7 +504,10 @@ impl Item {
     /// the lossy step [`set_secret_bytes`](Self::set_secret_bytes) exists to
     /// avoid.
     pub fn secret_is_binary(&self) -> bool {
-        self.attributes.get(attr::SECRET_ENCODING).map(String::as_str) == Some(BASE64)
+        self.attributes
+            .get(attr::SECRET_ENCODING)
+            .map(String::as_str)
+            == Some(BASE64)
     }
 
     /// Whether the stored secret carries U+FFFD replacement characters.
@@ -612,9 +621,10 @@ impl Item {
             || a.secret != b.secret
             || a.content_type != b.content_type
             || a.fields.len() != b.fields.len()
-            || a.fields.iter().zip(&b.fields).any(|(x, y)| {
-                x.name != y.name || x.kind != y.kind || x.value != y.value
-            })
+            || a.fields
+                .iter()
+                .zip(&b.fields)
+                .any(|(x, y)| x.name != y.name || x.kind != y.kind || x.value != y.value)
             || a.tags != b.tags
             || a.expires != b.expires
     }
@@ -948,7 +958,9 @@ mod tests {
     #[test]
     fn a_binary_secret_survives_a_round_trip() {
         // 64 random-looking bytes, the shape of an XDG portal application key.
-        let raw: Vec<u8> = (0u16..64).map(|i| (i.wrapping_mul(7) ^ 0xA5) as u8).collect();
+        let raw: Vec<u8> = (0u16..64)
+            .map(|i| (i.wrapping_mul(7) ^ 0xA5) as u8)
+            .collect();
         assert!(
             std::str::from_utf8(&raw).is_err(),
             "this fixture has to be invalid UTF-8 to test anything"
@@ -963,7 +975,9 @@ mod tests {
             "binary secret came back changed"
         );
         assert_eq!(
-            item.attributes.get(attr::SECRET_ENCODING).map(String::as_str),
+            item.attributes
+                .get(attr::SECRET_ENCODING)
+                .map(String::as_str),
             Some("base64"),
             "a non-UTF-8 secret must be marked, or the decode is a guess"
         );
@@ -974,7 +988,11 @@ mod tests {
         let mut item = Item::new(ItemKind::Login, "GitHub");
         item.set_secret_bytes(b"hunter2");
 
-        assert_eq!(item.secret.expose(), "hunter2", "text was needlessly encoded");
+        assert_eq!(
+            item.secret.expose(),
+            "hunter2",
+            "text was needlessly encoded"
+        );
         assert!(!item.attributes.contains_key(attr::SECRET_ENCODING));
         assert_eq!(item.secret_bytes().as_slice(), b"hunter2");
     }
@@ -1066,14 +1084,27 @@ mod tests {
 
     #[test]
     fn dates_roundtrip_and_reject_nonsense() {
-        for date in ["1970-01-01", "2000-02-29", "2026-08-27", "2038-01-19", "9999-12-31"] {
+        for date in [
+            "1970-01-01",
+            "2000-02-29",
+            "2026-08-27",
+            "2038-01-19",
+            "9999-12-31",
+        ] {
             let ts = parse_date(date).expect(date);
             assert_eq!(format_date(ts), date);
             assert_eq!(ts % 86_400, 0, "not midnight UTC");
         }
         // Cross-checked against `datetime(2026, 8, 27, tzinfo=UTC).timestamp()`.
         assert_eq!(parse_date("2026-08-27"), Some(1_787_788_800));
-        for bad in ["", "tomorrow", "2026-13-01", "2026-00-10", "2026-01-32", "1969-12-31"] {
+        for bad in [
+            "",
+            "tomorrow",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-01-32",
+            "1969-12-31",
+        ] {
             assert!(parse_date(bad).is_none(), "accepted `{bad}`");
         }
     }
@@ -1089,7 +1120,11 @@ mod tests {
             item.secret = format!("v{n}").into();
             item.record_revision();
         }
-        assert_eq!(item.history.len(), MAX_REVISIONS, "history grew past its bound");
+        assert_eq!(
+            item.history.len(),
+            MAX_REVISIONS,
+            "history grew past its bound"
+        );
         // The newest states survived; the oldest were evicted.
         assert_eq!(
             item.history.last().unwrap().item.secret.expose(),
@@ -1105,17 +1140,26 @@ mod tests {
         item.record_revision();
         assert_eq!(item.history.len(), 2);
         assert!(
-            item.history.iter().any(|r| r.item.secret.expose() == "leaked"),
+            item.history
+                .iter()
+                .any(|r| r.item.secret.expose() == "leaked"),
             "the fixture should hold the leaked value"
         );
 
         assert_eq!(item.forget_history(), 2);
         assert!(item.history.is_empty());
         assert!(
-            !item.history.iter().any(|r| r.item.secret.expose() == "leaked"),
+            !item
+                .history
+                .iter()
+                .any(|r| r.item.secret.expose() == "leaked"),
             "the rotated-away value survived"
         );
-        assert_eq!(item.secret.expose(), "rotated", "forgetting changed the secret");
+        assert_eq!(
+            item.secret.expose(),
+            "rotated",
+            "forgetting changed the secret"
+        );
         // Idempotent, and does not touch `modified` when there was nothing.
         let modified = item.modified;
         assert_eq!(item.forget_history(), 0);

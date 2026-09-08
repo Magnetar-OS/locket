@@ -277,12 +277,22 @@ mod tests {
         // A edits first, B edits later: B's secret must win in either
         // direction of merge, with the other state kept as a revision.
         {
-            let item = a.collection_mut(a.collections[0].id).unwrap().items.first_mut().unwrap();
+            let item = a
+                .collection_mut(a.collections[0].id)
+                .unwrap()
+                .items
+                .first_mut()
+                .unwrap();
             item.secret = "from A".into();
             item.modified = 1_000;
         }
         {
-            let item = b.collection_mut(b.collections[0].id).unwrap().items.first_mut().unwrap();
+            let item = b
+                .collection_mut(b.collections[0].id)
+                .unwrap()
+                .items
+                .first_mut()
+                .unwrap();
             item.secret = "from B".into();
             item.modified = 2_000;
         }
@@ -321,7 +331,10 @@ mod tests {
         let mut ba_ids: Vec<Uuid> = ba.all_items().map(|(_, i)| i.id).collect();
         ab_ids.sort();
         ba_ids.sort();
-        assert_eq!(ab_ids, ba_ids, "merge produced different item sets by direction");
+        assert_eq!(
+            ab_ids, ba_ids,
+            "merge produced different item sets by direction"
+        );
     }
 
     #[test]
@@ -338,8 +351,14 @@ mod tests {
 
         let report = merge(&mut a, b);
         assert_eq!(report.trashed, 1);
-        assert!(a.find_item(id).is_none(), "deleted item still live after merge");
-        assert!(a.trashed(id).is_some(), "deletion did not land in the trash");
+        assert!(
+            a.find_item(id).is_none(),
+            "deleted item still live after merge"
+        );
+        assert!(
+            a.trashed(id).is_some(),
+            "deletion did not land in the trash"
+        );
     }
 
     #[test]
@@ -424,7 +443,10 @@ mod tests {
         let (a, _) = vault_with("Login", "s");
         let mut merged = fork(&a);
         let report = merge(&mut merged, fork(&a));
-        assert!(!report.changed(), "identical copies reported changes: {report}");
+        assert!(
+            !report.changed(),
+            "identical copies reported changes: {report}"
+        );
         assert_eq!(merged.item_count(), 1);
         assert!(merged.all_items().all(|(_, i)| i.history.is_empty()));
     }
@@ -468,6 +490,9 @@ mod tests {
             "an attachment vanished without being counted"
         );
         let (_, item) = a.find_item(id).unwrap();
-        assert!(item.attachments.is_empty(), "history snapshots must not carry attachments");
+        assert!(
+            item.attachments.is_empty(),
+            "history snapshots must not carry attachments"
+        );
     }
 }

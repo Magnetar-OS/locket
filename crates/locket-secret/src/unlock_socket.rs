@@ -88,12 +88,7 @@ pub async fn serve(
 ///
 /// Opening the file is what constitutes the proof, and it also gives us a copy
 /// to rewrite even when the daemon is locked.
-async fn rekey(
-    state: &SharedState,
-    vault_path: &Path,
-    old: &str,
-    new: &str,
-) -> bool {
+async fn rekey(state: &SharedState, vault_path: &Path, old: &str, new: &str) -> bool {
     let path = vault_path.to_path_buf();
     let (old, new) = (old.to_owned(), new.to_owned());
 

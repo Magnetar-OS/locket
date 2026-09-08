@@ -111,8 +111,7 @@ pub async fn auto_lock(
             tracing::info!(idle, "locking the vault after idling");
             state.lock().await.close_vault();
             if notify {
-                notify_locked("Locked after being idle. Unlock in locket when you need it.")
-                    .await;
+                notify_locked("Locked after being idle. Unlock in locket when you need it.").await;
             }
         }
     }
@@ -263,9 +262,7 @@ async fn lock(state: &SharedState, why: &str, notify: bool) {
 /// environment, and `GetSessionByPID` answers "does not belong to any known
 /// session" — measured on a live COSMIC session, where it left the daemon
 /// following suspend only and silently not following the screen lock at all.
-async fn session_path(
-    manager: &LoginManagerProxy<'_>,
-) -> Option<zbus::zvariant::OwnedObjectPath> {
+async fn session_path(manager: &LoginManagerProxy<'_>) -> Option<zbus::zvariant::OwnedObjectPath> {
     if let Ok(id) = std::env::var("XDG_SESSION_ID")
         && let Ok(path) = manager.get_session(&id).await
     {

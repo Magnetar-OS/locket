@@ -97,7 +97,13 @@ impl Host {
     }
 
     /// Every item the service will show us, as (path, attributes, label).
-    async fn all_items(&self) -> Vec<(OwnedObjectPath, std::collections::HashMap<String, String>, String)> {
+    async fn all_items(
+        &self,
+    ) -> Vec<(
+        OwnedObjectPath,
+        std::collections::HashMap<String, String>,
+        String,
+    )> {
         let Ok(service) = SecretServiceProxy::new(&self.connection).await else {
             return Vec::new();
         };

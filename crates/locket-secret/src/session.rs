@@ -170,7 +170,10 @@ mod tests {
         // Service -> client.
         let (params, value) = session.encode(b"hunter2").unwrap();
         assert_ne!(value, b"hunter2");
-        assert_eq!(dh::decrypt(&client_key, &params, &value).unwrap(), b"hunter2");
+        assert_eq!(
+            dh::decrypt(&client_key, &params, &value).unwrap(),
+            b"hunter2"
+        );
 
         // Client -> service.
         let (iv, ct) = dh::encrypt(&client_key, b"new-password").unwrap();

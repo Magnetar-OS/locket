@@ -243,11 +243,7 @@ impl cosmic::Application for Applet {
                     self.notice = Some(fl!("copy-failed", label = label));
                     return Task::none();
                 };
-                self.notice = Some(fl!(
-                    "copied",
-                    label = label,
-                    seconds = CLIPBOARD_CLEAR_SECS
-                ));
+                self.notice = Some(fl!("copied", label = label, seconds = CLIPBOARD_CLEAR_SECS));
                 self.clipboard_copy = Some(secret.clone());
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
                 let clear = cosmic::task::future(async {
@@ -270,9 +266,7 @@ impl cosmic::Application for Applet {
                 if current.is_some() && current == ours {
                     // Overwrite rather than clear: some clipboard managers
                     // treat an empty payload as "no change".
-                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
-                        String::new(),
-                    );
+                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(String::new());
                 }
             }
 
@@ -398,10 +392,8 @@ impl Applet {
                                 .width(Length::Fill),
                         )
                         .push(
-                            widget::button::standard(fl!("copy")).on_press(Message::Copy(
-                                entry.path.clone(),
-                                entry.label.clone(),
-                            )),
+                            widget::button::standard(fl!("copy"))
+                                .on_press(Message::Copy(entry.path.clone(), entry.label.clone())),
                         ),
                 );
             }

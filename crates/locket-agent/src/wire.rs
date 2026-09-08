@@ -127,7 +127,9 @@ mod tests {
     #[test]
     fn roundtrip_primitives() {
         let mut w = Writer::new();
-        w.write_u8(11).write_u32(0xDEAD_BEEF).write_string(b"ssh-ed25519");
+        w.write_u8(11)
+            .write_u32(0xDEAD_BEEF)
+            .write_string(b"ssh-ed25519");
         let bytes = w.into_bytes();
 
         let mut r = Reader::new(&bytes);

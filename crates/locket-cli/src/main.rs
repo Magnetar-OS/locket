@@ -458,7 +458,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Command::ImportCloud {
-        home, dry_run: true, ..
+        home,
+        dry_run: true,
+        ..
     } = &args.command
     {
         let home = match home.clone().or_else(locket_import::cloud::home) {
@@ -492,7 +494,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .count();
             vars += parsed.len();
             secrets += s;
-            println!("{:<56} {:>3} vars, {:>3} secret", f.relative.display(), parsed.len(), s);
+            println!(
+                "{:<56} {:>3} vars, {:>3} secret",
+                f.relative.display(),
+                parsed.len(),
+                s
+            );
         }
         println!(
             "\n{} file(s), {vars} variable(s), {secrets} credential(s) under {}",
@@ -570,9 +577,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .data()
                 .all_items()
                 .map(|(_, i)| i)
-                .find(|i| {
-                    i.label.to_lowercase() == needle || i.id.to_string() == needle
-                })
+                .find(|i| i.label.to_lowercase() == needle || i.id.to_string() == needle)
                 .or_else(|| {
                     vault
                         .data()
@@ -772,12 +777,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("permanently deleted {label}");
                 }
                 TrashCommand::Retain { days } => {
-                    let retention = match days.as_str() {
-                        "never" => None,
-                        n => Some(n.parse::<u32>().map_err(|_| {
-                            format!("`{n}` is not a number of days (or `never`)")
-                        })?),
-                    };
+                    let retention =
+                        match days.as_str() {
+                            "never" => None,
+                            n => Some(n.parse::<u32>().map_err(|_| {
+                                format!("`{n}` is not a number of days (or `never`)")
+                            })?),
+                        };
                     vault.data_mut().settings.trash_retention_days = retention;
                     vault.save()?;
                     match retention {
@@ -881,13 +887,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{} has no attachments", item.label);
                     }
                     for a in &item.attachments {
-                        println!(
-                            "{}  {:<28} {:>9} bytes  {}",
-                            a.id,
-                            a.name,
-                            a.size(),
-                            a.mime
-                        );
+                        println!("{}  {:<28} {:>9} bytes  {}", a.id, a.name, a.size(), a.mime);
                     }
                 }
                 AttachCommand::Save { query, name, out } => {
@@ -1071,15 +1071,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for slot in vault.slots() {
                 let detail = match &slot.factor {
                     locket_core::slots::SlotFactor::Passphrase { params, .. } => {
-                        format!("argon2id m={}KiB t={} p={}", params.m_cost, params.t_cost, params.p_cost)
+                        format!(
+                            "argon2id m={}KiB t={} p={}",
+                            params.m_cost, params.t_cost, params.p_cost
+                        )
                     }
                     locket_core::slots::SlotFactor::Tpm2 { with_pin, pcrs, .. } => format!(
                         "TPM 2.0{}{}",
                         if *with_pin { " + PIN" } else { "" },
-                        if pcrs.is_empty() { String::new() } else { format!(" PCRs {pcrs:?}") }
+                        if pcrs.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" PCRs {pcrs:?}")
+                        }
                     ),
-                    locket_core::slots::SlotFactor::Fido2 { rp_id, user_verification, .. } => {
-                        format!("FIDO2 rp={rp_id}{}", if *user_verification { " + UV" } else { "" })
+                    locket_core::slots::SlotFactor::Fido2 {
+                        rp_id,
+                        user_verification,
+                        ..
+                    } => {
+                        format!(
+                            "FIDO2 rp={rp_id}{}",
+                            if *user_verification { " + UV" } else { "" }
+                        )
                     }
                 };
                 println!("{}  {:<16} {}", slot.id, slot.label, detail);
@@ -1135,10 +1149,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let db_pw = match &db_passphrase_env {
                 Some(var) => std::env::var(var)
                     .map_err(|_| format!("environment variable `{var}` is not set"))?,
-                None => rpassword::prompt_password(format!(
-                    "Password for {}: ",
-                    database.display()
-                ))?,
+                None => {
+                    rpassword::prompt_password(format!("Password for {}: ", database.display()))?
+                }
             };
             let summary = locket_import::keepass::import_kdbx(
                 &mut vault,
@@ -1203,7 +1216,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportEnv {
-            dir, group_by, into, ..
+            dir,
+            group_by,
+            into,
+            ..
         } => {
             let grouping = group_by.into();
             let mut vault = Vault::open(&path, &passphrase)?;
@@ -1236,10 +1252,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportCloud {
-            home,
-            sqlite,
-            into,
-            ..
+            home, sqlite, into, ..
         } => {
             let home = match home.or_else(locket_import::cloud::home) {
                 Some(h) => h,
@@ -1261,7 +1274,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary = locket_import::totp::import_file(&mut vault, &file, into.as_deref())?;
             vault.save()?;
             println!("imported {summary} from {}", file.display());
-            eprintln!("\nNow delete {} — it is a plaintext copy of every seed it held.", file.display());
+            eprintln!(
+                "\nNow delete {} — it is a plaintext copy of every seed it held.",
+                file.display()
+            );
         }
 
         Command::Passwd {
@@ -1326,12 +1342,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             use locket_import::export;
             let format = export::Format::from(format);
             if format.is_plaintext() && !i_understand_this_is_plaintext {
-                return Err(
-                    "refusing to write plaintext secrets without \
+                return Err("refusing to write plaintext secrets without \
                      --i-understand-this-is-plaintext (or use --format kdbx, \
                      which is encrypted)"
-                        .into(),
-                );
+                    .into());
             }
             let vault = Vault::open(&path, &passphrase)?;
             match format {
@@ -1434,9 +1448,7 @@ fn find_trashed(vault: &Vault, query: &str) -> Result<uuid::Uuid, Box<dyn std::e
         .data()
         .trash
         .iter()
-        .filter(|t| {
-            t.item.label.to_lowercase() == needle || t.item.id.to_string() == needle
-        })
+        .filter(|t| t.item.label.to_lowercase() == needle || t.item.id.to_string() == needle)
         .collect();
     match matches.len() {
         0 => Err(format!("nothing in the trash matches `{query}`").into()),

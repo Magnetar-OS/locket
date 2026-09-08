@@ -122,15 +122,18 @@ impl DhExchange {
 pub fn encrypt(key: &[u8; AES_KEY_LEN], plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut iv = [0u8; IV_LEN];
     getrandom::fill(&mut iv).map_err(|e| Error::Crypto(e.to_string()))?;
-    let ciphertext = Aes128CbcEnc::new(key.into(), &iv.into())
-        .encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+    let ciphertext =
+        Aes128CbcEnc::new(key.into(), &iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plaintext);
     Ok((iv.to_vec(), ciphertext))
 }
 
 /// Decrypt a secret received from a client.
 pub fn decrypt(key: &[u8; AES_KEY_LEN], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     let iv: [u8; IV_LEN] = iv.try_into().map_err(|_| {
-        Error::Crypto(format!("session IV must be {IV_LEN} bytes, got {}", iv.len()))
+        Error::Crypto(format!(
+            "session IV must be {IV_LEN} bytes, got {}",
+            iv.len()
+        ))
     })?;
     Aes128CbcDec::new(key.into(), &iv.into())
         .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
@@ -159,7 +162,10 @@ mod tests {
     #[test]
     fn public_keys_are_always_padded_to_the_modulus_width() {
         for _ in 0..32 {
-            assert_eq!(DhExchange::generate().unwrap().public_key().len(), MODULUS_LEN);
+            assert_eq!(
+                DhExchange::generate().unwrap().public_key().len(),
+                MODULUS_LEN
+            );
         }
     }
 
@@ -185,7 +191,9 @@ mod tests {
             prime(),
         ] {
             assert!(
-                server.derive_session_key(&pad_to_modulus(bad.to_bytes_be())).is_err(),
+                server
+                    .derive_session_key(&pad_to_modulus(bad.to_bytes_be()))
+                    .is_err(),
                 "accepted a degenerate public key"
             );
         }

@@ -211,7 +211,10 @@ mod tests {
         assert_eq!(item.label, "GitHub");
         assert_eq!(item.secret.expose(), "hunter2");
         assert_eq!(item.field_value(field_names::USERNAME), Some("ada"));
-        assert_eq!(item.field_value(field_names::URL), Some("https://github.com"));
+        assert_eq!(
+            item.field_value(field_names::URL),
+            Some("https://github.com")
+        );
         assert_eq!(item.field_value(field_names::NOTES), Some("a note"));
         assert_eq!(item.tags, vec!["Internet", "Dev"]);
         assert_eq!(
@@ -246,7 +249,10 @@ mod tests {
         });
         // Exactly one username field, from the typed accessor.
         assert_eq!(
-            item.fields.iter().filter(|f| f.name == field_names::USERNAME).count(),
+            item.fields
+                .iter()
+                .filter(|f| f.name == field_names::USERNAME)
+                .count(),
             1
         );
         assert!(item.field("Password").is_none());

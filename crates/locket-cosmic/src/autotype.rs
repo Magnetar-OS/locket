@@ -158,7 +158,11 @@ mod tests {
     fn tab_and_return_map_and_other_controls_are_refused() {
         assert_eq!(keysym_for('\t'), Some(0xff09));
         assert_eq!(keysym_for('\n'), Some(0xff0d));
-        assert_eq!(keysym_for('\u{7}'), None, "a bell character became a keystroke");
+        assert_eq!(
+            keysym_for('\u{7}'),
+            None,
+            "a bell character became a keystroke"
+        );
         assert_eq!(keysym_for('\u{1b}'), None, "escape became a keystroke");
     }
 }

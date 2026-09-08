@@ -281,7 +281,11 @@ mod tests {
         for e in r.entries.iter().filter(|e| e.reused_with > 0) {
             assert_eq!(e.reused_with, 1, "{}", e.label);
         }
-        assert!(!r.entries.iter().any(|e| e.label == "C" && e.reused_with > 0));
+        assert!(
+            !r.entries
+                .iter()
+                .any(|e| e.label == "C" && e.reused_with > 0)
+        );
     }
 
     #[test]
@@ -312,7 +316,8 @@ mod tests {
         old.modified = at - OLD_AFTER_SECS - 86_400;
         let mut expired = Item::new(ItemKind::Certificate, "Cert");
         expired.expires = Some(at - 1);
-        let mut expiring = Item::new(ItemKind::ApiToken, "Token").with_secret("uQ3&fZ8*pM5^dH2@jN6c");
+        let mut expiring =
+            Item::new(ItemKind::ApiToken, "Token").with_secret("uQ3&fZ8*pM5^dH2@jN6c");
         expiring.expires = Some(at + 86_400);
 
         let r = report(&vault_of(vec![old, expired, expiring]), at);
@@ -353,7 +358,9 @@ mod tests {
 
     #[test]
     fn trash_is_not_audited() {
-        let mut data = vault_of(vec![Item::new(ItemKind::Login, "Weak").with_secret("hunter2")]);
+        let mut data = vault_of(vec![
+            Item::new(ItemKind::Login, "Weak").with_secret("hunter2"),
+        ]);
         let id = data.collections[0].items[0].id;
         data.trash_item(id);
         let r = report(&data, now());

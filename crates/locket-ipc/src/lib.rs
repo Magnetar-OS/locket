@@ -74,8 +74,7 @@ pub fn socket_path_for_uid(uid: u32) -> PathBuf {
 
 /// The socket path for the current user.
 pub fn socket_path() -> Option<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(|d| PathBuf::from(d).join("locket").join("unlock.sock"))
+    std::env::var_os("XDG_RUNTIME_DIR").map(|d| PathBuf::from(d).join("locket").join("unlock.sock"))
 }
 
 #[derive(Debug)]
@@ -192,11 +191,7 @@ pub fn read_request<R: Read>(reader: &mut R) -> Result<Request, Error> {
 /// Tell the daemon the passphrase changed, and report whether it took.
 ///
 /// Fails the same way [`request_unlock`] does when nothing is listening.
-pub fn request_rekey(
-    socket: &std::path::Path,
-    old: &str,
-    new: &str,
-) -> Result<bool, Error> {
+pub fn request_rekey(socket: &std::path::Path, old: &str, new: &str) -> Result<bool, Error> {
     send(socket, &encode_rekey(old, new)?)
 }
 
@@ -212,9 +207,7 @@ fn send(socket: &std::path::Path, request: &[u8]) -> Result<bool, Error> {
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(socket).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-            Error::NotListening
-        }
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => Error::NotListening,
         _ => Error::Io(e),
     })?;
 
@@ -289,7 +282,9 @@ mod tests {
     fn framing_roundtrips() {
         let encoded = encode_request("correct horse").unwrap();
         let mut cursor = std::io::Cursor::new(encoded.to_vec());
-        assert!(matches!(read_request(&mut cursor).unwrap(), Request::Unlock(p) if &*p == "correct horse"));
+        assert!(
+            matches!(read_request(&mut cursor).unwrap(), Request::Unlock(p) if &*p == "correct horse")
+        );
     }
 
     #[test]

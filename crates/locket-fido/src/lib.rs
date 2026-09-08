@@ -54,7 +54,9 @@ pub enum Error {
     #[error("this slot is not a FIDO2 slot")]
     WrongFactor,
 
-    #[error("the security key did not return an hmac-secret value; it may not support the extension")]
+    #[error(
+        "the security key did not return an hmac-secret value; it may not support the extension"
+    )]
     NoHmacSecret,
 
     #[error("the security key returned no assertion; the credential may belong to another token")]
@@ -143,7 +145,9 @@ pub fn enroll(pin: Option<&str>, user_verification: bool) -> Result<(SlotFactor,
         .map_err(|e| Error::Device(e.to_string()))?;
     let credential_id = attestation.credential_descriptor.id;
     if credential_id.is_empty() {
-        return Err(Error::Device("token returned an empty credential id".into()));
+        return Err(Error::Device(
+            "token returned an empty credential id".into(),
+        ));
     }
 
     // Immediately exercise the credential so the enrolled key is the one that
@@ -200,8 +204,7 @@ pub fn unlock(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
         tracing::debug!("slot was enrolled under rp_id `{rp_id}`");
     }
 
-    let credential_id =
-        Base64::decode_vec(credential_id).map_err(|_| Error::MalformedSlot)?;
+    let credential_id = Base64::decode_vec(credential_id).map_err(|_| Error::MalformedSlot)?;
     let salt_bytes = Base64::decode_vec(salt).map_err(|_| Error::MalformedSlot)?;
     let salt: [u8; SALT_LEN] = salt_bytes
         .as_slice()

@@ -132,15 +132,16 @@ impl Slot {
     /// itself, so tampering with (say) the Argon2 cost or the PCR set breaks
     /// authentication rather than weakening the slot.
     pub(crate) fn aad(&self, magic: &str, format: u16) -> Vec<u8> {
-        serde_json::to_vec(&(magic, format, self.id, &self.label, &self.factor))
-            .unwrap_or_default()
+        serde_json::to_vec(&(magic, format, self.id, &self.label, &self.factor)).unwrap_or_default()
     }
 
     /// Unwrap the DEK given this slot's key-encryption key.
     pub(crate) fn unwrap_dek(&self, kek: &SymKey, magic: &str, format: u16) -> Result<SymKey> {
         kek.unwrap_key(
             &self.wrapped_key.nonce_bytes("slot.wrapped_key.nonce")?,
-            &self.wrapped_key.ciphertext_bytes("slot.wrapped_key.ciphertext")?,
+            &self
+                .wrapped_key
+                .ciphertext_bytes("slot.wrapped_key.ciphertext")?,
             &self.aad(magic, format),
         )
     }
@@ -400,7 +401,12 @@ mod tests {
             user_verification: true,
         };
         // A passphrase opener must not claim a FIDO2 slot.
-        assert!(PassphraseOpener::new("pw").kek_for(&fido).unwrap().is_none());
+        assert!(
+            PassphraseOpener::new("pw")
+                .kek_for(&fido)
+                .unwrap()
+                .is_none()
+        );
 
         let tpm_opener = RawKeyOpener {
             kind: SlotKind::Tpm2,

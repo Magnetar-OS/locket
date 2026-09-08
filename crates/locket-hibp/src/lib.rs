@@ -110,19 +110,28 @@ mod tests {
     #[test]
     fn a_bucket_without_the_suffix_is_a_clean_zero_not_an_error() {
         let body = "0018A45C4D1DEF81644B54AB7F969B88D65:1";
-        assert_eq!(match_suffix(body, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"), Some(0));
+        assert_eq!(
+            match_suffix(body, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+            Some(0)
+        );
     }
 
     #[test]
     fn padding_entries_with_zero_count_do_not_read_as_breached() {
         let body = "1E4C9B93F3F0682250B6CF8331B7EE68FD8:0";
-        assert_eq!(match_suffix(body, "1E4C9B93F3F0682250B6CF8331B7EE68FD8"), Some(0));
+        assert_eq!(
+            match_suffix(body, "1E4C9B93F3F0682250B6CF8331B7EE68FD8"),
+            Some(0)
+        );
     }
 
     #[test]
     fn suffix_matching_is_case_insensitive() {
         let body = "1e4c9b93f3f0682250b6cf8331b7ee68fd8:5";
-        assert_eq!(match_suffix(body, "1E4C9B93F3F0682250B6CF8331B7EE68FD8"), Some(5));
+        assert_eq!(
+            match_suffix(body, "1E4C9B93F3F0682250B6CF8331B7EE68FD8"),
+            Some(5)
+        );
     }
 
     #[test]

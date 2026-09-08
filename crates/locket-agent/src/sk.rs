@@ -179,7 +179,8 @@ pub fn signature_blob(
 /// to be liberal in what you accept — and `Mpint` applies SSH's sign-padding
 /// rule so a component with the high bit set does not read as negative.
 fn ecdsa_der_to_ssh(der: &[u8]) -> Result<Vec<u8>> {
-    let bad = |what: &str| Error::Signing(format!("malformed ECDSA signature from the token: {what}"));
+    let bad =
+        |what: &str| Error::Signing(format!("malformed ECDSA signature from the token: {what}"));
 
     let mut pos = 0;
     let byte = |pos: &mut usize| -> Result<u8> {
@@ -341,7 +342,10 @@ mod tests {
     #[test]
     fn malformed_der_is_refused_rather_than_guessed_at() {
         assert!(ecdsa_der_to_ssh(&[]).is_err());
-        assert!(ecdsa_der_to_ssh(&[0x31, 0x00]).is_err(), "wrong tag accepted");
+        assert!(
+            ecdsa_der_to_ssh(&[0x31, 0x00]).is_err(),
+            "wrong tag accepted"
+        );
         // Length that disagrees with the body.
         assert!(ecdsa_der_to_ssh(&[0x30, 0x08, 0x02, 0x01, 0x01]).is_err());
         // Trailing junk after r and s.

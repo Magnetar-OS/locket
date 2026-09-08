@@ -128,10 +128,7 @@ pub fn parse(text: &str) -> Result<(Vec<Item>, usize)> {
     let mut documents = 0usize;
     for account in &export.accounts {
         for vault in &account.vaults {
-            let vault_name = vault
-                .attrs
-                .as_ref()
-                .and_then(|a| a.name.clone());
+            let vault_name = vault.attrs.as_ref().and_then(|a| a.name.clone());
             for entry in &vault.items {
                 if entry.state.as_deref() == Some("trashed") {
                     continue;
@@ -157,7 +154,8 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> (Item, usize) {
     item.attributes
         .insert("locket:source".into(), "1password".into());
     if let Some(uuid) = &e.uuid {
-        item.attributes.insert("1password:uuid".into(), uuid.clone());
+        item.attributes
+            .insert("1password:uuid".into(), uuid.clone());
     }
     item.favorite = e.fav_index > 0;
 
@@ -177,9 +175,10 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> (Item, usize) {
         item.tags.push("archived".into());
     }
     if let Some(vault) = vault_name.filter(|v| !v.is_empty())
-        && !item.tags.contains(&vault.to_owned()) {
-            item.tags.push(vault.to_owned());
-        }
+        && !item.tags.contains(&vault.to_owned())
+    {
+        item.tags.push(vault.to_owned());
+    }
 
     let Some(details) = &e.details else {
         return (item, 0);
@@ -191,8 +190,7 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> (Item, usize) {
         };
         match f.designation.as_deref() {
             Some("username") => {
-                item.fields
-                    .push(Field::text(field_names::USERNAME, value));
+                item.fields.push(Field::text(field_names::USERNAME, value));
                 item.attributes.insert("username".into(), value.into());
             }
             Some("password") => item.secret = value.into(),
@@ -200,9 +198,10 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> (Item, usize) {
         }
     }
     if let Some(password) = details.password.as_deref().filter(|p| !p.is_empty())
-        && item.secret.is_empty() {
-            item.secret = password.into();
-        }
+        && item.secret.is_empty()
+    {
+        item.secret = password.into();
+    }
 
     for section in &details.sections {
         for f in &section.fields {
@@ -222,9 +221,7 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> (Item, usize) {
                 continue;
             };
             let field = match (kind.as_str(), raw) {
-                ("concealed", serde_json::Value::String(s)) => {
-                    Some(Field::secret(name, s.clone()))
-                }
+                ("concealed", serde_json::Value::String(s)) => Some(Field::secret(name, s.clone())),
                 ("totp", serde_json::Value::String(s)) => {
                     Some(Field::new(name, FieldKind::Totp, s.clone()))
                 }
@@ -371,16 +368,25 @@ mod tests {
         assert_eq!(login.kind, ItemKind::Login);
         assert_eq!(login.secret.expose(), "hunter2");
         assert_eq!(login.field_value(field_names::USERNAME), Some("ada"));
-        assert_eq!(login.field_value(field_names::URL), Some("https://github.com"));
+        assert_eq!(
+            login.field_value(field_names::URL),
+            Some("https://github.com")
+        );
         assert!(login.favorite);
         assert!(login.tags.contains(&"dev".to_owned()));
-        assert!(login.tags.contains(&"Personal".to_owned()), "vault name lost");
+        assert!(
+            login.tags.contains(&"Personal".to_owned()),
+            "vault name lost"
+        );
         assert_eq!(
             login.field("Extra: recovery").unwrap().kind,
             FieldKind::Secret
         );
         assert_eq!(login.field("Extra: 2fa").unwrap().kind, FieldKind::Totp);
-        assert!(login.field("Extra: scan").is_none(), "a file became a field");
+        assert!(
+            login.field("Extra: scan").is_none(),
+            "a file became a field"
+        );
     }
 
     #[test]
@@ -405,10 +411,7 @@ mod tests {
             let mut writer = zip::ZipWriter::new(file);
             use std::io::Write as _;
             writer
-                .start_file(
-                    "export.data",
-                    zip::write::SimpleFileOptions::default(),
-                )
+                .start_file("export.data", zip::write::SimpleFileOptions::default())
                 .unwrap();
             writer.write_all(EXPORT.as_bytes()).unwrap();
             writer.finish().unwrap();
@@ -424,7 +427,11 @@ mod tests {
 
         let first = import_file(&mut vault, &path, None).unwrap();
         assert_eq!(first.imported, 3);
-        assert_eq!(first.notes.len(), 1, "documents left behind went unmentioned");
+        assert_eq!(
+            first.notes.len(),
+            1,
+            "documents left behind went unmentioned"
+        );
         let second = import_file(&mut vault, &path, None).unwrap();
         assert_eq!(second.imported, 0);
         assert_eq!(second.skipped_duplicate, 3);
