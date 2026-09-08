@@ -2,9 +2,9 @@
 
 Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## [Unreleased]
 
-## 1.0.0 - 2026-09-08
+## [1.0.0] - 2026-09-08
 
 The first release.
 
