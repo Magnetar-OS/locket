@@ -273,7 +273,7 @@ async fn confirm_signing(
     // moment, then start one.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     if state.lock().await.confirmation_answer(id).is_none()
-        && let Err(e) = spawn_frontend()
+        && let Err(e) = spawn_frontend(Prompt::No)
     {
         tracing::warn!("could not launch the frontend to ask: {e}");
     }
@@ -332,7 +332,7 @@ pub async fn serve_prompts(
         // application asking for a secret on a machine with no locket window
         // open just waits for a prompt nobody can answer.
         if !wait_until_unlocked(&state, std::time::Duration::from_secs(2)).await {
-            match spawn_frontend() {
+            match spawn_frontend(Prompt::Yes) {
                 Ok(path) => tracing::info!("no frontend responded; launched {path} to prompt"),
                 Err(e) => tracing::warn!("could not launch the frontend to prompt: {e}"),
             }
@@ -346,17 +346,42 @@ pub async fn serve_prompts(
     }
 }
 
-/// Start the GUI so somebody can answer the prompt.
-///
-/// Resolved next to this executable before falling back to `PATH`: the daemon
-/// runs as a systemd user unit, whose environment is not the login shell's, so
-/// a `PATH` lookup is not something an unlock path should depend on.
 /// Whether there is a graphical session to put a window in.
 fn has_display() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
 }
 
-fn spawn_frontend() -> std::io::Result<String> {
+/// Whether the frontend is being started only to ask for the passphrase.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Prompt {
+    Yes,
+    No,
+}
+
+/// Start the GUI so somebody can answer the prompt.
+///
+/// Resolved next to this executable before falling back to `PATH`: the daemon
+/// runs as a systemd user unit, whose environment is not the login shell's, so
+/// a `PATH` lookup is not something an unlock path should depend on.
+///
+/// [`Prompt::Yes`] passes `--prompt`, which starts the frontend with no main
+/// window at all: an application asking for one secret gets a dialog, not the
+/// whole password manager. A signing confirmation cannot use it — that window
+/// asks its question about an unlocked vault, which is not what `--prompt`
+/// is for.
+fn spawn_frontend(prompt: Prompt) -> std::io::Result<String> {
+    let (mut command, name) = frontend_command(prompt);
+    command.spawn().map(|_| name)
+}
+
+/// The command [`spawn_frontend`] runs, and the name to log it under.
+///
+/// Split out so the argument list is something a test can look at: the
+/// difference between starting a dialog and starting the whole application is
+/// one flag, and losing it would show up as "an application asked for a secret
+/// and my password manager opened", which no test that stops at the daemon
+/// would catch.
+fn frontend_command(prompt: Prompt) -> (std::process::Command, String) {
     let sibling = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("locket")))
@@ -366,9 +391,11 @@ fn spawn_frontend() -> std::io::Result<String> {
         Some(p) => p.as_os_str().to_owned(),
         None => std::ffi::OsString::from("locket"),
     };
-    std::process::Command::new(&candidate)
-        .spawn()
-        .map(|_| candidate.to_string_lossy().into_owned())
+    let mut command = std::process::Command::new(&candidate);
+    if prompt == Prompt::Yes {
+        command.arg("--prompt");
+    }
+    (command, candidate.to_string_lossy().into_owned())
 }
 
 async fn wait_until_unlocked(
@@ -413,6 +440,24 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(wait_until_unlocked(&s, std::time::Duration::from_secs(5)).await);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    /// An unlock request starts the frontend for the dialog, not for the
+    /// application: `--prompt` is what keeps a request for one secret from
+    /// opening the whole password manager.
+    #[test]
+    fn an_unlock_prompt_starts_the_frontend_with_prompt() {
+        let (command, _) = frontend_command(Prompt::Yes);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--prompt"]);
+    }
+
+    /// A signing confirmation is asked about an *unlocked* vault, so it has no
+    /// passphrase to ask for and no business in the dialog.
+    #[test]
+    fn a_confirmation_starts_the_frontend_without_prompt() {
+        let (command, _) = frontend_command(Prompt::No);
+        assert_eq!(command.get_args().count(), 0);
     }
 
     #[tokio::test]

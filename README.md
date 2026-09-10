@@ -584,11 +584,33 @@ plaintext index of them: a service that cannot answer `ReadAlias` or
 machine with no keyring on it.
 
 The GUI closes the loop in both directions: it subscribes to `UnlockRequested`
-and raises its unlock screen saying *why* it appeared, and when you unlock it
+and asks for the passphrase saying *why* it is asking, and when you unlock it
 forwards the same passphrase to the daemon — otherwise the GUI would show your
 secrets while every `libsecret` app still saw a locked vault. Locking the GUI
 locks the daemon too. A missing daemon is a supported configuration, not an
 error; the GUI falls back to editing the vault file directly.
+
+The asking happens in a dialog the size of the question: one passphrase field,
+in its own small window, with an *Open locket* button for anyone who wanted the
+application rather than the question. An application's request is not a reason
+to throw a 1100-by-760 password manager across the screen, and it is certainly
+not a reason to lock the window someone was already reading — which is what
+answering in the main window used to mean, because the unlock screen *is* the
+whole window there. Unlocking through the dialog unlocks that window too when
+it is locked, so a passphrase is still typed once per session.
+
+It is a small window but not a panel popup, and the difference is the same one
+the applet is careful about below: it is a titled, decorated toplevel that the
+compositor lists and stacks like any other window, not an undecorated surface
+appearing where the system's own prompts appear. Dismissing it sends the daemon
+nothing — the Secret Service has no way to *refuse* a prompt, so the request
+waits out its own timeout exactly as it would if nobody were at the machine.
+
+If no locket is running when the request arrives, the daemon starts one with
+`--prompt`: that instance opens the dialog and no main window at all, and ends
+when the dialog does. A `--prompt` start that finds an instance already running
+hands the request over D-Bus to that one, which raises its dialog rather than
+its window.
 
 Verified end to end on a private bus: with the vault locked, `secret-tool
 lookup` blocks, `UnlockRequested` fires, a frontend answering with `Unlock`
@@ -598,8 +620,7 @@ and not a fault.
 
 Also verified across two real processes on a live COSMIC session: `locketd`
 logs *"asked the frontend to unlock"*, the GUI logs *"daemon asked for an
-unlock"*, and the unlock screen appears reading "An application asked for a
-secret from your vault."
+unlock"*, and the dialog appears reading "An application wants a secret."
 
 ## Unlocking at login
 

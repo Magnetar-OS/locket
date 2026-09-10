@@ -32,6 +32,7 @@ use crate::fl;
 use crate::import;
 use crate::labels;
 use crate::preferences::{self, Status};
+use crate::prompt::{self, Prompt};
 use crate::security::{self, Security};
 
 /// The application icon, for the About page.
@@ -198,6 +199,8 @@ pub enum Message {
     // -- daemon --
     Daemon(DaemonEvent),
     DaemonUnlocked(bool),
+    /// The small window an application's unlock request raises.
+    Prompt(prompt::Message),
     // -- unlock factors --
     Security(security::Message),
     /// Move focus to the search box.
@@ -211,6 +214,11 @@ pub enum Message {
     IdleCheck,
     /// The window lost focus. Re-conceals revealed secrets when configured to.
     WindowUnfocused,
+    /// A window of ours took the keyboard; which one decides where the caret
+    /// goes.
+    WindowFocused(cosmic::iced::window::Id),
+    /// The compositor asked for a window to close.
+    WindowCloseRequested(cosmic::iced::window::Id),
     Preferences(preferences::Message),
     OpenImport,
     Import(import::Message),
@@ -269,17 +277,53 @@ struct ExportFlow {
 
 pub struct Flags {
     pub vault_path: PathBuf,
+    /// Set when this process was started only to answer an application's
+    /// unlock request. Held as the action name a second `locket --prompt`
+    /// forwards, because that is what [`CosmicFlags::action`] hands over.
+    prompt: Option<String>,
+}
+
+/// The action name `--prompt` travels under between instances.
+const PROMPT_ACTION: &str = "prompt";
+
+impl Flags {
+    pub fn new(vault_path: PathBuf, prompt: bool) -> Self {
+        Self {
+            vault_path,
+            prompt: prompt.then(|| PROMPT_ACTION.to_owned()),
+        }
+    }
+
+    /// Whether this start is only here to raise the unlock dialog.
+    fn is_prompt(&self) -> bool {
+        self.prompt.is_some()
+    }
 }
 
 /// What a second `locket` forwards to the instance already running.
 ///
-/// Nothing: there are no subcommands, and the vault path is not worth passing
+/// Only whether it was started to prompt. The vault path is not worth passing
 /// because switching an unlocked window to another vault mid-session is not
-/// something the app can do. A bare activation just raises the window.
+/// something the app can do, so a bare activation just raises the window —
+/// but a `--prompt` start that finds an instance already running must not do
+/// that, or a daemon racing a running frontend would throw the whole window
+/// at someone who was only asked for a passphrase.
 impl cosmic::app::CosmicFlags for Flags {
     type SubCommand = String;
     type Args = Vec<String>;
+
+    fn action(&self) -> Option<&String> {
+        self.prompt.as_ref()
+    }
 }
+
+/// The main window's initial size, and the floor it can be resized to.
+///
+/// Here rather than in `main` alone because a `--prompt` start opens that
+/// window by hand later; two places deciding how big it is would disagree the
+/// first time one of them changed.
+pub const WINDOW_SIZE: cosmic::iced::Size = cosmic::iced::Size::new(1100.0, 760.0);
+pub const WINDOW_MIN_SIZE: cosmic::iced::Size = cosmic::iced::Size::new(560.0, 400.0);
 
 /// What the menu bar and the keyboard can ask for.
 ///
@@ -413,6 +457,8 @@ pub struct App {
     clipboard_copy: Option<String>,
     /// An SSH signature waiting to be allowed: (request id, key name).
     pending_confirm: Option<(u32, String)>,
+    /// The dialog raised by an application's unlock request, while one is up.
+    prompt: Option<Prompt>,
 
     /// The one-time-code field currently shown as a QR, with its encoded
     /// image. Held rather than rebuilt per frame because the widget borrows
@@ -600,6 +646,224 @@ impl App {
             )));
         }
         Task::batch(tasks)
+    }
+
+    // -- the dialog an application's request raises ------------------------
+
+    /// Settings shared by the windows this application opens for itself.
+    ///
+    /// `decorations: false` does not mean a bare window: every window here
+    /// draws a COSMIC header bar of its own, so asking the compositor for one
+    /// as well would stack two title bars on the same window.
+    fn window_settings(size: cosmic::iced::Size) -> cosmic::iced::window::Settings {
+        #[allow(unused_mut)]
+        let mut settings = cosmic::iced::window::Settings {
+            size,
+            decorations: false,
+            transparent: true,
+            ..Default::default()
+        };
+        // The id the .desktop file carries, which is how the compositor finds
+        // the window's icon and groups it with the rest of the application.
+        #[cfg(target_os = "linux")]
+        {
+            settings.platform_specific.application_id =
+                <Self as cosmic::Application>::APP_ID.to_owned();
+        }
+        settings
+    }
+
+    /// Put an application's unlock request in front of the user.
+    fn raise_prompt(&mut self) -> Task<Message> {
+        // No vault file yet: there is nothing to unlock, and "choose a
+        // passphrase, twice, and here is how strong it is" is not a question
+        // to ask in a dialog this size.
+        if !self.vault_exists {
+            return self.open_main_window();
+        }
+
+        // Read by the unlock screen: someone who reaches the full window from
+        // here should still be told why they are being asked.
+        self.unlock_requested_by_app = true;
+
+        if let Some(prompt) = &self.prompt {
+            // Already asking. Bring that window forward instead of stacking a
+            // second dialog behind it.
+            return Self::raise_window(prompt.window);
+        }
+
+        let mut settings = Self::window_settings(prompt::SIZE);
+        settings.resizable = false;
+        // Dismissing runs through `update`: the dialog may be the only window
+        // this process has, and then closing it is the process ending.
+        settings.exit_on_close_request = false;
+        let (id, opened) = cosmic::iced::window::open(settings);
+        self.prompt = Some(Prompt::new(id));
+        Task::batch([
+            self.set_window_title(fl!("app-title"), id),
+            opened.map(|_| cosmic::Action::App(Message::Prompt(prompt::Message::Focus))),
+        ])
+    }
+
+    /// Take the dialog down, and with it the process when the dialog was the
+    /// only reason this one was started.
+    ///
+    /// The exit is decided here rather than when the window's `Closed` event
+    /// comes back, because by then the dialog has been taken out of `self` and
+    /// there is nothing left to recognise that id by — which is exactly how
+    /// this was written first, and it left a `--prompt` process running with
+    /// no window at all.
+    fn close_prompt(&mut self) -> Task<Message> {
+        let Some(prompt) = self.prompt.take() else {
+            return Task::none();
+        };
+        let closed = cosmic::iced::window::close(prompt.window);
+        if self.core.main_window_id().is_none() {
+            return closed.chain(cosmic::iced::exit());
+        }
+        closed
+    }
+
+    /// Ask for a window that already exists to come forward.
+    ///
+    /// Best effort, and the same effort libcosmic makes when a second instance
+    /// hands its activation over: unminimise, then ask for focus. A Wayland
+    /// compositor is within its rights to refuse the focus half — raising
+    /// another window is the compositor's call, not ours — but a window that
+    /// was minimised does come back.
+    fn raise_window(id: cosmic::iced::window::Id) -> Task<Message> {
+        cosmic::iced::window::minimize::<cosmic::Action<Message>>(id, false)
+            .chain(cosmic::iced::window::gain_focus(id))
+    }
+
+    /// Bring the full window up: raise it when it is there, and open it when
+    /// this process was started with `--prompt` and so has never had one.
+    fn open_main_window(&mut self) -> Task<Message> {
+        if let Some(id) = self.core.main_window_id() {
+            return Self::raise_window(id);
+        }
+
+        let mut settings = Self::window_settings(WINDOW_SIZE);
+        settings.min_size = Some(WINDOW_MIN_SIZE);
+        // Closing the main window ends the process, which is what closing
+        // locket has always meant; the framework does that part once this is
+        // the window it knows about.
+        settings.exit_on_close_request = true;
+        let (id, opened) = cosmic::iced::window::open(settings);
+        self.core.set_main_window_id(Some(id));
+        Task::batch([opened.discard(), self.update_title()])
+    }
+
+    fn prompt_update(&mut self, message: prompt::Message) -> Task<Message> {
+        match message {
+            prompt::Message::PassphraseChanged(value) => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.passphrase = value;
+                    prompt.error = None;
+                }
+            }
+
+            prompt::Message::ToggleShow => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.show_passphrase = !prompt.show_passphrase;
+                }
+            }
+
+            prompt::Message::Focus => {
+                return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
+            }
+
+            prompt::Message::Drag => {
+                let window = self.prompt.as_ref().map(|prompt| prompt.window);
+                return self.core.drag(window);
+            }
+
+            prompt::Message::Submit => {
+                let Some(prompt) = self.prompt.as_mut() else {
+                    return Task::none();
+                };
+                if prompt.busy {
+                    return Task::none();
+                }
+                if prompt.passphrase.is_empty() {
+                    prompt.error = Some(fl!("error-enter-passphrase"));
+                    return Task::none();
+                }
+                prompt.busy = true;
+                prompt.error = None;
+                let passphrase = prompt.take_passphrase();
+
+                // When the window behind this dialog is locked, the same
+                // passphrase opens it too. One entry unlocks the session
+                // either way round: unlocking in the window already hands the
+                // passphrase to the daemon, and this is that in reverse.
+                let path = self.vault_path.clone();
+                let here = self.vault.is_none() && self.core.main_window_id().is_some();
+
+                return cosmic::task::future(async move {
+                    let for_daemon = passphrase.clone();
+                    let unlocked = daemon::unlock(for_daemon).await;
+                    // Argon2id, again and off the UI thread: the daemon ran
+                    // its own pass on its own copy of the file.
+                    let vault = if unlocked && here {
+                        tokio::task::spawn_blocking(move || Vault::open(&path, &passphrase))
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                    } else {
+                        None
+                    };
+                    Message::Prompt(prompt::Message::Answered(
+                        unlocked,
+                        Arc::new(Mutex::new(vault)),
+                    ))
+                });
+            }
+
+            prompt::Message::Answered(unlocked, slot) => {
+                if !unlocked {
+                    if let Some(prompt) = self.prompt.as_mut() {
+                        prompt.busy = false;
+                        prompt.error = Some(fl!("prompt-refused"));
+                    }
+                    return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
+                }
+
+                // The daemon holds the key now, so the application's request
+                // resolves on the daemon's own poll; there is nothing left for
+                // the dialog to ask.
+                self.unlock_requested_by_app = false;
+                let mut tasks = vec![self.close_prompt()];
+                if let Some(vault) = slot.lock().ok().and_then(|mut guard| guard.take()) {
+                    self.vault = Some(vault);
+                    self.screen = Screen::Browsing;
+                    self.error = None;
+                    tasks.push(self.update_title());
+                }
+                return Task::batch(tasks);
+            }
+
+            prompt::Message::Dismiss => return self.close_prompt(),
+
+            prompt::Message::OpenWindow => {
+                // The dialog stays: it is the thing that can answer the
+                // request, and the window may well be locked itself.
+                return self.open_main_window();
+            }
+
+            // The window went away without us closing it — the compositor
+            // tore it down, or the session did. Anything we closed ourselves
+            // has already been forgotten by `close_prompt`.
+            prompt::Message::Closed => {
+                self.prompt = None;
+                self.unlock_requested_by_app = false;
+                if self.core.main_window_id().is_none() {
+                    return cosmic::iced::exit();
+                }
+            }
+        }
+
+        Task::none()
     }
 
     // -- views --------------------------------------------------------------
@@ -1503,8 +1767,9 @@ impl cosmic::Application for App {
         let config = config::config();
         let settings = config.as_ref().map(Settings::load).unwrap_or_default();
         let vault_exists = flags.vault_path.is_file();
+        let prompting = flags.is_prompt();
 
-        let app = App {
+        let mut app = App {
             core,
             nav,
             key_binds: key_binds(),
@@ -1541,6 +1806,7 @@ impl cosmic::Application for App {
             unlock_requested_by_app: false,
             clipboard_copy: None,
             pending_confirm: None,
+            prompt: None,
             qr: None,
             about: about(),
         };
@@ -1560,6 +1826,13 @@ impl cosmic::Application for App {
         // on every `window::Event::Focused`, which is the deterministic
         // signal — this timer only covers the case where the window was
         // already focused before the subscription attached.
+        // Started by the daemon to answer an application: the dialog is the
+        // whole interface, and there is no window behind it to focus into.
+        if prompting {
+            let task = app.raise_prompt();
+            return (app, task);
+        }
+
         (
             app,
             cosmic::task::future(async {
@@ -1691,11 +1964,14 @@ impl cosmic::Application for App {
                         self.vault_exists = true;
                         self.screen = Screen::Browsing;
                         self.error = None;
+                        // The daemon took the same passphrase on the way here,
+                        // so an application's dialog has nothing left to ask.
+                        let closed = self.close_prompt();
                         let title = self.update_title();
                         if conflict.is_some() {
                             self.sync_conflict = conflict;
                         }
-                        return title;
+                        return Task::batch([closed, title]);
                     }
                     None => {
                         self.screen = Screen::Locked;
@@ -1965,24 +2241,26 @@ impl cosmic::Application for App {
 
             Message::Daemon(event) => match event {
                 DaemonEvent::Connected { locked } => {
+                    let mut tasks = Vec::with_capacity(2);
                     if !locked {
+                        // Something else answered while we were asking — or
+                        // the request was already stale when we started.
                         self.unlock_requested_by_app = false;
+                        tasks.push(self.close_prompt());
                     }
                     // A daemon that just appeared is running on its own
                     // default; hand it the setting the user actually chose.
-                    return self.push_auto_lock();
+                    tasks.push(self.push_auto_lock());
+                    return Task::batch(tasks);
                 }
                 DaemonEvent::UnlockRequested => {
-                    // Surface it wherever the user is: if the GUI is already
-                    // unlocked we still cannot help, because the passphrase is
-                    // not retained — so ask again, explaining why.
-                    self.unlock_requested_by_app = true;
-                    self.editor = None;
-                    self.core.window.show_context = false;
-                    if self.screen == Screen::Browsing {
-                        self.vault = None;
-                        self.screen = Screen::Locked;
-                    }
+                    // A dialog the size of the question, rather than the whole
+                    // window: the request came from another application, and
+                    // answering it is no reason to take over the one this
+                    // window was showing — or to lock it out from under
+                    // somebody mid-edit, which is what asking here used to
+                    // mean.
+                    return self.raise_prompt();
                 }
                 DaemonEvent::ConfirmRequested { id, key } => {
                     // Raise the window: this is a question, and one nobody can
@@ -1998,9 +2276,12 @@ impl cosmic::Application for App {
             Message::DaemonUnlocked(ok) => {
                 if ok {
                     self.unlock_requested_by_app = false;
-                    return self.toast(fl!("toast-unlocked-others"));
+                    let closed = self.close_prompt();
+                    return Task::batch([closed, self.toast(fl!("toast-unlocked-others"))]);
                 }
             }
+
+            Message::Prompt(message) => return self.prompt_update(message),
 
             Message::FocusSearch => {
                 return widget::text_input::focus(SEARCH_ID.clone());
@@ -2139,6 +2420,33 @@ impl cosmic::Application for App {
                 self.passphrase_focused = true;
                 self.confirm_focused = false;
                 return widget::text_input::focus(PASSPHRASE_ID.clone());
+            }
+
+            Message::WindowFocused(id) => {
+                // The dialog owns the caret while it has the keyboard: it has
+                // exactly one field, and it is the window in front.
+                if self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.window == id)
+                {
+                    return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
+                }
+                if Some(id) == self.core.main_window_id()
+                    && matches!(self.screen, Screen::Locked | Screen::Unlocking)
+                {
+                    return self.update(Message::FocusPassphrase);
+                }
+            }
+
+            Message::WindowCloseRequested(id) => {
+                if self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.window == id)
+                {
+                    return self.close_prompt();
+                }
             }
 
             Message::PassphraseFocus(focused) => {
@@ -2920,6 +3228,27 @@ impl cosmic::Application for App {
         widget::toaster(&self.toasts, content)
     }
 
+    /// Every window that is not the main one, which here is only ever the
+    /// dialog an application's request raises.
+    fn view_window(&self, id: cosmic::iced::window::Id) -> Element<'_, Self::Message> {
+        match &self.prompt {
+            Some(prompt) if prompt.window == id => prompt
+                .view(self.core.focused_window() == Some(id))
+                .map(Message::Prompt),
+            // A window we do not know about is one that is already closing;
+            // drawing nothing is the honest answer for the frame in between.
+            _ => widget::column::with_capacity(0).into(),
+        }
+    }
+
+    /// Called once a window is actually gone.
+    fn on_close_requested(&self, id: cosmic::iced::window::Id) -> Option<Self::Message> {
+        self.prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.window == id)
+            .then_some(Message::Prompt(prompt::Message::Closed))
+    }
+
     fn context_drawer(&self) -> Option<ContextDrawer<'_, Self::Message>> {
         if !self.core.window.show_context || self.editor.is_some() {
             return None;
@@ -3210,16 +3539,29 @@ impl cosmic::Application for App {
         )
     }
 
-    /// A second `locket` — usually the applet's "Unlock in locket" — asking
-    /// this one to come forward.
+    /// A second `locket` — usually the applet's "Unlock in locket", sometimes
+    /// the daemon — asking this one to come forward.
     ///
-    /// libcosmic has already unminimised and raised the window by the time
-    /// this runs; all that is left is to put the caret where the person who
-    /// clicked is about to type.
+    /// libcosmic has already unminimised and raised the main window by the
+    /// time this runs, so a plain activation only has to put the caret where
+    /// the person who clicked is about to type.
     fn dbus_activation(
         &mut self,
-        _message: cosmic::dbus_activation::Message,
+        message: cosmic::dbus_activation::Message,
     ) -> Task<Self::Message> {
+        // A `--prompt` start that found us already running: the daemon sent it
+        // to ask for a passphrase, so raise the dialog. Pulling the window
+        // forward instead is the one thing `--prompt` exists to avoid.
+        if let cosmic::dbus_activation::Details::ActivateAction { action, .. } = &message.msg
+            && action == PROMPT_ACTION
+        {
+            return self.raise_prompt();
+        }
+        // Somebody launched locket, and that is a request for the application
+        // itself — which a process started only to prompt has no window for.
+        if self.core.main_window_id().is_none() {
+            return self.open_main_window();
+        }
         if self.screen == Screen::Locked {
             return self.update(Message::FocusPassphrase);
         }
@@ -3357,15 +3699,28 @@ impl cosmic::Application for App {
         // unfocused one draws none at all, which reads as a window ignoring
         // the keyboard. cosmic-greeter reaches the same place by focusing in
         // response to an event rather than on a delay.
-        if matches!(self.screen, Screen::Locked | Screen::Unlocking) {
-            subs.push(cosmic::iced::event::listen_with(|event, _, _| {
-                matches!(
-                    event,
-                    cosmic::iced::Event::Window(cosmic::iced::window::Event::Focused)
-                )
-                .then_some(Message::FocusPassphrase)
-            }));
-        }
+        //
+        // The event carries which window took the keyboard, and `update`
+        // decides from that: focusing the main window's field because the
+        // dialog was focused would drag the caret out of the window the person
+        // is actually typing into.
+        //
+        // The same listener answers close requests, because the dialog is
+        // opened with `exit_on_close_request` off — a close from the
+        // compositor (a keybind, the window menu) arrives as an event to
+        // answer rather than closing behind our back, which is what lets a
+        // dismissal end a `--prompt` process.
+        subs.push(cosmic::iced::event::listen_with(
+            |event, _, id| match event {
+                cosmic::iced::Event::Window(cosmic::iced::window::Event::Focused) => {
+                    Some(Message::WindowFocused(id))
+                }
+                cosmic::iced::Event::Window(cosmic::iced::window::Event::CloseRequested) => {
+                    Some(Message::WindowCloseRequested(id))
+                }
+                _ => None,
+            },
+        ));
 
         Subscription::batch(subs)
     }

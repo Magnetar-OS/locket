@@ -71,7 +71,9 @@ attack the strength meter on vault creation exists to make less likely.
 `IsLocked`, the agent has dropped every identity, the portal backend has
 nothing to derive from.
 
-**Can** ask for an unlock, which surfaces as a prompt in locket's own window.
+**Can** ask for an unlock, which surfaces as a dialog in a titled window of
+locket's own — not a keystroke the asking process can see, and not a surface it
+can position or dress up.
 **Can** see the collection index and the fact that a vault exists.
 
 ### C. A process running as you, vault **unlocked**

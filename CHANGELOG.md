@@ -4,6 +4,23 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- **An application asking for a secret gets a dialog, not the whole window.**
+  When a `libsecret` client reaches a locked vault, locket now asks for the
+  passphrase in a small titled window of its own — one field, and an *Open
+  locket* button for anyone who wanted the application itself. Before, the
+  request took over the main window: it switched to the full-screen unlock
+  view and, if the vault was open, locked it first, so an application's
+  request could close what you were reading mid-session. It no longer touches
+  the window behind it, and unlocking through the dialog still unlocks that
+  window too when it is locked, exactly as unlocking in the window has always
+  unlocked the daemon.
+- When no locket is running, the daemon now starts one with `--prompt`, which
+  brings up that dialog and no main window at all. Dismissing it ends the
+  process; the Secret Service request then waits out its own timeout, as it
+  does when nobody is at the machine.
+
 ## [1.0.0] - 2026-09-08
 
 The first release.

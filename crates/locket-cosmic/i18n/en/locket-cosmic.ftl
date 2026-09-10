@@ -305,6 +305,16 @@ unlock-button = Unlock
 unlock-working = Unlocking…
 
 
+## The dialog an application's request raises
+
+prompt-title = An application wants a secret
+# One line on purpose: a Fluent value broken across source lines keeps those
+# breaks, and the dialog is narrow enough to need its own wrapping.
+prompt-body = Something asked for a secret from your vault. Enter your passphrase to let it through.
+prompt-open-window = Open locket
+prompt-refused = That passphrase did not open the vault.
+
+
 ## Sidebar categories
 
 category-all = All Items
