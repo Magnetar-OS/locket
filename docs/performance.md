@@ -1,7 +1,7 @@
 # Performance — measured
 
 **Measured · September 2026 · `cargo run --release -p locket-core --example bench`**
-**AMD Ryzen 7 9700X 8-Core Processor · rustc 1.98.0 (88d9e12ae 2026-08-18)**
+**AMD Ryzen 7 9700X 8-Core Processor · rustc 1.98.1 (88d9e12ae 2026-08-18)**
 
 A claim about responsiveness that nobody measured is a wish. These are the
 four things a person actually waits on, timed end to end on a vault of
