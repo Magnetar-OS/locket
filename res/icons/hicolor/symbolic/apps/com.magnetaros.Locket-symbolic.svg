@@ -1,10 +1,1 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!--
-  Symbolic variant: one flat shape, no colour of its own. Symbolic icons are
-  recoloured by the theme to match the panel or list they sit in, so anything
-  with its own palette would fight whatever it is placed on.
--->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <path d="M8 1.5a4.5 4.5 0 0 0-2.1 8.5L4.5 14.5h7L10.1 10A4.5 4.5 0 0 0 8 1.5zm0 2.6a1.9 1.9 0 1 1 0 3.8 1.9 1.9 0 0 1 0-3.8z"
-        fill="#2e3436"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"><g fill="#2e3436"><path fill-rule="evenodd" d="M4.5 6.5V5a3.5 3.5 0 0 1 7 0v1.5H10V5a2 2 0 0 0-4 0v1.5Z"/><path fill-rule="evenodd" d="M3 6.5h10a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7.5a1 1 0 0 1 1-1ZM8 9.25a1.25 1.25 0 0 0-.5 2.4V13h1v-1.35a1.25 1.25 0 0 0-.5-2.4Z"/></g></svg>

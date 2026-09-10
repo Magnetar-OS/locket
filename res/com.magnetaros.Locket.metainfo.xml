@@ -82,8 +82,8 @@
 
   <!-- The tint a software centre paints behind the icon. -->
   <branding>
-    <color type="primary" scheme_preference="light">#e5dff4</color>
-    <color type="primary" scheme_preference="dark">#2c1f4a</color>
+    <color type="primary" scheme_preference="light">#f2b84b</color>
+    <color type="primary" scheme_preference="dark">#c4781a</color>
   </branding>
 
   <releases>

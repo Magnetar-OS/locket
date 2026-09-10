@@ -48,8 +48,12 @@ pam-dir := base-dir / 'lib' / 'security'
 metainfo-src := 'res' / (APPID + '.metainfo.xml')
 desktop-src := 'res' / (APPID + '.desktop')
 applet-desktop-src := 'res' / (applet-appid + '.desktop')
-icon-src := 'res' / 'icons' / 'hicolor' / 'scalable' / 'apps' / (APPID + '.svg')
-icon-symbolic-src := 'res' / 'icons' / 'hicolor' / 'symbolic' / 'apps' / (APPID + '-symbolic.svg')
+icon-dir := 'res' / 'icons' / 'hicolor'
+icon-src := icon-dir / 'scalable' / 'apps' / (APPID + '.svg')
+icon-symbolic-src := icon-dir / 'symbolic' / 'apps' / (APPID + '-symbolic.svg')
+# The PNGs are rasterised from the scalable SVG at each size, so the panel and
+# the icon grid get pixel-exact art instead of a downscaled smudge.
+icon-sizes := '16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512'
 
 # Default recipe which runs `just build-release`
 default: build-release
@@ -132,6 +136,10 @@ install:
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
     install -Dm0644 {{icon-src}} {{icon-svg-dst}}
     install -Dm0644 {{icon-symbolic-src}} {{icon-symbolic-dst}}
+    for size in {{icon-sizes}}; do \
+        install -Dm0644 {{icon-dir}}/$size/apps/{{APPID}}.png \
+            {{icons-dst}}/$size/apps/{{APPID}}.png; \
+    done
     install -Dm0644 res/locket-daemon.service {{systemd-dst}}
     install -Dm0644 res/locket.portal {{portal-dst}}
     # Both are caches and neither notices a new file on its own; "Open With"
@@ -151,6 +159,9 @@ uninstall:
     rm -f {{ pam-dir / 'pam_locket.so' }}
     rm -f {{ desktop-dst / (APPID + '.desktop') }} {{ desktop-dst / (applet-appid + '.desktop') }}
     rm -f {{metainfo-dst}} {{icon-svg-dst}} {{icon-symbolic-dst}}
+    for size in {{icon-sizes}}; do \
+        rm -f {{icons-dst}}/$size/apps/{{APPID}}.png; \
+    done
     rm -f {{systemd-dst}} {{portal-dst}}
 
 # Vendor dependencies locally

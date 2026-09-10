@@ -94,6 +94,10 @@ package() {
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.magnetaros.Locket.svg"
   install -Dm644 res/icons/hicolor/symbolic/apps/com.magnetaros.Locket-symbolic.svg \
     "$pkgdir/usr/share/icons/hicolor/symbolic/apps/com.magnetaros.Locket-symbolic.svg"
+  for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do
+    install -Dm644 "res/icons/hicolor/$size/apps/com.magnetaros.Locket.png" \
+      "$pkgdir/usr/share/icons/hicolor/$size/apps/com.magnetaros.Locket.png"
+  done
 
   # The portal backend file has to live where xdg-desktop-portal scans, which
   # is XDG_DATA_DIRS only — a copy under ~/.local/share is never found.
