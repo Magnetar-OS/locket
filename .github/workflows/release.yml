@@ -92,7 +92,7 @@ jobs:
       pkgdesc: 'Keep passwords, keys and secrets for your desktop'
       url: 'https://github.com/Magnetar-OS/locket'
       license: 'GPL-3.0-or-later'
-      depends: 'libxkbcommon tpm2-tss'
+      depends: 'libxkbcommon tpm2-tss pam systemd-libs'
       provides: 'locket'
       conflicts: 'locket'
       maintainer: 'Dominikos Pritis <dominikos.pritis@gmail.com>'

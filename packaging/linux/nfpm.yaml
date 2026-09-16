@@ -30,14 +30,20 @@ overrides:
     depends:
       - libxkbcommon0
       - libtss2-esys-3.0.2-0
+      - libpam0g
+      - libudev1
   rpm:
     depends:
       - libxkbcommon
       - tpm2-tss
+      - pam
+      - systemd-libs
   archlinux:
     depends:
       - libxkbcommon
       - tpm2-tss
+      - pam
+      - systemd-libs
 
 contents:
   # Everything `just rootdir=.release-kit/pkgroot install` staged: binaries,
