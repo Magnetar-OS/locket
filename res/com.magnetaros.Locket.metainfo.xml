@@ -90,6 +90,11 @@
     <!-- Kept in step with `version` in Cargo.toml: the About page reads the
          crate's version, and two numbers that disagree are a bug report nobody
          can act on. -->
+    <release version="1.0.0" date="2026-09-08"> <!-- x-release-kit-version-date -->
+      <description>
+        <p>An application asking for a secret gets a small unlock dialog instead of taking over the main window, and Locket ships an icon at every size.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-09-08">
       <description>
         <p>The first release. Locket keeps passwords, keys and secrets for the COSMIC desktop, serving org.freedesktop.secrets and an SSH agent from a single encrypted vault.</p>
