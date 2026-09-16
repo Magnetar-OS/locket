@@ -71,7 +71,7 @@ const CLIPBOARD_CLEAR_SECS: u64 = 30;
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Surface(cosmic::surface::Action),
+    Surface(cosmic::surface::Action<Message>),
     PopupClosed(Id),
     Tick,
     Status(Option<Status>),
@@ -167,9 +167,7 @@ impl cosmic::Application for Applet {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Surface(action) => {
-                return cosmic::task::message(cosmic::Action::Cosmic(
-                    cosmic::app::Action::Surface(action),
-                ));
+                return cosmic::task::message(cosmic::Action::Surface(action));
             }
             Message::PopupClosed(id) => {
                 if self.popup == Some(id) {
