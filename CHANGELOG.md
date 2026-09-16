@@ -4,6 +4,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Fixed
+
+- The package declares `pam` and `systemd-libs`, which the binaries link directly. Both were
+  already present on any Arch system, so nothing failed to start.
+
 ## [1.1.0] - 2026-09-16
 
 ### Changed
