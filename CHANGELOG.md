@@ -4,6 +4,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-16
+
 ### Changed
 
 - **An application asking for a secret gets a dialog, not the whole window.**
@@ -378,3 +380,7 @@ scripts/locket-setup            # reinstalls under the new id
   installed unit turns the idle lock on at 15 minutes.
 - `ssh-add -x` and `-X` work: the lock passphrase is kept and compared in
   constant time.
+
+[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Magnetar-OS/locket/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/Magnetar-OS/locket/releases/tag/v1.0.0
