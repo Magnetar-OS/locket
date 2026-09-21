@@ -45,6 +45,9 @@ overrides:
       - pam
       - systemd-libs
 
+scripts:
+  postinstall: packaging/linux/postinstall.sh
+
 contents:
   # Everything `just rootdir=.release-kit/pkgroot install` staged: binaries,
   # desktop entries, icons, metainfo, services — applets and daemons

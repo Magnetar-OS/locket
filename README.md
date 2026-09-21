@@ -404,6 +404,12 @@ they have imported whatever their current keyring holds.
 
 ## Installing as your secret store
 
+From a package (`pacman -S locket`, or the .deb/.rpm), run the installed
+`locket-setup` as your own user. It uses the packaged binaries, unit, PAM
+module and portal backend, and only does the per-user switch-over — plus the
+login stack with `--pam`, and the browser host with `--browser`. From a source
+checkout, `scripts/locket-setup` also builds and installs into `~/.local`:
+
 ```sh
 scripts/locket-setup            # build, install, and report what is left to do
 scripts/locket-setup --pam      # also unlock the vault at login (needs root)

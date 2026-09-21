@@ -142,6 +142,10 @@ install:
     done
     install -Dm0644 res/locket-daemon.service {{systemd-dst}}
     install -Dm0644 res/locket.portal {{portal-dst}}
+    # A package cannot switch a user's keyring over or edit the login stack;
+    # locket-setup does both, and in its packaged mode uses what is installed here.
+    install -Dm0755 scripts/locket-setup {{ bin-dst / 'locket-setup' }}
+    install -Dm0644 res/native-messaging-host.json.in {{ base-dir / 'share' / 'locket' / 'native-messaging-host.json.in' }}
     # Both are caches and neither notices a new file on its own; "Open With"
     # reads the first. Only poked on a live install — a staged tree
     # (rootdir set) belongs to a package manager with hooks of its own.
@@ -149,8 +153,8 @@ install:
         update-desktop-database {{desktop-dst}} 2>/dev/null || true; \
         gtk-update-icon-cache -t {{icons-dst}} 2>/dev/null || true; \
     fi
-    @echo 'Installed. Nothing is wired up yet — run scripts/locket-setup to'
-    @echo 'import your existing keyring and take over the Secret Service.'
+    @echo 'Installed. Nothing is wired up yet — run locket-setup to import your'
+    @echo 'existing keyring and take over the Secret Service.'
 
 # Uninstalls installed files
 uninstall:
@@ -163,6 +167,7 @@ uninstall:
         rm -f {{icons-dst}}/$size/apps/{{APPID}}.png; \
     done
     rm -f {{systemd-dst}} {{portal-dst}}
+    rm -f {{ bin-dst / 'locket-setup' }} {{ base-dir / 'share' / 'locket' / 'native-messaging-host.json.in' }}
 
 # Vendor dependencies locally
 vendor:

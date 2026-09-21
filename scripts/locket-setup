@@ -17,7 +17,23 @@
 #
 set -uo pipefail
 
-PREFIX="${PREFIX:-$HOME/.local}"
+# Two ways to run this. From a source checkout it builds locket and installs
+# it into ~/.local. Installed by a package (as /usr/bin/locket-setup) the
+# binaries, the unit, the PAM module and the portal backend are already on
+# disk, owned by the package, and this only does what a package must not:
+# the per-user switch-over, and the login stack if asked.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SELF_DIR/../Cargo.toml" ]; then
+    MODE=source
+    REPO="$(cd "$SELF_DIR/.." && pwd)"
+    RES_DIR="$REPO/res"
+    PREFIX="${PREFIX:-$HOME/.local}"
+else
+    MODE=package
+    REPO=""
+    PREFIX="$(cd "$SELF_DIR/.." && pwd)"
+    RES_DIR="$PREFIX/share/locket"
+fi
 BIN_DIR="$PREFIX/bin"
 DBUS_DIR="$HOME/.local/share/dbus-1/services"
 # xdg-desktop-portal only scans XDG_DATA_DIRS, which does not include
@@ -44,7 +60,6 @@ PAM_MODULE="$(pam_module_dir)/pam_locket.so"
 PAM_STACK=/etc/pam.d/system-login
 VAULT="${LOCKET_VAULT:-$HOME/.local/share/locket/default.vault}"
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DRY=0
 DO_PAM=0
 DO_BROWSER=0
@@ -298,9 +313,12 @@ stop_if_loaded() {
 install_secret_portal() {
     say "Routing the Secret portal to locket"
 
-    if [ "$DRY" = 1 ]; then
+    if [ "$MODE" = package ]; then
+        [ -f "$PORTAL_DIR/locket.portal" ] || [ -f "$PREFIX/share/xdg-desktop-portal/portals/locket.portal" ] \
+            || warn "the package's locket.portal is missing — reinstall locket"
+    elif [ "$DRY" = 1 ]; then
         say "would install $PORTAL_DIR/locket.portal (needs root)"
-    elif sudo install -m 644 -D "$REPO/res/locket.portal" "$PORTAL_DIR/locket.portal"; then
+    elif sudo install -m 644 -D "$RES_DIR/locket.portal" "$PORTAL_DIR/locket.portal"; then
         ok "portal backend installed"
     else
         warn "could not write $PORTAL_DIR — Flatpak apps will not use locket"
@@ -344,6 +362,18 @@ install_secret_portal() {
 }
 
 install_files() {
+    if [ "$MODE" = package ]; then
+        # A user unit in ~/.config shadows the packaged one; an old source
+        # install's copy would keep starting ~/.local/bin/locketd.
+        if [ -f "$SYSTEMD_DIR/locket-daemon.service" ]; then
+            warn "$SYSTEMD_DIR/locket-daemon.service shadows the packaged unit; removing it"
+            run systemctl --user disable locket-daemon.service
+            run rm -f "$SYSTEMD_DIR/locket-daemon.service"
+            run systemctl --user daemon-reload
+        fi
+        ok "using the packaged binaries in $BIN_DIR"
+        return 0
+    fi
     say "Building release binaries"
     run env -C "$REPO" cargo build --release \
         -p locket-cosmic -p locket-daemon -p locket-cli -p locket-applet \
@@ -383,12 +413,33 @@ install_files() {
     fi
     ok "icons and metadata installed"
 
+    say "Installing the systemd user unit"
+    run mkdir -p "$SYSTEMD_DIR"
+    # Point the unit at the binary we just installed rather than /usr/bin.
+    if [ "$DRY" = 1 ]; then
+        printf '   would write %s\n' "$SYSTEMD_DIR/locket-daemon.service"
+    else
+        sed "s|ExecStart=/usr/bin/locketd|ExecStart=$BIN_DIR/locketd|" \
+            "$REPO/res/locket-daemon.service" > "$SYSTEMD_DIR/locket-daemon.service"
+        # D-Bus delegates activation to the unit, so the unit — not the
+        # .service file — must claim the Secret Service name.
+        grep -q -- "--replace-keyring" "$SYSTEMD_DIR/locket-daemon.service" \
+            || die "the unit does not claim org.freedesktop.secrets; refusing to install a no-op"
+    fi
+    ok "unit installed"
+}
+
+# What a package cannot do for a user: route the Secret portal to locket in
+# this user's portals.conf, and register the browser host for this user.
+install_integrations() {
     install_secret_portal
 
     if [ "$DO_BROWSER" = 1 ]; then
         say "Installing the native messaging host"
-        run env -C "$REPO" cargo build --release -p locket-nmh || die "host build failed"
-        run install -m 755 "$REPO/target/release/locket-native-host" "$BIN_DIR/locket-native-host"
+        if [ "$MODE" = source ]; then
+            run env -C "$REPO" cargo build --release -p locket-nmh || die "host build failed"
+            run install -m 755 "$REPO/target/release/locket-native-host" "$BIN_DIR/locket-native-host"
+        fi
         # Each browser reads its own directory; the same manifest satisfies all
         # of them because Chrome ignores allowed_extensions and Firefox ignores
         # allowed_origins.
@@ -405,7 +456,7 @@ install_files() {
             mkdir -p "$d"
             sed -e "s|@HOST_PATH@|$BIN_DIR/locket-native-host|" \
                 -e "s|@EXTENSION_ID@|$EXT_ID|" \
-                "$REPO/res/native-messaging-host.json.in" \
+                "$RES_DIR/native-messaging-host.json.in" \
                 > "$d/com.magnetaros.locket.json"
             # Without an id there is no origin to allow, and a manifest
             # claiming `chrome-extension:///` would be a lie a Chromium
@@ -421,24 +472,10 @@ install_files() {
         if [ -z "$EXT_ID" ]; then
             warn "no extension id given: Firefox is ready, Chromium browsers are not"
             printf '     load the extension unpacked, then re-run:\n'
-            printf '     scripts/locket-setup --browser <extension-id>\n'
+            printf '     locket-setup --browser <extension-id>\n'
         fi
     fi
 
-    say "Installing the systemd user unit"
-    run mkdir -p "$SYSTEMD_DIR"
-    # Point the unit at the binary we just installed rather than /usr/bin.
-    if [ "$DRY" = 1 ]; then
-        printf '   would write %s\n' "$SYSTEMD_DIR/locket-daemon.service"
-    else
-        sed "s|ExecStart=/usr/bin/locketd|ExecStart=$BIN_DIR/locketd|" \
-            "$REPO/res/locket-daemon.service" > "$SYSTEMD_DIR/locket-daemon.service"
-        # D-Bus delegates activation to the unit, so the unit — not the
-        # .service file — must claim the Secret Service name.
-        grep -q -- "--replace-keyring" "$SYSTEMD_DIR/locket-daemon.service" \
-            || die "the unit does not claim org.freedesktop.secrets; refusing to install a no-op"
-    fi
-    ok "unit installed"
 }
 
 # Everything that makes locket *the* secret store, as reversible overrides.
@@ -506,9 +543,13 @@ EOF
 install_pam() {
     command -v pamtester >/dev/null 2>&1 || warn "pamtester not installed; skipping the pre-flight check"
 
-    say "Installing $PAM_MODULE"
-    run sudo install -m 755 "$REPO/target/release/libpam_locket.so" "$PAM_MODULE" \
-        || die "could not install the PAM module"
+    if [ "$MODE" = package ]; then
+        [ -f "$PAM_MODULE" ] || die "$PAM_MODULE is missing — reinstall the locket package"
+    else
+        say "Installing $PAM_MODULE"
+        run sudo install -m 755 "$REPO/target/release/libpam_locket.so" "$PAM_MODULE" \
+            || die "could not install the PAM module"
+    fi
 
     # Prove the module loads in a throwaway stack before going near the real one.
     if command -v pamtester >/dev/null 2>&1 && [ "$DRY" != 1 ]; then
@@ -571,8 +612,9 @@ EOF
 }
 
 do_install() {
-    command -v cargo >/dev/null 2>&1 || die "cargo not found in PATH"
+    [ "$MODE" = package ] || command -v cargo >/dev/null 2>&1 || die "cargo not found in PATH"
     install_files
+    install_integrations
 
     # --- the ordering that matters ---------------------------------------
     if locket_owns_secrets; then
@@ -632,7 +674,7 @@ do_uninstall() {
     run rm -f "$DBUS_DIR/org.freedesktop.secrets.service"
     run rm -f "$AUTOSTART_DIR/gnome-keyring-secrets.desktop"
     run rm -f "$SYSTEMD_DIR/locket-daemon.service"
-    run sudo rm -f "$PORTAL_DIR/locket.portal"
+    [ "$MODE" = package ] || run sudo rm -f "$PORTAL_DIR/locket.portal"
     # Older installs put it here, where xdg-desktop-portal never looked.
     run rm -f "$HOME/.local/share/xdg-desktop-portal/portals/locket.portal"
     for c in "$PORTAL_CONF_DIR"/*-portals.conf "$PORTAL_CONF_DIR/portals.conf"; do
@@ -643,9 +685,22 @@ do_uninstall() {
     if grep -q "pam_locket.so" "$PAM_STACK" 2>/dev/null; then
         say "Removing pam_locket.so from $PAM_STACK"
         run sudo sed -i '/pam_locket.so/d; /^# locket: unlock the vault at login/,+3d' "$PAM_STACK"
-        run sudo rm -f "$PAM_MODULE"
+        [ "$MODE" = package ] || run sudo rm -f "$PAM_MODULE"
     fi
 
+    for d in "$HOME/.config/google-chrome/NativeMessagingHosts" \
+             "$HOME/.config/chromium/NativeMessagingHosts" \
+             "$HOME/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts" \
+             "$HOME/.config/vivaldi/NativeMessagingHosts" \
+             "$HOME/.config/microsoft-edge/NativeMessagingHosts" \
+             "$HOME/.mozilla/native-messaging-hosts"; do
+        run rm -f "$d/com.magnetaros.locket.json"
+    done
+
+    if [ "$MODE" = package ]; then
+        ok "gnome-keyring restored; the locket package itself is still installed"
+        return 0
+    fi
     say "Removing desktop entries, icons and metadata"
     run rm -f "$DESKTOP_DIR/com.magnetaros.Locket.desktop"
     run rm -f "$DESKTOP_DIR/com.magnetaros.LocketApplet.desktop"

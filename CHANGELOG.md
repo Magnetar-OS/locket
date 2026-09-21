@@ -4,6 +4,24 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Added
+
+- The package ships `locket-setup`. Run as your own user after installing, it
+  makes locket your keyring using the packaged binaries: it imports from the
+  running keyring, points Secret Service activation at `/usr/bin/locketd`,
+  routes the Secret portal, and with `--pam` and `--browser` wires the login
+  stack and the browser extension's host. Before, the package installed the
+  pieces and left the switch-over to a script that only worked from a source
+  checkout; the install prints how to run it.
+
+### Fixed
+
+- The unlock dialog starts outside the daemon's sandbox. Launched as the
+  daemon's child it inherited `MemoryDenyWriteExecute`, which blocks Mesa's
+  shader compiler ("JIT session error: Permission denied"); under systemd it
+  now starts as its own transient unit.
+- The daemon no longer leaves a finished dialog behind as a zombie process.
+
 ### Fixed
 
 - The package declares `pam` and `systemd-libs`, which the binaries link directly. Both were
