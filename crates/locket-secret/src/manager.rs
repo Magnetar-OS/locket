@@ -369,9 +369,43 @@ enum Prompt {
 /// whole password manager. A signing confirmation cannot use it — that window
 /// asks its question about an unlocked vault, which is not what `--prompt`
 /// is for.
+///
+/// Under systemd the frontend is started through `systemd-run --user` rather
+/// than as a child. A child inherits the daemon unit's hardening — above all
+/// `MemoryDenyWriteExecute`, which stops Mesa's shader JIT ("JIT session error:
+/// Permission denied") — and lives in the daemon's cgroup. Either way the
+/// process we start is waited on, so it never lingers as a zombie.
 fn spawn_frontend(prompt: Prompt) -> std::io::Result<String> {
-    let (mut command, name) = frontend_command(prompt);
-    command.spawn().map(|_| name)
+    let (mut command, name) = frontend_command(prompt, launcher());
+    let mut child = command.spawn()?;
+    std::thread::Builder::new()
+        .name("locket-frontend-reaper".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })?;
+    Ok(name)
+}
+
+/// How the frontend is started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Launcher {
+    /// As a direct child: outside systemd, or where `systemd-run` is missing.
+    Direct,
+    /// As a transient user unit, through this `systemd-run`.
+    SystemdRun(std::path::PathBuf),
+}
+
+/// `systemd-run` when this process is itself a systemd unit, which is exactly
+/// when a child would inherit that unit's sandbox.
+fn launcher() -> Launcher {
+    if std::env::var_os("INVOCATION_ID").is_none() {
+        return Launcher::Direct;
+    }
+    ["/usr/bin/systemd-run", "/bin/systemd-run"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.is_file())
+        .map_or(Launcher::Direct, Launcher::SystemdRun)
 }
 
 /// The command [`spawn_frontend`] runs, and the name to log it under.
@@ -381,7 +415,7 @@ fn spawn_frontend(prompt: Prompt) -> std::io::Result<String> {
 /// one flag, and losing it would show up as "an application asked for a secret
 /// and my password manager opened", which no test that stops at the daemon
 /// would catch.
-fn frontend_command(prompt: Prompt) -> (std::process::Command, String) {
+fn frontend_command(prompt: Prompt, launcher: Launcher) -> (std::process::Command, String) {
     let sibling = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("locket")))
@@ -391,7 +425,26 @@ fn frontend_command(prompt: Prompt) -> (std::process::Command, String) {
         Some(p) => p.as_os_str().to_owned(),
         None => std::ffi::OsString::from("locket"),
     };
-    let mut command = std::process::Command::new(&candidate);
+    let mut command = match &launcher {
+        Launcher::Direct => std::process::Command::new(&candidate),
+        Launcher::SystemdRun(systemd_run) => {
+            let mut command = std::process::Command::new(systemd_run);
+            // `--setenv=NAME` with no value copies it from this environment:
+            // the window needs the display, and the user manager may not have
+            // been told about it.
+            command.args([
+                "--user",
+                "--collect",
+                "--quiet",
+                "--setenv=WAYLAND_DISPLAY",
+                "--setenv=DISPLAY",
+                "--setenv=XDG_RUNTIME_DIR",
+                "--",
+            ]);
+            command.arg(&candidate);
+            command
+        }
+    };
     if prompt == Prompt::Yes {
         command.arg("--prompt");
     }
@@ -447,16 +500,37 @@ mod tests {
     /// opening the whole password manager.
     #[test]
     fn an_unlock_prompt_starts_the_frontend_with_prompt() {
-        let (command, _) = frontend_command(Prompt::Yes);
+        let (command, _) = frontend_command(Prompt::Yes, Launcher::Direct);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["--prompt"]);
+    }
+
+    /// Under systemd the frontend must not be the daemon's child: it would
+    /// inherit `MemoryDenyWriteExecute` and lose GPU shader compilation. The
+    /// transient unit still gets `--prompt`, as the last argument.
+    #[test]
+    fn under_systemd_the_frontend_starts_outside_the_daemons_sandbox() {
+        let (command, name) = frontend_command(
+            Prompt::Yes,
+            Launcher::SystemdRun("/usr/bin/systemd-run".into()),
+        );
+        assert_eq!(command.get_program(), "/usr/bin/systemd-run");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "--user");
+        let separator = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(args[separator + 1], name);
+        assert_eq!(args.last().unwrap(), "--prompt");
+        assert!(args.contains(&"--setenv=WAYLAND_DISPLAY".to_owned()));
     }
 
     /// A signing confirmation is asked about an *unlocked* vault, so it has no
     /// passphrase to ask for and no business in the dialog.
     #[test]
     fn a_confirmation_starts_the_frontend_without_prompt() {
-        let (command, _) = frontend_command(Prompt::No);
+        let (command, _) = frontend_command(Prompt::No, Launcher::Direct);
         assert_eq!(command.get_args().count(), 0);
     }
 
