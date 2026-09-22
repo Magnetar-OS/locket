@@ -2266,6 +2266,7 @@ impl cosmic::Application for App {
                     // Raise the window: this is a question, and one nobody can
                     // answer from behind whatever they were looking at.
                     self.pending_confirm = Some((id, key));
+                    return self.open_main_window();
                 }
                 // Nothing to do: the next call simply finds no daemon and the
                 // frontend falls back to the vault file, which is a supported
@@ -3311,7 +3312,15 @@ impl cosmic::Application for App {
                 ],
             ),
         );
-        vec![menu::bar(vec![file, view]).into()]
+        // Envelope's menu geometry, for the same reasons: the default
+        // `Uniform(30)` height gives every divider a full row, and the default
+        // 150 width ellipsizes labels and leaves the shortcut column no room.
+        vec![
+            menu::bar(vec![file, view])
+                .item_height(menu::ItemHeight::Dynamic(36))
+                .item_width(menu::ItemWidth::Uniform(260))
+                .into(),
+        ]
     }
 
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {

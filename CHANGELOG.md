@@ -21,6 +21,12 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   shader compiler ("JIT session error: Permission denied"); under systemd it
   now starts as its own transient unit.
 - The daemon no longer leaves a finished dialog behind as a zombie process.
+- Menus are laid out like Envelope's: a divider is a thin rule instead of a
+  full-height empty row, and the menu is wide enough that labels are not cut
+  off and shortcuts have room beside them.
+- An SSH signing request brings the locket window forward, or opens it when
+  none is open. It used to wait in a window that could be behind the terminal
+  asking, or in no window at all.
 
 ### Fixed
 
