@@ -6,6 +6,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [1.2.0] - 2026-09-22
 
+### Changed
+
+- Rebuilt against the current COSMIC libraries (libcosmic `03c8f93`).
+
 ### Added
 
 - The package ships `locket-setup`. Run as your own user after installing, it
