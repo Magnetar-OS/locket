@@ -4,6 +4,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-22
+
 ### Added
 
 - The package ships `locket-setup`. Run as your own user after installing, it
@@ -410,6 +412,7 @@ scripts/locket-setup            # reinstalls under the new id
 - `ssh-add -x` and `-X` work: the lock passphrase is kept and compared in
   constant time.
 
-[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Magnetar-OS/locket/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Magnetar-OS/locket/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/Magnetar-OS/locket/releases/tag/v1.0.0
