@@ -323,3 +323,56 @@ async fn errors_carry_the_secret_service_names() {
         "org.freedesktop.Secret.Error.IsLocked"
     );
 }
+
+/// `Prompt()` returns at once and the outcome arrives by `Completed`. It used
+/// to wait for the person inside the call, and a GDBus client gives up on a
+/// call after 25 seconds by default — an unlock that took longer failed on
+/// the client's side even though it succeeded.
+#[tokio::test]
+async fn a_prompt_returns_before_the_person_answers() {
+    use futures_util::StreamExt as _;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let (tx, mut requests) = tokio::sync::mpsc::channel(1);
+    daemon.state.lock().await.prompts = Some(tx);
+    let () = client.manager().await.call("Lock", &()).await.unwrap();
+
+    let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = client
+        .service()
+        .await
+        .call("Unlock", &(Vec::<OwnedObjectPath>::new(),))
+        .await
+        .unwrap();
+    let prompt = client
+        .proxy(prompt.as_str(), "org.freedesktop.Secret.Prompt")
+        .await;
+    let mut completed = prompt.receive_signal("Completed").await.unwrap();
+
+    // The person takes their time.
+    let answer = tokio::spawn(async move {
+        let request = requests
+            .recv()
+            .await
+            .expect("the prompt reached the frontend");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let _ = request.reply.send(true);
+    });
+
+    let started = std::time::Instant::now();
+    let () = prompt.call("Prompt", &("",)).await.unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "Prompt() waited for the answer ({:?})",
+        started.elapsed()
+    );
+
+    let signal = tokio::time::timeout(std::time::Duration::from_secs(10), completed.next())
+        .await
+        .expect("Completed never arrived")
+        .unwrap();
+    let (dismissed, _result): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+    assert!(!dismissed);
+    answer.await.unwrap();
+}

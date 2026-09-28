@@ -72,6 +72,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   `NoSuchObject`). Only one method did before; the rest answered a generic
   `Failed` for a locked vault and `UnknownObject` for a missing session,
   which libsecret cannot tell apart from a hard failure.
+- An unlock that takes longer than 25 seconds no longer fails in the
+  application that asked. The Secret Service `Prompt()` call used to wait
+  for the passphrase before returning, and GDBus clients give up on a call
+  after 25 seconds; it now returns at once and reports through `Completed`,
+  as the specification describes.
 
 ## [1.2.0] - 2026-09-22
 

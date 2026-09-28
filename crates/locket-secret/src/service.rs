@@ -1255,7 +1255,13 @@ pub struct PromptIface {
 
 #[interface(name = "org.freedesktop.Secret.Prompt")]
 impl PromptIface {
-    /// Ask the user to unlock, then report the outcome via `Completed`.
+    /// Ask the user to unlock, and report the outcome through `Completed`.
+    ///
+    /// Returns at once, as the specification has it: the answer comes by the
+    /// signal, not the reply. Waiting here put a person's whole unlock inside
+    /// one method call, and GDBus clients — libsecret among them — give up on
+    /// a call after 25 seconds by default, so an unlock that took longer
+    /// than that failed on the client's side even though it succeeded.
     ///
     /// `window_id` is the caller's toplevel, so the dialog can be parented to
     /// the window that triggered it rather than appearing unattached.
@@ -1266,29 +1272,37 @@ impl PromptIface {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> Result<(), SecretError> {
         let sender = self.state.lock().await.prompts.clone();
+        let objects = self.objects.clone();
+        let path = self.path.clone();
+        let server = server.clone();
+        let emitter = emitter.to_owned();
 
-        let granted = match sender {
-            Some(tx) => {
-                let (reply, wait) = oneshot::channel();
-                if tx.send(PromptRequest { reply }).await.is_err() {
-                    false
-                } else {
-                    wait.await.unwrap_or(false)
+        tokio::spawn(async move {
+            let granted = match sender {
+                Some(tx) => {
+                    let (reply, wait) = oneshot::channel();
+                    if tx.send(PromptRequest { reply }).await.is_err() {
+                        false
+                    } else {
+                        wait.await.unwrap_or(false)
+                    }
                 }
+                // No UI attached: refuse rather than silently failing open.
+                None => false,
+            };
+            let result = if granted { objects } else { Vec::new() };
+            match OwnedValue::try_from(Value::from(result)) {
+                Ok(result) => {
+                    if let Err(e) = PromptIface::completed(&emitter, !granted, result).await {
+                        tracing::warn!("could not report a prompt's outcome: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("could not encode a prompt's outcome: {e}"),
             }
-            // No UI attached: refuse rather than silently failing open.
-            None => false,
-        };
-
-        let result = if granted {
-            OwnedValue::try_from(Value::from(self.objects.clone())).map_err(zbus::Error::from)?
-        } else {
-            OwnedValue::try_from(Value::from(Vec::<OwnedObjectPath>::new()))
-                .map_err(zbus::Error::from)?
-        };
-
-        PromptIface::completed(&emitter, !granted, result).await?;
-        let _ = server.remove::<PromptIface, _>(&self.path).await;
+            if let Err(e) = unpublish::<PromptIface>(&server, &path).await {
+                tracing::warn!("could not take down a finished prompt: {e}");
+            }
+        });
         Ok(())
     }
 
@@ -1300,7 +1314,7 @@ impl PromptIface {
         let empty = OwnedValue::try_from(Value::from(Vec::<OwnedObjectPath>::new()))
             .map_err(zbus::Error::from)?;
         PromptIface::completed(&emitter, true, empty).await?;
-        let _ = server.remove::<PromptIface, _>(&self.path).await;
+        unpublish::<PromptIface>(server, &self.path).await?;
         Ok(())
     }
 
