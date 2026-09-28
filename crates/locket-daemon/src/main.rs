@@ -243,6 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.lock().await.prompts = Some(prompt_tx);
 
     let connection = zbus::connection::Builder::session()?.build().await?;
+    state.lock().await.notifications = Some(connection.clone());
     register_objects(connection.object_server(), &state).await?;
     spawn_upkeep(connection.object_server(), &state);
 
@@ -312,13 +313,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ = terminate() => tracing::info!("terminated"),
     }
 
-    let mut guard = state.lock().await;
-    if let Some(v) = guard.vault.as_mut()
-        && let Err(e) = v.save()
-    {
-        tracing::error!("failed to save vault on shutdown: {e}");
-    }
-    guard.close_vault();
+    state.lock().await.lock_vault();
     tracing::info!("vault locked, exiting");
     Ok(())
 }

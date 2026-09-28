@@ -105,6 +105,9 @@ pub struct ServiceState {
     pub sessions: SessionStore,
     pub config: ServiceConfig,
     pub prompts: Option<tokio::sync::mpsc::Sender<PromptRequest>>,
+    /// Where to tell the person about a write that did not land. `None`
+    /// sends nothing — tests, and a daemon with no session bus to reach.
+    pub notifications: Option<zbus::Connection>,
     prompt_counter: AtomicU64,
     observers: Vec<Arc<dyn VaultObserver>>,
     /// What is published on the bus. Kept outside this state's own lock so
@@ -133,6 +136,7 @@ impl ServiceState {
             sessions: SessionStore::new(),
             config,
             prompts: None,
+            notifications: None,
             prompt_counter: AtomicU64::new(0),
             observers: Vec::new(),
             tree: Arc::default(),
@@ -251,32 +255,72 @@ impl ServiceState {
         self.vault.as_mut().ok_or(Error::Locked)
     }
 
-    /// Persist, unless autosave is off. Errors are logged rather than
-    /// propagated: a client that just stored a secret should be told the store
-    /// succeeded in memory, and a failing disk is a daemon-level problem.
-    fn persist(&mut self) {
+    /// Persist a change, unless autosave is off.
+    ///
+    /// A change that did not reach the disk is an error for the caller to
+    /// return: a client told "stored" would stop holding the secret it gave
+    /// us. The change is dropped, not kept in memory — a copy that differs
+    /// from the file every other reader sees, which each later save would
+    /// refuse over again, until one of them is reloaded away. The person is
+    /// told as well, since the client that sees the error may say nothing.
+    fn persist(&mut self) -> Result<()> {
         if !self.config.autosave {
-            return;
+            return Ok(());
         }
-        let Some(v) = self.vault.as_mut() else {
+        let Some(vault) = self.vault.as_mut() else {
+            return Ok(());
+        };
+        if !vault.is_dirty() {
+            return Ok(());
+        }
+        let Err(e) = vault.save() else {
+            return Ok(());
+        };
+        tracing::error!("a change was not saved, and has been dropped: {e}");
+        match vault.reload() {
+            Ok(()) => self.notify_opened(),
+            Err(reload) => {
+                // The file no longer opens with the key we hold — a passphrase
+                // changed elsewhere. Nothing trustworthy is left to serve.
+                tracing::error!("could not reload the vault either ({reload}); locking it");
+                self.close_vault();
+            }
+        }
+        self.report_unsaved(&e);
+        Err(Error::Vault(e))
+    }
+
+    /// Tell the desktop a change did not land.
+    fn report_unsaved(&self, error: &locket_core::Error) {
+        let Some(connection) = self.notifications.clone() else {
             return;
         };
-        match v.save() {
-            Ok(()) => {}
-            Err(locket_core::Error::ChangedOnDisk { .. }) => {
-                // Another writer got in between our reload and this save. We
-                // do not overwrite them; the change we were persisting is lost
-                // and saying so is the only honest option.
-                tracing::error!(
-                    "the vault was written by another process mid-update; \
-                     this change was not saved"
-                );
-                if let Err(e) = v.reload() {
-                    tracing::error!("and reloading it failed: {e}");
-                }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let body = match error {
+            locket_core::Error::ChangedOnDisk { .. } => {
+                "Another program wrote the vault at the same moment, so an application's \
+                 change was not saved. Nothing already saved was lost."
+                    .to_owned()
             }
-            Err(e) => tracing::error!("failed to persist vault: {e}"),
+            other => format!("An application's change could not be saved: {other}"),
+        };
+        runtime.spawn(async move {
+            crate::notify::send(&connection, "Vault change not saved", &body).await;
+        });
+    }
+
+    /// Lock: persist what is pending, then drop the DEK.
+    ///
+    /// Every lock goes through here — a client's `Lock`, the idle timer, the
+    /// session locking, suspend, shutdown — so none of them can drop a change
+    /// another would have saved.
+    pub fn lock_vault(&mut self) {
+        if let Err(e) = self.persist() {
+            tracing::error!("locking without the last change: {e}");
         }
+        self.close_vault();
     }
 
     /// Ask the frontend to unlock, and report whether it did.
@@ -539,7 +583,7 @@ impl SecretService {
             }
             let id = collection.id;
             vault.add_collection(collection);
-            state.persist();
+            state.persist().map_err(fdo::Error::from)?;
             collection_path(id)
         };
 
@@ -615,8 +659,7 @@ impl SecretService {
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
         {
             let mut state = self.state.lock().await;
-            state.persist();
-            state.close_vault();
+            state.lock_vault();
         }
         sync_objects(server, &self.state).await?;
         Ok((objects, null_path()))
@@ -627,8 +670,7 @@ impl SecretService {
     async fn lock_service(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<()> {
         {
             let mut state = self.state.lock().await;
-            state.persist();
-            state.close_vault();
+            state.lock_vault();
             state.sessions = SessionStore::new();
         }
         sync_objects(server, &self.state).await?;
@@ -712,7 +754,7 @@ impl SecretService {
                     c.alias = Some(name.clone());
                 }
             }
-            state.persist();
+            state.persist().map_err(fdo::Error::from)?;
         }
         // `/aliases/<name>` has to follow: libsecret addresses it directly.
         sync_objects(server, &self.state).await?;
@@ -785,7 +827,7 @@ impl CollectionIface {
                 data.trash_item(*id);
             }
             data.collections.remove(pos);
-            state.persist();
+            state.persist().map_err(fdo::Error::from)?;
         }
 
         // Its items, its own path and any alias it held all come off.
@@ -897,7 +939,7 @@ impl CollectionIface {
                 }
             };
             collection.modified = now();
-            state.persist();
+            state.persist().map_err(fdo::Error::from)?;
             (item_path(self.id, id), existing.is_some())
         };
 
@@ -945,7 +987,9 @@ impl CollectionIface {
             c.label = value;
             c.modified = now();
         }
-        state.persist();
+        state
+            .persist()
+            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
         Ok(())
     }
 
@@ -1010,7 +1054,7 @@ impl ItemIface {
             // gone: the trash lives outside the collections that SearchItems
             // and the properties walk, so only locket's own trash UI sees it.
             vault.trash_item(self.id);
-            state.persist();
+            state.persist().map_err(fdo::Error::from)?;
         }
         sync_objects(server, &self.state).await?;
         Ok(null_path())
@@ -1072,7 +1116,7 @@ impl ItemIface {
         item.set_secret_bytes(&plaintext);
         item.content_type = secret.content_type;
         item.touch();
-        state.persist();
+        state.persist().map_err(fdo::Error::from)?;
         Ok(())
     }
 
@@ -1103,7 +1147,9 @@ impl ItemIface {
             i.attributes = value.into_iter().collect();
             i.touch();
         }
-        state.persist();
+        state
+            .persist()
+            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
         Ok(())
     }
 
@@ -1128,7 +1174,9 @@ impl ItemIface {
             i.label = value;
             i.touch();
         }
-        state.persist();
+        state
+            .persist()
+            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
         Ok(())
     }
 
@@ -1158,7 +1206,9 @@ impl ItemIface {
             i.attributes.insert("xdg:schema".into(), value);
             i.touch();
         }
-        state.persist();
+        state
+            .persist()
+            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
         Ok(())
     }
 

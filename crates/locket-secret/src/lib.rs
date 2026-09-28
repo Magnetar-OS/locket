@@ -13,6 +13,7 @@ pub mod error;
 pub mod frontend;
 pub mod import;
 pub mod manager;
+pub mod notify;
 pub mod portal;
 pub mod quick;
 pub mod service;

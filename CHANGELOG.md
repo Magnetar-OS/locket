@@ -61,6 +61,12 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   collection until the daemon restarts. Creating a collection for an alias
   that already exists returns that collection, as the specification says,
   instead of a second one sharing the alias.
+- An application storing a secret is told when the store did not reach
+  the disk — because another program wrote the vault at the same moment,
+  or the disk failed — instead of being told it succeeded while the change
+  was quietly dropped. A desktop notification says so too. Every way of
+  locking the vault (idle, screen lock, suspend, shutdown, a client's
+  `Lock`) now saves anything pending first.
 
 ## [1.2.0] - 2026-09-22
 

@@ -9,27 +9,6 @@ use std::sync::Arc;
 use futures_util::StreamExt as _;
 use locket_secret::service::SharedState;
 
-/// `org.freedesktop.Notifications`, the one call we make.
-#[zbus::proxy(
-    interface = "org.freedesktop.Notifications",
-    default_service = "org.freedesktop.Notifications",
-    default_path = "/org/freedesktop/Notifications"
-)]
-trait Notifications {
-    #[allow(clippy::too_many_arguments)]
-    fn notify(
-        &self,
-        app_name: &str,
-        replaces_id: u32,
-        app_icon: &str,
-        summary: &str,
-        body: &str,
-        actions: Vec<&str>,
-        hints: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
-        expire_timeout: i32,
-    ) -> zbus::Result<u32>;
-}
-
 /// Tell the desktop the vault just locked, and why.
 ///
 /// The vault locking is the one daemon event that changes what every other
@@ -41,25 +20,9 @@ trait Notifications {
 /// The body carries the reason and nothing else — no labels, no counts,
 /// nothing read out of the vault.
 async fn notify_locked(why: &str) {
-    let result = async {
-        let connection = zbus::Connection::session().await?;
-        let proxy = NotificationsProxy::new(&connection).await?;
-        proxy
-            .notify(
-                "locket",
-                0,
-                "com.magnetaros.Locket",
-                "Vault locked",
-                why,
-                Vec::new(),
-                Default::default(),
-                5_000,
-            )
-            .await
-    }
-    .await;
-    if let Err(e) = result {
-        tracing::debug!("could not send the lock notification: {e}");
+    match zbus::Connection::session().await {
+        Ok(connection) => locket_secret::notify::send(&connection, "Vault locked", why).await,
+        Err(e) => tracing::debug!("could not send the lock notification: {e}"),
     }
 }
 
@@ -109,7 +72,7 @@ pub async fn auto_lock(
 
         if idle >= seconds {
             tracing::info!(idle, "locking the vault after idling");
-            state.lock().await.close_vault();
+            state.lock().await.lock_vault();
             if notify {
                 notify_locked("Locked after being idle. Unlock in locket when you need it.").await;
             }
@@ -237,7 +200,7 @@ async fn lock(state: &SharedState, why: &str, notify: bool) {
             return;
         }
         tracing::info!("locking the vault: {why}");
-        guard.close_vault();
+        guard.lock_vault();
     }
     // After suspend the notification lands on resume, which is exactly when
     // someone would wonder why their applications re-ask for things.

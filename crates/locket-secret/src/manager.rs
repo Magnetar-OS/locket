@@ -108,13 +108,7 @@ impl Manager {
     /// Drop the data-encryption key, and the item objects with it.
     async fn lock(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<()> {
         {
-            let mut state = self.state.lock().await;
-            if let Some(v) = state.vault.as_mut()
-                && let Err(e) = v.save()
-            {
-                tracing::error!("failed to save on lock: {e}");
-            }
-            state.close_vault();
+            self.state.lock().await.lock_vault();
         }
         sync_objects(server, &self.state)
             .await

@@ -223,3 +223,68 @@ async fn aliases_follow_their_collection() {
 fn support_passphrase() -> &'static str {
     locket_secret::testing::PASSPHRASE
 }
+
+/// A store that did not reach the disk must not be reported as stored: the
+/// client would stop holding a secret the vault does not have. It used to
+/// return success after logging the conflict, and publish an object for an
+/// item that no longer existed.
+#[tokio::test]
+async fn a_store_that_did_not_reach_the_disk_is_an_error() {
+    use std::collections::HashMap;
+    use zbus::zvariant::{OwnedObjectPath, Value};
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let session = client.open_session().await;
+
+    // A change still pending in memory — what an earlier failed save used to
+    // leave behind — so the write below is built on a stale copy...
+    daemon.state.lock().await.vault.as_mut().unwrap().data_mut();
+    // ...while another writer gets to the file first.
+    let mut gui = locket_core::Vault::open(daemon.vault_path(), support_passphrase()).unwrap();
+    gui.add_item_default(locket_core::model::Item::new(
+        locket_core::model::ItemKind::Note,
+        "written by the GUI",
+    ));
+    gui.save().unwrap();
+
+    let mut attributes = HashMap::new();
+    attributes.insert("app", "example");
+    let mut properties = HashMap::new();
+    properties.insert(
+        "org.freedesktop.Secret.Item.Label",
+        Value::from("from an app"),
+    );
+    properties.insert(
+        "org.freedesktop.Secret.Item.Attributes",
+        Value::from(attributes),
+    );
+    let secret = (session, Vec::<u8>::new(), b"s3cret".to_vec(), "text/plain");
+    let stored: zbus::Result<(OwnedObjectPath, OwnedObjectPath)> = client
+        .proxy(
+            "/org/freedesktop/secrets/aliases/default",
+            "org.freedesktop.Secret.Collection",
+        )
+        .await
+        .call("CreateItem", &(properties, secret, false))
+        .await;
+    assert!(
+        stored.is_err(),
+        "a store that was never saved reported success"
+    );
+
+    let state = daemon.state.lock().await;
+    let labels: Vec<String> = state
+        .vault
+        .as_ref()
+        .unwrap()
+        .data()
+        .all_items()
+        .map(|(_, i)| i.label.clone())
+        .collect();
+    assert!(!labels.contains(&"from an app".to_owned()));
+    assert!(
+        labels.contains(&"written by the GUI".to_owned()),
+        "the other writer's change was not picked up"
+    );
+}
