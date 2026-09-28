@@ -16,7 +16,7 @@ mod idle;
 
 use clap::Parser;
 use locket_core::{Vault, crypto::KdfParams};
-use locket_secret::service::{ServiceConfig, ServiceState, register_objects};
+use locket_secret::service::{ServiceConfig, ServiceState, register_objects, spawn_upkeep};
 use tokio::sync::Mutex;
 use zbus::fdo::RequestNameFlags;
 
@@ -244,6 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let connection = zbus::connection::Builder::session()?.build().await?;
     register_objects(connection.object_server(), &state).await?;
+    spawn_upkeep(connection.object_server(), &state);
 
     connection
         .object_server()

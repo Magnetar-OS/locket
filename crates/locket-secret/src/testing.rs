@@ -21,7 +21,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
 use crate::manager::{MANAGER_PATH, Manager};
-use crate::service::{ServiceConfig, ServiceState, SharedState, register_objects};
+use crate::service::{ServiceConfig, ServiceState, SharedState, register_objects, spawn_upkeep};
 use locket_core::Vault;
 use locket_core::crypto::KdfParams;
 use tokio::sync::Mutex;
@@ -139,6 +139,7 @@ impl Daemon {
         register_objects(server.object_server(), &state)
             .await
             .expect("publish the service objects");
+        spawn_upkeep(server.object_server(), &state);
         server
             .object_server()
             .at(

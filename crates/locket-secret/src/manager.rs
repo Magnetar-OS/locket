@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use zbus::object_server::SignalEmitter;
 use zbus::{ObjectServer, fdo, interface};
 
-use crate::service::{ServiceState, SharedState, register_vault_objects};
+use crate::service::{ServiceState, SharedState, sync_objects};
 
 /// How long a Secret Service `Prompt` waits for the user before giving up.
 pub const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -97,7 +97,7 @@ impl Manager {
                 .collect();
             state.open_vault(vault);
         }
-        register_vault_objects(server, &self.state)
+        sync_objects(server, &self.state)
             .await
             .map_err(fdo::Error::from)?;
 
@@ -105,15 +105,20 @@ impl Manager {
         Ok(true)
     }
 
-    /// Drop the data-encryption key. Objects stay published but report locked.
-    async fn lock(&self) -> fdo::Result<()> {
-        let mut state = self.state.lock().await;
-        if let Some(v) = state.vault.as_mut()
-            && let Err(e) = v.save()
+    /// Drop the data-encryption key, and the item objects with it.
+    async fn lock(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<()> {
         {
-            tracing::error!("failed to save on lock: {e}");
+            let mut state = self.state.lock().await;
+            if let Some(v) = state.vault.as_mut()
+                && let Err(e) = v.save()
+            {
+                tracing::error!("failed to save on lock: {e}");
+            }
+            state.close_vault();
         }
-        state.close_vault();
+        sync_objects(server, &self.state)
+            .await
+            .map_err(fdo::Error::from)?;
         tracing::info!("vault locked");
         Ok(())
     }
@@ -144,28 +149,36 @@ impl Manager {
     /// reload failed, which happens when the other writer changed the key
     /// material: the DEK we hold no longer opens that file, and the honest
     /// answer is to lock and ask for the new passphrase.
-    async fn reload(&self) -> fdo::Result<bool> {
-        let mut state = self.state.lock().await;
-        let Some(vault) = state.vault.as_mut() else {
-            return Ok(false);
+    async fn reload(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<bool> {
+        let reloaded = {
+            let mut state = self.state.lock().await;
+            let Some(vault) = state.vault.as_mut() else {
+                return Ok(false);
+            };
+            if !vault.changed_on_disk() {
+                return Ok(true);
+            }
+            match vault.reload() {
+                Ok(()) => {
+                    tracing::info!("reloaded the vault after an external write");
+                    // Everything watching the vault — the SSH agent above all —
+                    // has to see the new contents, not the ones it cached.
+                    state.notify_opened();
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("could not reload the vault: {e}; locking instead");
+                    state.close_vault();
+                    false
+                }
+            }
         };
-        if !vault.changed_on_disk() {
-            return Ok(true);
-        }
-        match vault.reload() {
-            Ok(()) => {
-                tracing::info!("reloaded the vault after an external write");
-                // Everything watching the vault — the SSH agent above all —
-                // has to see the new contents, not the ones it cached.
-                state.notify_opened();
-                Ok(true)
-            }
-            Err(e) => {
-                tracing::warn!("could not reload the vault: {e}; locking instead");
-                state.close_vault();
-                Ok(false)
-            }
-        }
+        // Items the other writer added are reachable at their paths before
+        // this returns, and removed ones are gone.
+        sync_objects(server, &self.state)
+            .await
+            .map_err(fdo::Error::from)?;
+        Ok(reloaded)
     }
 
     #[zbus(property)]

@@ -494,12 +494,9 @@ mod tests {
             vault.save().unwrap();
             locket_secret::service::item_path(collection, id).to_string()
         };
-        locket_secret::service::register_vault_objects(
-            daemon.server.object_server(),
-            &daemon.state,
-        )
-        .await
-        .unwrap();
+        locket_secret::service::sync_objects(daemon.server.object_server(), &daemon.state)
+            .await
+            .unwrap();
         (daemon, id)
     }
 

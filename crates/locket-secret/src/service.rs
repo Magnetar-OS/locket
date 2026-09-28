@@ -11,7 +11,7 @@
 //! /org/freedesktop/secrets/prompt/p<n>              Prompt
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -107,6 +107,10 @@ pub struct ServiceState {
     pub prompts: Option<tokio::sync::mpsc::Sender<PromptRequest>>,
     prompt_counter: AtomicU64,
     observers: Vec<Arc<dyn VaultObserver>>,
+    /// What is published on the bus. Kept outside this state's own lock so
+    /// the tree can be brought in step without holding it; see
+    /// [`sync_objects`].
+    tree: Arc<ObjectTree>,
     /// Lock the vault after this many idle seconds; 0 disables it.
     ///
     /// Lives here rather than in the idle task's arguments because the
@@ -131,6 +135,7 @@ impl ServiceState {
             prompts: None,
             prompt_counter: AtomicU64::new(0),
             observers: Vec::new(),
+            tree: Arc::default(),
             auto_lock_seconds: AtomicU64::new(0),
             last_activity: AtomicU64::new(now()),
         }
@@ -171,11 +176,15 @@ impl ServiceState {
     }
 
     /// Drop the vault — and with it the DEK — and tell everyone watching.
+    ///
+    /// The item objects come off the bus with it, by way of the object tree's
+    /// upkeep task: a locked vault does not advertise how many items it holds.
     pub fn close_vault(&mut self) {
         self.vault = None;
         for observer in &self.observers {
             observer.vault_closed();
         }
+        self.tree.changed.notify_one();
     }
 
     /// Re-announce the current vault, after its contents changed underneath.
@@ -185,6 +194,7 @@ impl ServiceState {
                 observer.vault_opened(vault);
             }
         }
+        self.tree.changed.notify_one();
     }
 
     pub fn is_locked(&self) -> bool {
@@ -226,7 +236,12 @@ impl ServiceState {
         let vault = self.vault.as_mut().ok_or(Error::Locked)?;
         if self.config.autosave && !vault.is_dirty() && vault.changed_on_disk() {
             match vault.reload() {
-                Ok(()) => tracing::info!("vault changed on disk; reloaded before writing"),
+                Ok(()) => {
+                    tracing::info!("vault changed on disk; reloaded before writing");
+                    // The SSH agent and the object tree follow the new
+                    // contents, not the ones they were built from.
+                    self.notify_opened();
+                }
                 // Most likely the key material changed — a passphrase change
                 // from another process. Carry on with what we have; the save
                 // will refuse and say so rather than clobbering it.
@@ -502,9 +517,21 @@ impl SecretService {
         let label = take_string(&properties, prop::COLLECTION_LABEL)
             .unwrap_or_else(|| "Unnamed".to_owned());
 
-        let (path, id) = {
+        let path = {
             let mut state = self.state.lock().await;
             let vault = state.vault_mut().map_err(fdo::Error::from)?;
+
+            // The spec: a collection created for a well-known alias that
+            // already has one is that collection, not a second one sharing it.
+            if !alias.is_empty()
+                && let Some(existing) = vault
+                    .data()
+                    .collections
+                    .iter()
+                    .find(|c| c.alias.as_deref() == Some(alias.as_str()))
+            {
+                return Ok((collection_path(existing.id), null_path()));
+            }
 
             let mut collection = locket_core::Collection::new(label);
             if !alias.is_empty() {
@@ -513,18 +540,10 @@ impl SecretService {
             let id = collection.id;
             vault.add_collection(collection);
             state.persist();
-            (collection_path(id), id)
+            collection_path(id)
         };
 
-        server
-            .at(
-                path.clone(),
-                CollectionIface {
-                    state: self.state.clone(),
-                    id,
-                },
-            )
-            .await?;
+        sync_objects(server, &self.state).await?;
         SecretService::collection_created(&emitter, path.as_ref()).await?;
 
         Ok((path, null_path()))
@@ -592,20 +611,27 @@ impl SecretService {
     async fn lock(
         &self,
         objects: Vec<OwnedObjectPath>,
+        #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
-        let mut state = self.state.lock().await;
-        state.persist();
-        state.close_vault();
+        {
+            let mut state = self.state.lock().await;
+            state.persist();
+            state.close_vault();
+        }
+        sync_objects(server, &self.state).await?;
         Ok((objects, null_path()))
     }
 
     /// Drop the DEK and every session. The vault must be reopened from the
     /// passphrase after this.
-    async fn lock_service(&self) -> fdo::Result<()> {
-        let mut state = self.state.lock().await;
-        state.persist();
-        state.close_vault();
-        state.sessions = SessionStore::new();
+    async fn lock_service(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<()> {
+        {
+            let mut state = self.state.lock().await;
+            state.persist();
+            state.close_vault();
+            state.sessions = SessionStore::new();
+        }
+        sync_objects(server, &self.state).await?;
         Ok(())
     }
 
@@ -667,20 +693,29 @@ impl SecretService {
             .unwrap_or_else(null_path))
     }
 
-    async fn set_alias(&self, name: String, collection: OwnedObjectPath) -> fdo::Result<()> {
-        let mut state = self.state.lock().await;
-        let vault = state.vault_mut().map_err(fdo::Error::from)?;
-        let target = parse_collection_path(collection.as_str());
+    async fn set_alias(
+        &self,
+        name: String,
+        collection: OwnedObjectPath,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> fdo::Result<()> {
+        {
+            let mut state = self.state.lock().await;
+            let vault = state.vault_mut().map_err(fdo::Error::from)?;
+            let target = parse_collection_path(collection.as_str());
 
-        for c in &mut vault.data_mut().collections {
-            if c.alias.as_deref() == Some(name.as_str()) {
-                c.alias = None;
+            for c in &mut vault.data_mut().collections {
+                if c.alias.as_deref() == Some(name.as_str()) {
+                    c.alias = None;
+                }
+                if Some(c.id) == target {
+                    c.alias = Some(name.clone());
+                }
             }
-            if Some(c.id) == target {
-                c.alias = Some(name.clone());
-            }
+            state.persist();
         }
-        state.persist();
+        // `/aliases/<name>` has to follow: libsecret addresses it directly.
+        sync_objects(server, &self.state).await?;
         Ok(())
     }
 
@@ -729,7 +764,7 @@ impl CollectionIface {
         &self,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<OwnedObjectPath> {
-        let item_paths = {
+        {
             let mut state = self.state.lock().await;
             let vault = state.vault_mut().map_err(fdo::Error::from)?;
             let data = vault.data_mut();
@@ -751,18 +786,10 @@ impl CollectionIface {
             }
             data.collections.remove(pos);
             state.persist();
-            item_ids
-                .iter()
-                .map(|i| item_path(self.id, *i))
-                .collect::<Vec<_>>()
-        };
-
-        for p in item_paths {
-            let _ = server.remove::<ItemIface, _>(&p).await;
         }
-        let _ = server
-            .remove::<CollectionIface, _>(&collection_path(self.id))
-            .await;
+
+        // Its items, its own path and any alias it held all come off.
+        sync_objects(server, &self.state).await?;
         Ok(null_path())
     }
 
@@ -875,18 +902,7 @@ impl CollectionIface {
         };
 
         if !replaced {
-            server
-                .at(
-                    path.clone(),
-                    ItemIface {
-                        state: self.state.clone(),
-                        collection: self.id,
-                        id: parse_item_path(path.as_str())
-                            .map(|(_, i)| i)
-                            .unwrap_or_default(),
-                    },
-                )
-                .await?;
+            sync_objects(server, &self.state).await?;
             CollectionIface::item_created(&emitter, path.as_ref()).await?;
         } else {
             CollectionIface::item_changed(&emitter, path.as_ref()).await?;
@@ -996,8 +1012,7 @@ impl ItemIface {
             vault.trash_item(self.id);
             state.persist();
         }
-        let path = item_path(self.collection, self.id);
-        let _ = server.remove::<ItemIface, _>(&path).await;
+        sync_objects(server, &self.state).await?;
         Ok(null_path())
     }
 
@@ -1262,79 +1277,166 @@ impl PromptIface {
 // Registration
 // ---------------------------------------------------------------------------
 
-/// Publish the service object plus one object per collection and item.
-///
-/// Called on unlock; the object tree is torn down again on lock so that a
-/// locked vault does not advertise how many items it holds.
+/// Publish the service object, and the collection and item objects the vault
+/// currently calls for.
 pub async fn register_objects(server: &ObjectServer, state: &SharedState) -> Result<()> {
     server
         .at(crate::SERVICE_PATH, SecretService::new(state.clone()))
         .await?;
-    register_vault_objects(server, state).await
+    sync_objects(server, state).await
 }
 
-pub async fn register_vault_objects(server: &ObjectServer, state: &SharedState) -> Result<()> {
-    // Collections are published whether or not the vault is open, from the
-    // plaintext index. A client must be able to find the collection in order
-    // to ask for it to be unlocked at all.
-    let (index, items): (Vec<CollectionIndex>, Vec<(Uuid, Vec<Uuid>)>) = {
-        let guard = state.lock().await;
-        let index = guard.collection_index();
-        let items = guard
-            .vault()
+/// Keep the object tree in step with the vault for as long as the daemon runs.
+///
+/// Every D-Bus method that changes what exists brings the tree in step itself
+/// before it returns, so its caller sees the result. This task covers the
+/// changes that arrive any other way — the idle timer and the session locking
+/// the vault, a reload picked up on the way into a write — which
+/// [`ServiceState`] announces through [`ObjectTree::changed`].
+pub fn spawn_upkeep(server: &ObjectServer, state: &SharedState) {
+    let server = server.clone();
+    let state = state.clone();
+    tokio::spawn(async move {
+        let tree = state.lock().await.tree.clone();
+        loop {
+            tree.changed.notified().await;
+            if let Err(e) = sync_objects(&server, &state).await {
+                tracing::error!("could not bring the published objects in step: {e}");
+            }
+        }
+    });
+}
+
+/// What is published on the bus, and the signal that it may be stale.
+#[derive(Default)]
+pub struct ObjectTree {
+    published: Mutex<Published>,
+    changed: tokio::sync::Notify,
+}
+
+/// One snapshot of the objects that exist.
+#[derive(Default)]
+struct Published {
+    collections: HashSet<Uuid>,
+    /// Alias name to the collection it is currently published for.
+    aliases: HashMap<String, Uuid>,
+    /// `(collection, item)`.
+    items: HashSet<(Uuid, Uuid)>,
+}
+
+impl Published {
+    /// What the vault calls for now.
+    ///
+    /// Collections come from the plaintext index while locked, because a
+    /// client must be able to find a collection to ask for it to be unlocked
+    /// at all. Items exist only while the vault is open.
+    fn wanted(state: &ServiceState) -> Self {
+        let index = state.collection_index();
+        let aliases = index
+            .iter()
+            .filter_map(|c| {
+                let alias = c.alias.as_deref()?;
+                alias_path(alias).map(|_| (alias.to_owned(), c.id))
+            })
+            .collect();
+        let items = state
+            .vault
+            .as_ref()
             .map(|v| {
                 v.data()
                     .collections
                     .iter()
-                    .map(|c| (c.id, c.items.iter().map(|i| i.id).collect()))
+                    .flat_map(|c| c.items.iter().map(move |i| (c.id, i.id)))
                     .collect()
             })
             .unwrap_or_default();
-        (index, items)
-    };
+        Self {
+            collections: index.iter().map(|c| c.id).collect(),
+            aliases,
+            items,
+        }
+    }
+}
 
-    for collection in index {
+/// Bring the published objects in step with the vault: publish what is new,
+/// take down what has gone, and move each `/aliases/<name>` to the collection
+/// that holds the alias now.
+///
+/// The only place objects are published or removed, so the tree cannot drift
+/// from the vault by one path forgetting to. Serialised on the tree's own
+/// lock, and never holds the state lock while it talks to the object server.
+pub async fn sync_objects(server: &ObjectServer, state: &SharedState) -> Result<()> {
+    let tree = state.lock().await.tree.clone();
+    let mut published = tree.published.lock().await;
+    let wanted = Published::wanted(&*state.lock().await);
+
+    for &(collection, item) in published.items.difference(&wanted.items) {
+        unpublish::<ItemIface>(server, &item_path(collection, item)).await?;
+    }
+    for (alias, id) in &published.aliases {
+        if wanted.aliases.get(alias) != Some(id)
+            && let Some(path) = alias_path(alias)
+        {
+            unpublish::<CollectionIface>(server, &path).await?;
+        }
+    }
+    for &id in published.collections.difference(&wanted.collections) {
+        unpublish::<CollectionIface>(server, &collection_path(id)).await?;
+    }
+
+    for &id in wanted.collections.difference(&published.collections) {
         server
             .at(
-                collection_path(collection.id),
+                collection_path(id),
                 CollectionIface {
                     state: state.clone(),
-                    id: collection.id,
+                    id,
                 },
             )
             .await?;
-
-        // Also publish under /aliases/<alias>, which is where libsecret looks.
-        if let Some(path) = collection.alias.as_deref().and_then(alias_path) {
+    }
+    for (alias, &id) in &wanted.aliases {
+        if published.aliases.get(alias) != Some(&id)
+            && let Some(path) = alias_path(alias)
+        {
             server
                 .at(
                     path,
                     CollectionIface {
                         state: state.clone(),
-                        id: collection.id,
+                        id,
                     },
                 )
                 .await?;
         }
+    }
+    for &(collection, id) in wanted.items.difference(&published.items) {
+        server
+            .at(
+                item_path(collection, id),
+                ItemIface {
+                    state: state.clone(),
+                    collection,
+                    id,
+                },
+            )
+            .await?;
     }
 
-    // Items only exist once the vault is open; while locked there is nothing
-    // to enumerate, which is what `Locked` on the collection communicates.
-    for (collection_id, item_ids) in items {
-        for item_id in item_ids {
-            server
-                .at(
-                    item_path(collection_id, item_id),
-                    ItemIface {
-                        state: state.clone(),
-                        collection: collection_id,
-                        id: item_id,
-                    },
-                )
-                .await?;
-        }
-    }
+    *published = wanted;
     Ok(())
+}
+
+/// Take one interface off a path. Already gone is fine: that is the state
+/// being asked for.
+async fn unpublish<I: zbus::object_server::Interface>(
+    server: &ObjectServer,
+    path: &OwnedObjectPath,
+) -> Result<()> {
+    match server.remove::<I, _>(path).await {
+        Ok(_) | Err(zbus::Error::InterfaceNotFound) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]

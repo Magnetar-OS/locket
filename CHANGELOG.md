@@ -49,6 +49,18 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - The portal master key is no longer shown in locket's item list, and the
   Secret Service refuses to delete it, rewrite it, strip its tag, or delete
   the collection holding it.
+- A login added in locket while the daemon is unlocked is visible to the
+  browser extension and the panel's quick search straight away, not only
+  after the next unlock: the daemon now publishes items as they appear,
+  whoever wrote them. Locking — by any route, including idle and the
+  screen lock — takes the item objects off the bus, so a locked vault no
+  longer advertises how many items it holds.
+- `/org/freedesktop/secrets/aliases/<name>` now follows its alias:
+  `SetAlias` and creating or deleting a collection move or remove it, so
+  `secret-tool store` no longer keeps writing to the old default
+  collection until the daemon restarts. Creating a collection for an alias
+  that already exists returns that collection, as the specification says,
+  instead of a second one sharing the alias.
 
 ## [1.2.0] - 2026-09-22
 

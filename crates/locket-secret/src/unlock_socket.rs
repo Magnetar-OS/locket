@@ -10,7 +10,7 @@ use locket_core::Vault;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 
-use crate::service::{SharedState, register_vault_objects};
+use crate::service::{SharedState, sync_objects};
 
 /// Bind the unlock socket, replacing a stale one left by a crashed daemon.
 ///
@@ -106,11 +106,14 @@ async fn rekey(state: &SharedState, vault_path: &Path, old: &str, new: &str) -> 
             tracing::info!("vault passphrase changed to match the new login password");
             // Our in-memory copy is now stale — the file has a new key slot.
             let mut guard = state.lock().await;
-            if let Some(vault) = guard.vault.as_mut()
-                && let Err(e) = vault.reload()
-            {
-                tracing::warn!("locking: could not reload after the rekey ({e})");
-                guard.close_vault();
+            if let Some(vault) = guard.vault.as_mut() {
+                match vault.reload() {
+                    Ok(()) => guard.notify_opened(),
+                    Err(e) => {
+                        tracing::warn!("locking: could not reload after the rekey ({e})");
+                        guard.close_vault();
+                    }
+                }
             }
             true
         }
@@ -212,7 +215,7 @@ async fn handle(
                 .collect();
             guard.open_vault(vault);
             drop(guard);
-            if let Err(e) = register_vault_objects(connection.object_server(), &state).await {
+            if let Err(e) = sync_objects(connection.object_server(), &state).await {
                 tracing::error!("could not publish vault objects after unlock: {e}");
             }
             tracing::info!("vault unlocked over the unlock socket");
