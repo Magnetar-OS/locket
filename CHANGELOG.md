@@ -10,7 +10,12 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   suspend, idle, or Ctrl+L — while an SSH key marked `confirm-each-use` is
   waiting for its confirmation. The question is now asked without holding
   the agent, and a vault that locks while it is open refuses the signature.
-
+- A sandboxed application can no longer be given a Secret portal key that
+  was never saved. When another process had written the vault first, the
+  key could be handed out from memory and then lost at the next reload,
+  leaving the application's data encrypted under a key that no longer
+  existed; the daemon now reloads before creating the key and hands out
+  nothing it could not save.
 ## [1.2.0] - 2026-09-22
 
 ### Changed

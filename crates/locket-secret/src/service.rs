@@ -260,7 +260,7 @@ impl ServiceState {
     /// before we mutate means our write is built on their state rather than
     /// discarding it. Only safe while our own copy is clean, which autosave
     /// keeps it: a reload throws away unsaved edits.
-    fn vault_mut(&mut self) -> Result<&mut Vault> {
+    pub(crate) fn vault_mut(&mut self) -> Result<&mut Vault> {
         self.touch();
         let vault = self.vault.as_mut().ok_or(Error::Locked)?;
         if self.config.autosave && !vault.is_dirty() && vault.changed_on_disk() {

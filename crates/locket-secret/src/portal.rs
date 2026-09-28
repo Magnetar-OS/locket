@@ -37,7 +37,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{fdo, interface};
 use zeroize::Zeroizing;
 
-use crate::service::SharedState;
+use crate::service::{ServiceState, SharedState};
 
 /// Length of a derived application secret.
 pub const APP_SECRET_LEN: usize = 64;
@@ -88,11 +88,30 @@ fn master_secret(vault: &mut Vault) -> crate::Result<Zeroizing<Vec<u8>>> {
             encode_hex(&raw),
         ))
         .with_attribute("locket:internal", "portal-master");
-    vault.add_item_default(item);
-    vault.save().map_err(crate::Error::Vault)?;
+    let id = vault.add_item_default(item);
+    if let Err(e) = vault.save() {
+        // Never leave an unsaved master behind to be found by the next
+        // request: the reload the GUI triggers after its next save would drop
+        // it, and the request after that would mint a different one — under
+        // an application that had already encrypted its data with the first.
+        if vault.reload().is_err() {
+            vault.remove_item(id);
+        }
+        return Err(crate::Error::Vault(e));
+    }
 
     tracing::info!("generated a new XDG Secret portal master key");
     Ok(raw)
+}
+
+/// The calling application's secret.
+///
+/// Goes through [`ServiceState::vault_mut`] like every other write, so a copy
+/// that another process has rewritten is reloaded before a master is minted
+/// into it, rather than the save refusing for a conflict.
+fn app_secret(state: &mut ServiceState, app_id: &str) -> crate::Result<Zeroizing<Vec<u8>>> {
+    let master = master_secret(state.vault_mut()?)?;
+    Ok(derive_app_secret(&master, app_id))
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -150,16 +169,14 @@ impl SecretPortal {
             return Ok((2, HashMap::new()));
         }
 
-        let secret = {
-            let mut guard = self.state.lock().await;
-            // Unreachable in practice after the check above, but the lock is
-            // released in between, so this stays rather than becoming a unwrap.
-            let Some(vault) = guard.vault.as_mut() else {
-                tracing::info!("portal secret requested for `{app_id}` while locked");
+        // Still locked is possible here — the lock is released in between —
+        // and answers like every other failure: code 2, not a bus error.
+        let secret = match app_secret(&mut *self.state.lock().await, &app_id) {
+            Ok(secret) => secret,
+            Err(e) => {
+                tracing::warn!("could not serve a portal secret to `{app_id}`: {e}");
                 return Ok((2, HashMap::new()));
-            };
-            let master = master_secret(vault).map_err(fdo::Error::from)?;
-            derive_app_secret(&master, &app_id)
+            }
         };
 
         // The portal contract is to write the secret into the pipe and close
@@ -224,6 +241,45 @@ mod tests {
         assert_eq!(decode_hex("000fffa5"), Some(bytes));
         assert_eq!(decode_hex("odd"), None);
         assert_eq!(decode_hex("zz"), None);
+    }
+
+    /// The GUI writes the vault file directly and then has the daemon
+    /// reload. A master minted into the daemon's stale copy used to fail to
+    /// save, stay in memory, be handed out by the next request — and vanish
+    /// at that reload, so the request after it got a different key.
+    #[test]
+    fn a_key_handed_out_survives_the_reload_after_another_writer() {
+        use crate::service::ServiceConfig;
+        use locket_core::crypto::KdfParams;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let daemon = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let mut state = ServiceState::new(ServiceConfig {
+            bus_name: "org.locket.test".into(),
+            autosave: true,
+        });
+        state.vault = Some(daemon);
+
+        // The GUI saves behind the daemon's back.
+        let mut gui = Vault::open(&path, "pw").unwrap();
+        gui.add_item_default(Item::new(ItemKind::Note, "written by the GUI"));
+        gui.save().unwrap();
+
+        // An application asks until it gets an answer, as a retrying client
+        // would.
+        let first = (0..2)
+            .find_map(|_| app_secret(&mut state, "org.example.App").ok())
+            .expect("no secret at all");
+        // What `Manager1.Reload` does after the GUI's next save.
+        state.vault.as_mut().unwrap().reload().unwrap();
+        let second = app_secret(&mut state, "org.example.App").unwrap();
+
+        assert_eq!(
+            first.as_slice(),
+            second.as_slice(),
+            "the application was given a key that did not survive a reload"
+        );
     }
 
     #[test]
