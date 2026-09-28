@@ -30,9 +30,16 @@ use std::io::Write as _;
 use hkdf::Hkdf;
 use locket_core::{
     Vault,
-    model::{Item, ItemKind, field_names},
+    model::{
+        Item, ItemKind, VaultData, field_names,
+        internal::{
+            ATTRIBUTE as INTERNAL_ATTRIBUTE, LEGACY_ATTRIBUTE as LEGACY_INTERNAL_ATTRIBUTE,
+            PORTAL_MASTER,
+        },
+    },
 };
 use sha2::Sha256;
+use uuid::Uuid;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 use zbus::{fdo, interface};
 use zeroize::Zeroizing;
@@ -45,7 +52,8 @@ pub const APP_SECRET_LEN: usize = 64;
 /// Length of the vault-held master the app secrets derive from.
 const MASTER_LEN: usize = 32;
 
-/// Label of the vault item holding the portal master secret.
+/// Label the portal master secret is created under. Only a label: see
+/// [`master_secret`] for how the item is found.
 const MASTER_ITEM_LABEL: &str = "XDG Secret portal master key";
 
 /// Domain separator, so this master can never collide with another use.
@@ -65,19 +73,141 @@ pub fn derive_app_secret(master: &[u8], app_id: &str) -> Zeroizing<Vec<u8>> {
 }
 
 /// Fetch the portal master from the vault, creating it on first use.
+///
+/// # Which item is the master
+///
+/// The item carrying [`INTERNAL_ATTRIBUTE`]` = `[`PORTAL_MASTER`]. Its label is
+/// only a label: the person can rename it and every application keeps its key.
+///
+/// Vaults written before that rule identified the master by its label and
+/// kind alone, and may hold several candidates — a master renamed away (after
+/// which a second one was minted under the old label), a master from before
+/// the project's rename carrying `passman:internal` instead, an unrelated item
+/// that happens to share the label. [`find_master`] settles which one is in
+/// use the way the old lookup did, so no application is re-keyed by the
+/// migration, and [`master_secret`] then writes the tag back onto that one
+/// item alone.
+///
+/// A tagged item whose key is missing or malformed is an error, never a
+/// reason to mint: a fresh master would silently re-key every application.
 fn master_secret(vault: &mut Vault) -> crate::Result<Zeroizing<Vec<u8>>> {
-    let existing = vault
-        .data()
-        .all_items()
-        .find(|(_, i)| i.kind == ItemKind::Application && i.label == MASTER_ITEM_LABEL)
-        .and_then(|(_, i)| i.field_value(field_names::PRIVATE_KEY).map(str::to_owned));
+    match find_master(vault.data())? {
+        Master::Tagged(key) => Ok(key),
+        Master::Migrate { id, key } => {
+            tag_master(vault, id);
+            if let Err(e) = vault.save() {
+                // The key itself is already on disk; only the tag did not
+                // land. Drop the unsaved change and hand the key out: the next
+                // request settles on the same item and tries the write again.
+                tracing::warn!("could not record the portal master's tag: {e}");
+                if let Err(e) = vault.reload() {
+                    tracing::warn!("and could not reload the vault: {e}");
+                }
+            } else {
+                tracing::info!("the portal master key is now identified by its tag");
+            }
+            Ok(key)
+        }
+        Master::None => mint_master(vault),
+    }
+}
 
-    if let Some(hex) = existing {
-        let raw = decode_hex(&hex)
-            .ok_or_else(|| crate::Error::Other("portal master key is malformed".into()))?;
-        return Ok(Zeroizing::new(raw));
+/// What [`find_master`] found.
+enum Master {
+    /// Exactly one item carries the tag, with a well-formed key.
+    Tagged(Zeroizing<Vec<u8>>),
+    /// A master identified the old way; `id` should be tagged, alone.
+    Migrate { id: Uuid, key: Zeroizing<Vec<u8>> },
+    /// No master anywhere: this is the first request.
+    None,
+}
+
+/// Settle which item holds the portal master. See [`master_secret`].
+fn find_master(data: &VaultData) -> crate::Result<Master> {
+    let tagged: Vec<&Item> = data
+        .all_items()
+        .map(|(_, item)| item)
+        .filter(|item| {
+            item.attributes.get(INTERNAL_ATTRIBUTE).map(String::as_str) == Some(PORTAL_MASTER)
+        })
+        .collect();
+
+    if let [only] = tagged.as_slice() {
+        return master_key(only).map(Master::Tagged).ok_or_else(damaged);
     }
 
+    // No tag, or more than one. What the label lookup used to return is the
+    // key applications have been using since, so that settles it: the first
+    // item of the right kind under the old label — provided it holds a key,
+    // since when it did not the old lookup minted a new master on every call
+    // and no application held on to any of them.
+    if let Some((id, key)) = data
+        .all_items()
+        .map(|(_, item)| item)
+        .find(|item| item.kind == ItemKind::Application && item.label == MASTER_ITEM_LABEL)
+        .and_then(|item| Some((item.id, master_key(item)?)))
+    {
+        return Ok(Master::Migrate { id, key });
+    }
+
+    // Renamed away from the label: the first tagged item, current tag before
+    // the pre-rename one, that holds a key.
+    for attribute in [INTERNAL_ATTRIBUTE, LEGACY_INTERNAL_ATTRIBUTE] {
+        if let Some((id, key)) = data
+            .all_items()
+            .map(|(_, item)| item)
+            .filter(|item| {
+                item.attributes.get(attribute).map(String::as_str) == Some(PORTAL_MASTER)
+            })
+            .find_map(|item| Some((item.id, master_key(item)?)))
+        {
+            return Ok(Master::Migrate { id, key });
+        }
+    }
+
+    if tagged.is_empty() {
+        Ok(Master::None)
+    } else {
+        Err(damaged())
+    }
+}
+
+fn damaged() -> crate::Error {
+    crate::Error::Other(
+        "the portal master key item is damaged; refusing to create a new one, \
+         which would change every sandboxed application's key"
+            .into(),
+    )
+}
+
+/// The key an item holds, if it is a well-formed master.
+fn master_key(item: &Item) -> Option<Zeroizing<Vec<u8>>> {
+    let raw = decode_hex(item.field_value(field_names::PRIVATE_KEY)?)?;
+    (raw.len() == MASTER_LEN).then(|| Zeroizing::new(raw))
+}
+
+/// Make `id` the one item carrying the master's tag.
+fn tag_master(vault: &mut Vault, id: Uuid) {
+    for collection in &mut vault.data_mut().collections {
+        for item in &mut collection.items {
+            if item.id == id {
+                item.attributes
+                    .insert(INTERNAL_ATTRIBUTE.to_owned(), PORTAL_MASTER.to_owned());
+                item.attributes.remove(LEGACY_INTERNAL_ATTRIBUTE);
+            } else if item.attributes.get(INTERNAL_ATTRIBUTE).map(String::as_str)
+                == Some(PORTAL_MASTER)
+            {
+                // A superseded master keeps its key — it is the person's data,
+                // and some application may still hold a copy — but it no
+                // longer answers for the portal.
+                item.attributes.remove(INTERNAL_ATTRIBUTE);
+            }
+        }
+    }
+}
+
+/// Create the master on first use.
+fn mint_master(vault: &mut Vault) -> crate::Result<Zeroizing<Vec<u8>>> {
     let mut raw = Zeroizing::new(vec![0u8; MASTER_LEN]);
     getrandom::fill(&mut raw).map_err(|e| crate::Error::Crypto(e.to_string()))?;
 
@@ -87,7 +217,7 @@ fn master_secret(vault: &mut Vault) -> crate::Result<Zeroizing<Vec<u8>>> {
             locket_core::FieldKind::PrivateKey,
             encode_hex(&raw),
         ))
-        .with_attribute("locket:internal", "portal-master");
+        .with_attribute(INTERNAL_ATTRIBUTE, PORTAL_MASTER);
     let id = vault.add_item_default(item);
     if let Err(e) = vault.save() {
         // Never leave an unsaved master behind to be found by the next
@@ -300,5 +430,141 @@ mod tests {
             count_after_first,
             "a second call created another master item"
         );
+    }
+
+    /// A master item as some version of locket left it.
+    fn master_item(label: &str, key: &[u8], tag: Option<&str>) -> Item {
+        let item = Item::new(ItemKind::Application, label).with_field(locket_core::Field::new(
+            field_names::PRIVATE_KEY,
+            locket_core::FieldKind::PrivateKey,
+            encode_hex(key),
+        ));
+        match tag {
+            Some(attribute) => item.with_attribute(attribute, PORTAL_MASTER),
+            None => item,
+        }
+    }
+
+    fn vault() -> (tempfile::TempDir, Vault) {
+        use locket_core::crypto::KdfParams;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        (dir, vault)
+    }
+
+    fn tagged(vault: &Vault) -> Vec<Uuid> {
+        vault
+            .data()
+            .all_items()
+            .filter(|(_, i)| {
+                i.attributes.get(INTERNAL_ATTRIBUTE).map(String::as_str) == Some(PORTAL_MASTER)
+            })
+            .map(|(_, i)| i.id)
+            .collect()
+    }
+
+    /// The master's label is only a label. Found by it, a rename used to
+    /// mint a new master on the next request — re-keying every sandboxed
+    /// application at once.
+    #[test]
+    fn renaming_the_master_keeps_every_applications_key() {
+        let (_dir, mut vault) = vault();
+        let before = master_secret(&mut vault).unwrap();
+        let id = tagged(&vault)[0];
+        vault.item_mut(id).unwrap().label = "Flatpak keys".into();
+        vault.save().unwrap();
+
+        let after = master_secret(&mut vault).unwrap();
+        assert_eq!(
+            before.as_slice(),
+            after.as_slice(),
+            "a rename re-keyed the portal"
+        );
+        assert_eq!(vault.data().item_count(), 1, "a second master was minted");
+    }
+
+    /// A vault from before the project's rename: the master carries
+    /// `passman:internal`. It is the master, and is re-tagged the current way.
+    #[test]
+    fn a_master_from_before_the_rename_is_adopted() {
+        let (_dir, mut vault) = vault();
+        let key = [9u8; MASTER_LEN];
+        vault.add_item_default(master_item(
+            MASTER_ITEM_LABEL,
+            &key,
+            Some(LEGACY_INTERNAL_ATTRIBUTE),
+        ));
+        vault.save().unwrap();
+
+        assert_eq!(master_secret(&mut vault).unwrap().as_slice(), key);
+        let ids = tagged(&vault);
+        assert_eq!(ids.len(), 1);
+        let item = vault.item(ids[0]).unwrap();
+        assert!(!item.attributes.contains_key(LEGACY_INTERNAL_ATTRIBUTE));
+        assert!(!vault.is_dirty(), "the migration was not saved");
+    }
+
+    /// Renamed under the old lookup, a master was replaced by a new one
+    /// under the old label, and applications have used that one since. The
+    /// migration keeps it, and the orphan stops answering for the portal.
+    #[test]
+    fn with_two_masters_the_one_in_use_wins() {
+        let (_dir, mut vault) = vault();
+        let orphan = vault.add_item_default(master_item(
+            "renamed long ago",
+            &[1u8; MASTER_LEN],
+            Some(INTERNAL_ATTRIBUTE),
+        ));
+        let in_use = [2u8; MASTER_LEN];
+        vault.add_item_default(master_item(
+            MASTER_ITEM_LABEL,
+            &in_use,
+            Some(INTERNAL_ATTRIBUTE),
+        ));
+        vault.save().unwrap();
+
+        assert_eq!(master_secret(&mut vault).unwrap().as_slice(), in_use);
+        let ids = tagged(&vault);
+        assert_eq!(ids.len(), 1);
+        assert_ne!(ids[0], orphan);
+        assert!(vault.item(orphan).is_some(), "the orphaned key was deleted");
+        // And from now on the label no longer matters.
+        vault.item_mut(ids[0]).unwrap().label = "portal".into();
+        assert_eq!(master_secret(&mut vault).unwrap().as_slice(), in_use);
+    }
+
+    /// Something else stored under the master's label, without a key — a
+    /// `secret-tool store --label=…`. The old lookup found it first, got no
+    /// key, and minted a new master on every request.
+    #[test]
+    fn a_keyless_item_under_the_label_does_not_rotate_the_master() {
+        let (_dir, mut vault) = vault();
+        vault.add_item_default(Item::new(ItemKind::Application, MASTER_ITEM_LABEL));
+        vault.save().unwrap();
+
+        let first = master_secret(&mut vault).unwrap();
+        let second = master_secret(&mut vault).unwrap();
+        assert_eq!(first.as_slice(), second.as_slice(), "the master rotated");
+    }
+
+    /// A damaged master is an error. Minting a replacement would change
+    /// every application's key without a word.
+    #[test]
+    fn a_damaged_master_is_refused_not_replaced() {
+        let (_dir, mut vault) = vault();
+        vault.add_item_default(
+            Item::new(ItemKind::Application, MASTER_ITEM_LABEL)
+                .with_field(locket_core::Field::new(
+                    field_names::PRIVATE_KEY,
+                    locket_core::FieldKind::PrivateKey,
+                    "not hex",
+                ))
+                .with_attribute(INTERNAL_ATTRIBUTE, PORTAL_MASTER),
+        );
+        vault.save().unwrap();
+
+        assert!(master_secret(&mut vault).is_err());
+        assert_eq!(vault.data().item_count(), 1, "a replacement was minted");
     }
 }

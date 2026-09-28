@@ -289,6 +289,23 @@ pub mod field_names {
     pub const TOKEN_ENDPOINT: &str = "token-endpoint";
 }
 
+/// Items locket keeps for its own use, marked by an attribute.
+///
+/// The one such item today is the XDG Secret portal's master key, which every
+/// sandboxed application's key is derived from. It lives in the vault so it is
+/// backed up with everything else, but it is not the person's to edit: a
+/// changed or deleted master re-keys every Flatpak application at once. The
+/// frontends hide these items and the Secret Service refuses to change them.
+pub mod internal {
+    /// The attribute naming what an internal item is for.
+    pub const ATTRIBUTE: &str = "locket:internal";
+    /// The same attribute as vaults written before the project's rename carry
+    /// it. Read, never written.
+    pub const LEGACY_ATTRIBUTE: &str = "passman:internal";
+    /// The value marking the portal master key.
+    pub const PORTAL_MASTER: &str = "portal-master";
+}
+
 /// One attachment is refused above this many bytes. The point of an
 /// attachment is a recovery-codes PDF or a key backup, not a photo library,
 /// and every byte here is base64 inside a JSON body that is re-encrypted and
@@ -454,6 +471,12 @@ impl Item {
     ///
     /// Secret *values* are deliberately excluded — searching them would let a
     /// shoulder-surfer confirm a guess without ever revealing a field.
+    /// Whether locket keeps this item for its own use; see [`internal`].
+    pub fn is_internal(&self) -> bool {
+        self.attributes.contains_key(internal::ATTRIBUTE)
+            || self.attributes.contains_key(internal::LEGACY_ATTRIBUTE)
+    }
+
     pub fn matches(&self, needle: &str) -> bool {
         if needle.is_empty() {
             return true;

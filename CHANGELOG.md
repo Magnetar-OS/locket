@@ -39,6 +39,13 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - The browser host no longer treats the text of a URL without a host
   (`data:`, `file:`) as a site name, which let such a page match a
   credential saved for a domain its text happened to end in.
+- Renaming the Secret portal's master key no longer re-keys every Flatpak
+  application. The master was found by its label, so a rename (or an
+  unrelated item saved under the same label) made the next request mint a
+  new one. It is now found by its `locket:internal` tag; vaults from before
+  are migrated to the master applications have actually been using —
+  including ones still tagged `passman:internal` — and a damaged master is
+  reported instead of silently replaced.
 
 ## [1.2.0] - 2026-09-22
 
