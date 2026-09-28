@@ -46,6 +46,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   are migrated to the master applications have actually been using —
   including ones still tagged `passman:internal` — and a damaged master is
   reported instead of silently replaced.
+- The portal master key is no longer shown in locket's item list, and the
+  Secret Service refuses to delete it, rewrite it, strip its tag, or delete
+  the collection holding it.
 
 ## [1.2.0] - 2026-09-22
 

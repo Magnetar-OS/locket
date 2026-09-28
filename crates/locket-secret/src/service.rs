@@ -318,6 +318,18 @@ impl ServiceState {
 
 pub type SharedState = Arc<Mutex<ServiceState>>;
 
+/// Refuse to change an item locket keeps for itself (see
+/// [`locket_core::model::internal`]): a bus peer deleting or rewriting the
+/// portal master would re-key every sandboxed application at once.
+fn refuse_internal(item: Option<&Item>) -> fdo::Result<()> {
+    match item {
+        Some(item) if item.is_internal() => Err(fdo::Error::AccessDenied(
+            "locket keeps this item for its own use".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -728,6 +740,11 @@ impl CollectionIface {
             // Deleting a collection deletes every item in it — through the
             // trash, item by item, because a whole collection wiped by one
             // call is exactly the accident the trash exists to survive.
+            if data.collections[pos].items.iter().any(Item::is_internal) {
+                return Err(fdo::Error::AccessDenied(
+                    "this collection holds an item locket keeps for its own use".into(),
+                ));
+            }
             let item_ids: Vec<Uuid> = data.collections[pos].items.iter().map(|i| i.id).collect();
             for id in &item_ids {
                 data.trash_item(*id);
@@ -972,6 +989,7 @@ impl ItemIface {
         {
             let mut state = self.state.lock().await;
             let vault = state.vault_mut().map_err(fdo::Error::from)?;
+            refuse_internal(vault.item(self.id))?;
             // Soft-delete. To this client — and every other one — the item is
             // gone: the trash lives outside the collections that SearchItems
             // and the properties walk, so only locket's own trash UI sees it.
@@ -1030,6 +1048,7 @@ impl ItemIface {
         let plaintext = plaintext.to_vec();
 
         let vault = state.vault_mut().map_err(fdo::Error::from)?;
+        refuse_internal(vault.item(self.id))?;
         let item = vault
             .item_mut(self.id)
             .ok_or_else(|| fdo::Error::UnknownObject("no such item".into()))?;
@@ -1064,6 +1083,7 @@ impl ItemIface {
         let vault = state
             .vault_mut()
             .map_err(|e| zbus::Error::Failure(e.to_string()))?;
+        refuse_internal(vault.item(self.id)).map_err(zbus::Error::from)?;
         if let Some(i) = vault.item_mut(self.id) {
             i.attributes = value.into_iter().collect();
             i.touch();

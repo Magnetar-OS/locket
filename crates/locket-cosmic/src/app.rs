@@ -587,6 +587,9 @@ impl App {
             .data()
             .all_items()
             .map(|(_, item)| item)
+            // The portal's master key and anything like it: locket's, not the
+            // person's, and editing it would re-key every sandboxed app.
+            .filter(|item| !item.is_internal())
             .filter(|item| category.matches(item) && item.matches(&self.search))
             .collect();
         items.sort_by(|a, b| {
