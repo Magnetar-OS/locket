@@ -168,29 +168,21 @@ impl AgentKey {
     ///
     /// `flags` is the client's `SSH_AGENTC_SIGN_REQUEST` word. It only means
     /// anything for RSA, where it names the hash the server will accept.
+    ///
+    /// `confirmed` is whether the person allowed this signature — asked
+    /// beforehand, through [`PendingConfirmation`], with the agent released.
     fn sign(
         &self,
         data: &[u8],
         flags: u32,
         signer: Option<&dyn TokenSigner>,
-        confirmer: Option<&dyn SigningConfirmer>,
+        confirmed: bool,
     ) -> Result<Vec<u8>> {
-        if self.confirm_each_use {
-            // Fail closed. This key was marked as one that must not be used
-            // without asking, so "there is nobody to ask" is a refusal, not a
-            // reason to go ahead.
-            let Some(confirmer) = confirmer else {
-                return Err(Error::Refused(format!(
-                    "`{}` requires confirmation for each use and there is no way to ask",
-                    self.comment
-                )));
-            };
-            if !confirmer.confirm(&self.comment) {
-                return Err(Error::Refused(format!(
-                    "signing with `{}` was not confirmed",
-                    self.comment
-                )));
-            }
+        if self.confirm_each_use && !confirmed {
+            return Err(Error::Refused(format!(
+                "signing with `{}` was not confirmed",
+                self.comment
+            )));
         }
 
         let Some(token) = self.token.as_ref() else {
@@ -285,6 +277,37 @@ impl std::fmt::Debug for AgentKey {
             .field("comment", &self.comment)
             .field("public_blob_len", &self.public_blob.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// A signature that is waiting for a person to allow it.
+///
+/// Lifted out of the agent so the question can be asked without holding it.
+/// The answer can take as long as the confirmer's timeout, and the agent must
+/// stay reachable meanwhile: the daemon takes it to drop the keys when the
+/// vault locks, from inside its own state lock — the same lock the answer
+/// has to come through. Asking with the agent held wedged both for good.
+pub struct PendingConfirmation {
+    key: String,
+    confirmer: Option<Arc<dyn SigningConfirmer>>,
+}
+
+impl PendingConfirmation {
+    /// Ask, and block until answered. Anything but an explicit yes refuses.
+    pub fn ask(&self) -> bool {
+        match self.confirmer.as_deref() {
+            Some(confirmer) => confirmer.confirm(&self.key),
+            // Fail closed. This key was marked as one that must not be used
+            // without asking, so "there is nobody to ask" is a refusal, not a
+            // reason to go ahead.
+            None => {
+                tracing::debug!(
+                    "`{}` requires confirmation for each use and there is no way to ask",
+                    self.key
+                );
+                false
+            }
+        }
     }
 }
 
@@ -503,22 +526,25 @@ impl Agent {
         w.into_framed()
     }
 
-    fn sign_response(&self, key_blob: &[u8], data: &[u8], flags: u32) -> Result<Vec<u8>> {
+    /// The identity a client names by blob, unless the agent is locked.
+    fn key_for(&self, key_blob: &[u8]) -> Option<&AgentKey> {
         if self.locked {
-            return Err(Error::NoSuchKey);
+            return None;
         }
-        let key = self
-            .keys
+        self.keys
             .iter()
             .find(|k| k.identities().any(|blob| blob == key_blob))
-            .ok_or(Error::NoSuchKey)?;
+    }
 
-        let blob = key.sign(
-            data,
-            flags,
-            self.signer.as_deref(),
-            self.confirmer.as_deref(),
-        )?;
+    fn sign_response(
+        &self,
+        key_blob: &[u8],
+        data: &[u8],
+        flags: u32,
+        confirmed: bool,
+    ) -> Result<Vec<u8>> {
+        let key = self.key_for(key_blob).ok_or(Error::NoSuchKey)?;
+        let blob = key.sign(data, flags, self.signer.as_deref(), confirmed)?;
         let mut w = Writer::new();
         w.write_u8(protocol::SSH_AGENT_SIGN_RESPONSE)
             .write_string(&blob);
@@ -531,8 +557,43 @@ impl Agent {
         self.last_request
     }
 
-    /// Handle one request body; returns the framed response.
+    /// The confirmation `body` needs before it can be answered, if any.
+    ///
+    /// Only a signature request for a `confirm-each-use` key needs one. The
+    /// caller asks it with the agent released and passes the answer to
+    /// [`Agent::handle_confirmed`] — see [`PendingConfirmation`] for why.
+    pub fn confirmation_for(&self, body: &[u8]) -> Option<PendingConfirmation> {
+        let Ok(Request::Sign { key_blob, .. }) = Request::parse(body) else {
+            return None;
+        };
+        let key = self.key_for(&key_blob)?;
+        key.confirm_each_use.then(|| PendingConfirmation {
+            key: key.comment.clone(),
+            confirmer: self.confirmer.clone(),
+        })
+    }
+
+    /// Handle one request body, asking for any confirmation it needs in
+    /// place; returns the framed response.
+    ///
+    /// Asks while `self` is borrowed, so a caller that shares the agent
+    /// behind a lock must use [`Agent::confirmation_for`] and
+    /// [`Agent::handle_confirmed`] instead, as the socket listener does.
     pub fn handle(&mut self, body: &[u8]) -> Vec<u8> {
+        let confirmed = self
+            .confirmation_for(body)
+            .is_some_and(|pending| pending.ask());
+        self.handle_confirmed(body, confirmed)
+    }
+
+    /// Handle one request body whose confirmation, if it needed one, has
+    /// already been asked; `confirmed` is the answer. Returns the framed
+    /// response.
+    ///
+    /// The key is looked up afresh here: if the vault locked while the
+    /// question was open, the keys are gone and the signature is refused
+    /// whatever the answer was.
+    pub fn handle_confirmed(&mut self, body: &[u8], confirmed: bool) -> Vec<u8> {
         self.last_request = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -553,7 +614,7 @@ impl Agent {
                 key_blob,
                 data,
                 flags,
-            } => match self.sign_response(&key_blob, &data, flags) {
+            } => match self.sign_response(&key_blob, &data, flags, confirmed) {
                 Ok(response) => response,
                 Err(e) => {
                     tracing::debug!("refusing to sign: {e}");

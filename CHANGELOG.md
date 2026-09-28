@@ -4,6 +4,13 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Fixed
+
+- The daemon no longer hangs for good when the vault locks — screen lock,
+  suspend, idle, or Ctrl+L — while an SSH key marked `confirm-each-use` is
+  waiting for its confirmation. The question is now asked without holding
+  the agent, and a vault that locks while it is open refuses the signature.
+
 ## [1.2.0] - 2026-09-22
 
 ### Changed
