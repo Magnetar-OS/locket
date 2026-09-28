@@ -31,7 +31,16 @@ cbc.workspace = true
 num-bigint.workspace = true
 chacha20poly1305.workspace = true
 uuid.workspace = true
+tempfile = { version = "3", optional = true }
+
+[features]
+# A private `dbus-daemon` and a daemon's objects served on it, for tests that
+# have to cross a real bus: see `src/testing.rs`. Never enabled by a build
+# that ships.
+test-bus = ["dep:tempfile"]
 
 [dev-dependencies]
+# Enables `test-bus` for this crate's own tests.
+locket-secret = { path = ".", features = ["test-bus"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

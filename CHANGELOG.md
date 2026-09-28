@@ -4,6 +4,17 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Security
+
+- A process running as you can no longer approve its own SSH signature with
+  a `confirm-each-use` key. The question used to be broadcast on the session
+  bus with a sequential id, and any bus peer could answer it through
+  `Manager1.AnswerConfirm` before the dialog appeared. The daemon now starts
+  a dedicated dialog (`locket --confirm-signing <key>`) and reads its answer
+  from a private pipe; `AnswerConfirm` and `ConfirmRequested` are gone, and
+  the question no longer appears in the main window. Two signatures waiting
+  at once each get their own dialog, and neither holds up an unlock prompt.
+
 ### Fixed
 
 - The daemon no longer hangs for good when the vault locks — screen lock,

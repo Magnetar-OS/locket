@@ -51,6 +51,10 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 uuid.workspace = true
 dirs.workspace = true
+# The confirmation dialog makes itself non-dumpable (PR_SET_DUMPABLE), so no
+# other process running as the user can attach and answer it. rustix is
+# already in the tree through the Wayland stack; it keeps the call safe code.
+rustix = { version = "1", features = ["process"] }
 
 # --- localization ---
 i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }

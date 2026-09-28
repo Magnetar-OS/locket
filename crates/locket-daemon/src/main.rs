@@ -194,10 +194,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(Mutex::new(state));
 
     if let Some(agent) = ssh_agent.as_ref() {
-        // Wired after the state exists, because asking the frontend goes
-        // through the same prompt bridge the Secret Service uses.
-        let confirmer = Arc::new(AskFrontend {
-            state: state.clone(),
+        let confirmer = Arc::new(AskInDialog {
             handle: tokio::runtime::Handle::current(),
         });
         let mut guard = agent.lock().unwrap_or_else(|p| p.into_inner());
@@ -354,42 +351,31 @@ impl locket_secret::service::VaultObserver for AgentKeys {
     }
 }
 
-/// Asks the frontend to allow one signature, from the agent's blocking thread.
+/// Asks the person to allow one signature, from the agent's blocking thread.
+///
+/// The question goes to a dialog this daemon starts and reads the answer from
+/// directly — never over the session bus, where any process running as the
+/// user could answer it; see [`locket_secret::frontend`].
 ///
 /// The agent handles requests on a `spawn_blocking` thread, which is exactly
 /// where blocking on a runtime future is allowed — and blocking is what is
 /// wanted here: an `ssh` client is waiting for its signature and there is
-/// nothing useful to do until someone answers.
-struct AskFrontend {
-    state: locket_secret::service::SharedState,
+/// nothing useful to do until someone answers. Each request asks on its own
+/// thread, so one open question holds up neither an unlock prompt nor a
+/// second signature.
+struct AskInDialog {
     handle: tokio::runtime::Handle,
 }
 
-impl locket_agent::confirm::SigningConfirmer for AskFrontend {
+impl locket_agent::confirm::SigningConfirmer for AskInDialog {
     fn confirm(&self, key: &str) -> bool {
-        let state = self.state.clone();
-        let key = key.to_owned();
-        self.handle.block_on(async move {
-            let sender = {
-                let guard = state.lock().await;
-                guard.prompts.clone()
-            };
-            let Some(tx) = sender else {
-                tracing::warn!("no prompt bridge; refusing to sign with `{key}`");
-                return false;
-            };
-            let (reply, wait) = tokio::sync::oneshot::channel();
-            if tx
-                .send(locket_secret::service::PromptRequest::ConfirmSigning { key, reply })
-                .await
-                .is_err()
-            {
-                return false;
-            }
-            // Every failure is a refusal: this key was marked as one that must
-            // not be used without asking.
-            wait.await.unwrap_or(false)
-        })
+        let question = locket_secret::frontend::Question::Signing {
+            key: key.to_owned(),
+        };
+        self.handle.block_on(locket_secret::frontend::ask(
+            &question,
+            locket_secret::frontend::CONFIRM_TIMEOUT,
+        ))
     }
 }
 

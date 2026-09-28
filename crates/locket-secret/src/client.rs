@@ -32,15 +32,8 @@ pub trait Manager {
     #[zbus(property)]
     fn vault_path(&self) -> zbus::Result<String>;
 
-    /// Allow or refuse a signature the daemon asked about.
-    fn answer_confirm(&self, id: u32, allow: bool) -> zbus::Result<()>;
-
     #[zbus(signal)]
     fn unlock_requested(&self) -> zbus::Result<()>;
-
-    /// One SSH signature is waiting to be allowed; `key` names the identity.
-    #[zbus(signal)]
-    fn confirm_requested(&self, id: u32, key: String) -> zbus::Result<()>;
 }
 
 /// Connect to whichever bus name the daemon holds.

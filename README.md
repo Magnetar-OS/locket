@@ -341,6 +341,13 @@ script is waiting on the other end. Deliberately per key: confirming every
 signature trains people to click yes, and the keys worth gating are the few
 that authorise something expensive.
 
+The dialog is a process of its own (`locket --confirm-signing <key>`) that the
+daemon starts for this one question and reads the answer from over a private
+pipe. Nothing about the question is announced on the session bus and there is
+no D-Bus method that answers it, so a process running as you cannot approve
+its own signature; the dialog also makes itself non-dumpable, so it cannot
+be attached to and clicked from outside either.
+
 Three fields on an `SSH Key` item drive all of this, and the editor sets them
 like any other field:
 

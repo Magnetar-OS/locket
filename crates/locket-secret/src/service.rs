@@ -47,17 +47,12 @@ mod prop {
     pub const COLLECTION_LABEL: &str = "org.freedesktop.Secret.Collection.Label";
 }
 
-/// A request the service needs a human to answer.
+/// A locked-vault call waiting for somebody to unlock.
+///
+/// The reply is whether the vault is unlocked now.
 #[derive(Debug)]
-pub enum PromptRequest {
-    /// Unlock the vault so a client's call can proceed.
-    Unlock { reply: oneshot::Sender<bool> },
-    /// Allow one SSH signature with a key that asks to be confirmed.
-    ConfirmSigning {
-        /// The key's comment — what the user will recognise it by.
-        key: String,
-        reply: oneshot::Sender<bool>,
-    },
+pub struct PromptRequest {
+    pub reply: oneshot::Sender<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,13 +107,6 @@ pub struct ServiceState {
     pub prompts: Option<tokio::sync::mpsc::Sender<PromptRequest>>,
     prompt_counter: AtomicU64,
     observers: Vec<Arc<dyn VaultObserver>>,
-    /// Signing confirmations waiting for an answer, by id.
-    ///
-    /// `None` means "asked, still waiting"; `Some` is the answer. Kept here
-    /// rather than in a channel because the answer arrives on a different
-    /// D-Bus call than the one that is waiting for it.
-    confirmations: std::collections::HashMap<u32, Option<bool>>,
-    next_confirmation_id: u32,
     /// Lock the vault after this many idle seconds; 0 disables it.
     ///
     /// Lives here rather than in the idle task's arguments because the
@@ -143,36 +131,9 @@ impl ServiceState {
             prompts: None,
             prompt_counter: AtomicU64::new(0),
             observers: Vec::new(),
-            confirmations: std::collections::HashMap::new(),
-            next_confirmation_id: 0,
             auto_lock_seconds: AtomicU64::new(0),
             last_activity: AtomicU64::new(now()),
         }
-    }
-
-    /// Register a pending signing confirmation and return its id.
-    pub fn next_confirmation(&mut self, _key: String) -> u32 {
-        self.next_confirmation_id = self.next_confirmation_id.wrapping_add(1);
-        let id = self.next_confirmation_id;
-        self.confirmations.insert(id, None);
-        id
-    }
-
-    /// Record a frontend's answer. Unknown ids are dropped.
-    pub fn answer_confirmation(&mut self, id: u32, allow: bool) {
-        if let Some(slot) = self.confirmations.get_mut(&id) {
-            *slot = Some(allow);
-        }
-    }
-
-    /// The answer to a pending confirmation, if one has arrived.
-    pub fn confirmation_answer(&self, id: u32) -> Option<bool> {
-        self.confirmations.get(&id).copied().flatten()
-    }
-
-    /// Drop a confirmation once it has been resolved or timed out.
-    pub fn forget_confirmation(&mut self, id: u32) {
-        self.confirmations.remove(&id);
     }
 
     /// How long the vault may sit idle before it locks itself. 0 is never.
@@ -319,7 +280,7 @@ impl ServiceState {
             return false;
         };
         let (reply, wait) = oneshot::channel();
-        if tx.send(PromptRequest::Unlock { reply }).await.is_err() {
+        if tx.send(PromptRequest { reply }).await.is_err() {
             return false;
         }
         wait.await.unwrap_or(false)
@@ -1234,7 +1195,7 @@ impl PromptIface {
         let granted = match sender {
             Some(tx) => {
                 let (reply, wait) = oneshot::channel();
-                if tx.send(PromptRequest::Unlock { reply }).await.is_err() {
+                if tx.send(PromptRequest { reply }).await.is_err() {
                     false
                 } else {
                     wait.await.unwrap_or(false)

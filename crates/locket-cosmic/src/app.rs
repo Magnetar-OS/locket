@@ -128,8 +128,6 @@ pub enum Message {
     ClipboardChecked(Option<String>),
     /// The vault file changed underneath us; pick the change up.
     ReloadVaultFile,
-    /// Answer the daemon's "may this key sign?" question.
-    AnswerConfirm(bool),
     /// The settings store changed somewhere else; take the new values.
     SettingsChanged(Settings),
     CloseContext,
@@ -455,8 +453,6 @@ pub struct App {
     /// The secret we last put on the clipboard, so the clear timer can check
     /// it is still ours before wiping it.
     clipboard_copy: Option<String>,
-    /// An SSH signature waiting to be allowed: (request id, key name).
-    pending_confirm: Option<(u32, String)>,
     /// The dialog raised by an application's unlock request, while one is up.
     prompt: Option<Prompt>,
 
@@ -1805,7 +1801,6 @@ impl cosmic::Application for App {
             security: Security::default(),
             unlock_requested_by_app: false,
             clipboard_copy: None,
-            pending_confirm: None,
             prompt: None,
             qr: None,
             about: about(),
@@ -2122,24 +2117,6 @@ impl cosmic::Application for App {
 
             Message::Tick => {}
 
-            Message::AnswerConfirm(allow) => {
-                let Some((id, key)) = self.pending_confirm.take() else {
-                    return Task::none();
-                };
-                let notice = self.toast(if allow {
-                    fl!("toast-allowed-signature", key = key)
-                } else {
-                    fl!("toast-refused-signature", key = key)
-                });
-                return Task::batch([
-                    cosmic::task::future(async move {
-                        daemon::answer_confirm(id, allow).await;
-                        Message::Tick
-                    }),
-                    notice,
-                ]);
-            }
-
             Message::SettingsChanged(settings) => {
                 if settings == self.settings {
                     return Task::none();
@@ -2261,12 +2238,6 @@ impl cosmic::Application for App {
                     // somebody mid-edit, which is what asking here used to
                     // mean.
                     return self.raise_prompt();
-                }
-                DaemonEvent::ConfirmRequested { id, key } => {
-                    // Raise the window: this is a question, and one nobody can
-                    // answer from behind whatever they were looking at.
-                    self.pending_confirm = Some((id, key));
-                    return self.open_main_window();
                 }
                 // Nothing to do: the next call simply finds no daemon and the
                 // frontend falls back to the vault file, which is a supported
@@ -3356,25 +3327,6 @@ impl cosmic::Application for App {
     }
 
     fn dialog(&self) -> Option<Element<'_, Self::Message>> {
-        // A signing request is somebody waiting on the other end of an ssh
-        // connection, so it goes in front of anything else.
-        if let Some((_, key)) = &self.pending_confirm {
-            return Some(
-                widget::dialog()
-                    .title(fl!("dialog-ssh-title"))
-                    .body(fl!("dialog-ssh-body", key = key.clone()))
-                    .primary_action(
-                        widget::button::suggested(fl!("dialog-allow-once"))
-                            .on_press(Message::AnswerConfirm(true)),
-                    )
-                    .secondary_action(
-                        widget::button::destructive(fl!("dialog-refuse"))
-                            .on_press(Message::AnswerConfirm(false)),
-                    )
-                    .into(),
-            );
-        }
-
         if let Some(format) = self.export.pending {
             // The plaintext warning, or the kdbx passphrase form.
             let dialog = if format == ExportFormat::Kdbx {

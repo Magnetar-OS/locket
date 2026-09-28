@@ -47,7 +47,7 @@ locket-fido = { path = "crates/locket-fido", version = "1.2.0" }
 locket-tpm = { path = "crates/locket-tpm", version = "1.2.0" }
 
 # --- Async / IPC -----------------------------------------------------------
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }

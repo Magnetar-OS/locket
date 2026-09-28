@@ -518,8 +518,6 @@ trash-retention-detail =
 
 toast-copied = { $what } copied
 toast-copied-clearing = { $what } copied — clipboard clears in { $seconds }s
-toast-allowed-signature = Allowed one signature with { $key }
-toast-refused-signature = Refused a signature with { $key }
 toast-saved = Saved { $label }
 toast-trashed = Moved { $label } to the trash
 toast-restored = Restored { $label }

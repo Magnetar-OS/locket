@@ -95,7 +95,16 @@ What is still true in this position:
 - **SSH keys cannot be added or removed** through the agent socket
   (`ADD_IDENTITY`/`REMOVE_IDENTITY` are refused), and a key marked
   `confirm-each-use` will not sign without a dialog — which fails closed on
-  no frontend, no answer in 30 seconds, or no graphical session.
+  no frontend, no answer in 30 seconds, or no graphical session. The dialog
+  is a separate `locket --confirm-signing` process the daemon starts and
+  reads the answer from over a pipe only it holds: the question is not
+  broadcast on the bus and no bus method answers it (tested over a private
+  bus). The dialog sets `PR_SET_DUMPABLE(0)`, so another process running as
+  you cannot attach to it and press "Allow". **Not** covered: a process that
+  rewrites the user manager's environment (`systemctl --user
+  set-environment LD_PRELOAD=…`) before the dialog starts — which subverts
+  the daemon itself at its next start just as well — or one that can inject
+  input into the compositor.
 - **Locking is the defence**, which is why it happens on idle, on session
   lock, on the compositor raising `LockedHint`, and on suspend.
 

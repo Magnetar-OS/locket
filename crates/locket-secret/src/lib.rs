@@ -10,12 +10,15 @@
 pub mod client;
 pub mod dh;
 pub mod error;
+pub mod frontend;
 pub mod import;
 pub mod manager;
 pub mod portal;
 pub mod quick;
 pub mod service;
 pub mod session;
+#[cfg(feature = "test-bus")]
+pub mod testing;
 pub mod unlock_socket;
 
 pub use error::{Error, Result};

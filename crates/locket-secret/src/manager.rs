@@ -27,11 +27,6 @@ use crate::service::{ServiceState, SharedState, register_vault_objects};
 /// How long a Secret Service `Prompt` waits for the user before giving up.
 pub const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// How long a signing confirmation waits. Shorter than an unlock prompt: an
-/// `ssh` client is holding the connection open on the other side of it, and a
-/// signature nobody has allowed after half a minute is one nobody asked for.
-pub const CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 pub const MANAGER_PATH: &str = "/org/locket/Manager";
 
 pub struct Manager {
@@ -138,16 +133,6 @@ impl Manager {
         Ok(())
     }
 
-    /// Answer a [`confirm_requested`](Manager::confirm_requested) signal.
-    ///
-    /// Unknown ids are ignored rather than refused: a stale answer from a
-    /// frontend that was slow, or a second window, must not cancel a
-    /// confirmation somebody is still looking at.
-    async fn answer_confirm(&self, id: u32, allow: bool) -> fdo::Result<()> {
-        self.state.lock().await.answer_confirmation(id, allow);
-        Ok(())
-    }
-
     /// Re-read the vault file, for when another process has written to it.
     ///
     /// The frontend edits the vault file directly, so after it saves the
@@ -208,14 +193,6 @@ impl Manager {
     /// A frontend should raise its unlock dialog and call `Unlock`.
     #[zbus(signal)]
     pub async fn unlock_requested(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
-
-    /// One signature with `key` is waiting to be allowed or refused.
-    #[zbus(signal)]
-    pub async fn confirm_requested(
-        emitter: &SignalEmitter<'_>,
-        id: u32,
-        key: &str,
-    ) -> zbus::Result<()>;
 }
 
 /// Bridge `Prompt` objects to the frontend.
@@ -227,85 +204,15 @@ impl Manager {
 /// Polling for the state change (rather than having `unlock` notify) keeps the
 /// two paths independent: an unlock typed directly into the frontend, with no
 /// prompt outstanding, resolves any pending prompt just the same.
-/// Ask the frontend to allow one signature, and wait for the answer.
 ///
-/// Fails closed on every path that is not an explicit yes: no frontend, no
-/// answer in time, a frontend that went away. A key marked `confirm-each-use`
-/// is one its owner decided must not be used unattended, so silence is a no.
-async fn confirm_signing(
-    connection: &zbus::Connection,
-    state: &SharedState,
-    key: String,
-    reply: tokio::sync::oneshot::Sender<bool>,
-) {
-    let id = {
-        let mut guard = state.lock().await;
-        guard.next_confirmation(key.clone())
-    };
-
-    let emitter = match SignalEmitter::new(connection, MANAGER_PATH) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("cannot ask for confirmation: {e}");
-            let _ = reply.send(false);
-            return;
-        }
-    };
-    if let Err(e) = Manager::confirm_requested(&emitter, id, &key).await {
-        tracing::error!("failed to emit ConfirmRequested: {e}");
-        let _ = reply.send(false);
-        return;
-    }
-    tracing::info!("asked the frontend to confirm signing with `{key}`");
-
-    // Unlike an unlock prompt, this does not start a frontend on a machine
-    // that has no screen to show it on: the request came from an ssh client
-    // that may well be a script, and making it wait out the timeout for a
-    // window nobody can see is worse than refusing at once.
-    if !has_display() {
-        tracing::info!("no graphical session to ask in; refusing to sign with `{key}`");
-        state.lock().await.forget_confirmation(id);
-        let _ = reply.send(false);
-        return;
-    }
-
-    // A signal only helps if something is listening. Give a running frontend a
-    // moment, then start one.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    if state.lock().await.confirmation_answer(id).is_none()
-        && let Err(e) = spawn_frontend(Prompt::No)
-    {
-        tracing::warn!("could not launch the frontend to ask: {e}");
-    }
-
-    let deadline = tokio::time::Instant::now() + CONFIRM_TIMEOUT;
-    let answer = loop {
-        if let Some(answer) = state.lock().await.confirmation_answer(id) {
-            break answer;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::info!("confirmation for `{key}` timed out; refusing");
-            break false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    };
-    state.lock().await.forget_confirmation(id);
-    let _ = reply.send(answer);
-}
-
+/// Signing confirmations do not come through here: see [`crate::frontend`].
 pub async fn serve_prompts(
     connection: zbus::Connection,
     state: SharedState,
     mut requests: tokio::sync::mpsc::Receiver<crate::service::PromptRequest>,
 ) {
     while let Some(request) = requests.recv().await {
-        let reply = match request {
-            crate::service::PromptRequest::Unlock { reply } => reply,
-            crate::service::PromptRequest::ConfirmSigning { key, reply } => {
-                confirm_signing(&connection, &state, key, reply).await;
-                continue;
-            }
-        };
+        let reply = request.reply;
 
         if !state.lock().await.is_locked() {
             let _ = reply.send(true);
@@ -332,7 +239,7 @@ pub async fn serve_prompts(
         // application asking for a secret on a machine with no locket window
         // open just waits for a prompt nobody can answer.
         if !wait_until_unlocked(&state, std::time::Duration::from_secs(2)).await {
-            match spawn_frontend(Prompt::Yes) {
+            match crate::frontend::spawn_prompt() {
                 Ok(path) => tracing::info!("no frontend responded; launched {path} to prompt"),
                 Err(e) => tracing::warn!("could not launch the frontend to prompt: {e}"),
             }
@@ -344,111 +251,6 @@ pub async fn serve_prompts(
         }
         let _ = reply.send(unlocked);
     }
-}
-
-/// Whether there is a graphical session to put a window in.
-fn has_display() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
-}
-
-/// Whether the frontend is being started only to ask for the passphrase.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Prompt {
-    Yes,
-    No,
-}
-
-/// Start the GUI so somebody can answer the prompt.
-///
-/// Resolved next to this executable before falling back to `PATH`: the daemon
-/// runs as a systemd user unit, whose environment is not the login shell's, so
-/// a `PATH` lookup is not something an unlock path should depend on.
-///
-/// [`Prompt::Yes`] passes `--prompt`, which starts the frontend with no main
-/// window at all: an application asking for one secret gets a dialog, not the
-/// whole password manager. A signing confirmation cannot use it — that window
-/// asks its question about an unlocked vault, which is not what `--prompt`
-/// is for.
-///
-/// Under systemd the frontend is started through `systemd-run --user` rather
-/// than as a child. A child inherits the daemon unit's hardening — above all
-/// `MemoryDenyWriteExecute`, which stops Mesa's shader JIT ("JIT session error:
-/// Permission denied") — and lives in the daemon's cgroup. Either way the
-/// process we start is waited on, so it never lingers as a zombie.
-fn spawn_frontend(prompt: Prompt) -> std::io::Result<String> {
-    let (mut command, name) = frontend_command(prompt, launcher());
-    let mut child = command.spawn()?;
-    std::thread::Builder::new()
-        .name("locket-frontend-reaper".into())
-        .spawn(move || {
-            let _ = child.wait();
-        })?;
-    Ok(name)
-}
-
-/// How the frontend is started.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Launcher {
-    /// As a direct child: outside systemd, or where `systemd-run` is missing.
-    Direct,
-    /// As a transient user unit, through this `systemd-run`.
-    SystemdRun(std::path::PathBuf),
-}
-
-/// `systemd-run` when this process is itself a systemd unit, which is exactly
-/// when a child would inherit that unit's sandbox.
-fn launcher() -> Launcher {
-    if std::env::var_os("INVOCATION_ID").is_none() {
-        return Launcher::Direct;
-    }
-    ["/usr/bin/systemd-run", "/bin/systemd-run"]
-        .into_iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.is_file())
-        .map_or(Launcher::Direct, Launcher::SystemdRun)
-}
-
-/// The command [`spawn_frontend`] runs, and the name to log it under.
-///
-/// Split out so the argument list is something a test can look at: the
-/// difference between starting a dialog and starting the whole application is
-/// one flag, and losing it would show up as "an application asked for a secret
-/// and my password manager opened", which no test that stops at the daemon
-/// would catch.
-fn frontend_command(prompt: Prompt, launcher: Launcher) -> (std::process::Command, String) {
-    let sibling = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("locket")))
-        .filter(|p| p.is_file());
-
-    let candidate = match &sibling {
-        Some(p) => p.as_os_str().to_owned(),
-        None => std::ffi::OsString::from("locket"),
-    };
-    let mut command = match &launcher {
-        Launcher::Direct => std::process::Command::new(&candidate),
-        Launcher::SystemdRun(systemd_run) => {
-            let mut command = std::process::Command::new(systemd_run);
-            // `--setenv=NAME` with no value copies it from this environment:
-            // the window needs the display, and the user manager may not have
-            // been told about it.
-            command.args([
-                "--user",
-                "--collect",
-                "--quiet",
-                "--setenv=WAYLAND_DISPLAY",
-                "--setenv=DISPLAY",
-                "--setenv=XDG_RUNTIME_DIR",
-                "--",
-            ]);
-            command.arg(&candidate);
-            command
-        }
-    };
-    if prompt == Prompt::Yes {
-        command.arg("--prompt");
-    }
-    (command, candidate.to_string_lossy().into_owned())
 }
 
 async fn wait_until_unlocked(
@@ -493,45 +295,6 @@ mod tests {
         let start = std::time::Instant::now();
         assert!(wait_until_unlocked(&s, std::time::Duration::from_secs(5)).await);
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
-    }
-
-    /// An unlock request starts the frontend for the dialog, not for the
-    /// application: `--prompt` is what keeps a request for one secret from
-    /// opening the whole password manager.
-    #[test]
-    fn an_unlock_prompt_starts_the_frontend_with_prompt() {
-        let (command, _) = frontend_command(Prompt::Yes, Launcher::Direct);
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(args, ["--prompt"]);
-    }
-
-    /// Under systemd the frontend must not be the daemon's child: it would
-    /// inherit `MemoryDenyWriteExecute` and lose GPU shader compilation. The
-    /// transient unit still gets `--prompt`, as the last argument.
-    #[test]
-    fn under_systemd_the_frontend_starts_outside_the_daemons_sandbox() {
-        let (command, name) = frontend_command(
-            Prompt::Yes,
-            Launcher::SystemdRun("/usr/bin/systemd-run".into()),
-        );
-        assert_eq!(command.get_program(), "/usr/bin/systemd-run");
-        let args: Vec<_> = command
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(args[0], "--user");
-        let separator = args.iter().position(|a| a == "--").unwrap();
-        assert_eq!(args[separator + 1], name);
-        assert_eq!(args.last().unwrap(), "--prompt");
-        assert!(args.contains(&"--setenv=WAYLAND_DISPLAY".to_owned()));
-    }
-
-    /// A signing confirmation is asked about an *unlocked* vault, so it has no
-    /// passphrase to ask for and no business in the dialog.
-    #[test]
-    fn a_confirmation_starts_the_frontend_without_prompt() {
-        let (command, _) = frontend_command(Prompt::No, Launcher::Direct);
-        assert_eq!(command.get_args().count(), 0);
     }
 
     #[tokio::test]
