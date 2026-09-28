@@ -27,7 +27,14 @@ use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value};
 use zbus::{ObjectServer, fdo, interface};
 
+use crate::error::SecretError;
 use crate::{Error, Result, SessionStore};
+
+/// A standard D-Bus error, for the few answers the Secret Service
+/// specification does not name.
+fn fdo_error(error: fdo::Error) -> SecretError {
+    SecretError::ZBus(zbus::Error::FDO(Box::new(error)))
+}
 
 /// The `(oayays)` struct every secret crosses the bus in.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Value, OwnedValue)]
@@ -508,6 +515,11 @@ impl SecretService {
     }
 }
 
+/// Every method of the Secret Service interfaces returns [`SecretError`], whose
+/// variants carry the specification's own error names —
+/// `org.freedesktop.Secret.Error.IsLocked`, `NoSession`, `NoSuchObject`.
+/// libsecret branches on those names; a `Failed` with the name in its message
+/// is invisible to every client.
 #[interface(name = "org.freedesktop.Secret.Service")]
 impl SecretService {
     /// Negotiate a transport. `libsecret` calls this before anything else.
@@ -517,7 +529,7 @@ impl SecretService {
         input: OwnedValue,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> fdo::Result<(OwnedValue, OwnedObjectPath)> {
+    ) -> Result<(OwnedValue, OwnedObjectPath), SecretError> {
         // For `plain` the input is an empty string, so a failed byte-array
         // conversion is expected rather than an error.
         let peer_public: Option<Vec<u8>> = Vec::<u8>::try_from(input).ok();
@@ -527,8 +539,7 @@ impl SecretService {
             let mut state = self.state.lock().await;
             state
                 .sessions
-                .open(&algorithm, peer_public.as_deref(), owner)
-                .map_err(fdo::Error::from)?
+                .open(&algorithm, peer_public.as_deref(), owner)?
         };
 
         let output = if output.is_empty() {
@@ -536,7 +547,7 @@ impl SecretService {
         } else {
             OwnedValue::try_from(Value::from(output))
         }
-        .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        .map_err(zbus::Error::from)?;
 
         server
             .at(
@@ -557,13 +568,13 @@ impl SecretService {
         alias: String,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-    ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
+    ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
         let label = take_string(&properties, prop::COLLECTION_LABEL)
             .unwrap_or_else(|| "Unnamed".to_owned());
 
         let path = {
             let mut state = self.state.lock().await;
-            let vault = state.vault_mut().map_err(fdo::Error::from)?;
+            let vault = state.vault_mut()?;
 
             // The spec: a collection created for a well-known alias that
             // already has one is that collection, not a second one sharing it.
@@ -583,7 +594,7 @@ impl SecretService {
             }
             let id = collection.id;
             vault.add_collection(collection);
-            state.persist().map_err(fdo::Error::from)?;
+            state.persist()?;
             collection_path(id)
         };
 
@@ -597,7 +608,7 @@ impl SecretService {
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
-    ) -> fdo::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> {
+    ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), SecretError> {
         // A locked locket vault cannot be enumerated at all: labels and
         // attributes live inside the sealed body, which is the point — nothing
         // about your secrets leaks at rest. gnome-keyring can list locked items
@@ -606,12 +617,10 @@ impl SecretService {
         // The consequence is that returning "no matches" here would be a lie
         // that clients believe: libsecret would report the secret as missing
         // rather than prompting. So ask for an unlock and wait.
-        ServiceState::ensure_unlocked(&self.state)
-            .await
-            .map_err(fdo::Error::from)?;
+        ServiceState::ensure_unlocked(&self.state).await?;
 
         let state = self.state.lock().await;
-        let vault = state.vault().map_err(fdo::Error::from)?;
+        let vault = state.vault()?;
 
         let query: std::collections::BTreeMap<String, String> = attributes.into_iter().collect();
         let mut unlocked = Vec::new();
@@ -627,7 +636,7 @@ impl SecretService {
         &self,
         objects: Vec<OwnedObjectPath>,
         #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
+    ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), SecretError> {
         let state = self.state.lock().await;
         if !state.is_locked() {
             return Ok((objects, null_path()));
@@ -636,7 +645,7 @@ impl SecretService {
         // Locked: hand back a Prompt the client must call `Prompt()` on. That
         // is what lets the unlock dialog be raised by *our* UI at a moment the
         // user is expecting it, rather than from a background D-Bus call.
-        let path = state.next_prompt_path().map_err(fdo::Error::from)?;
+        let path = state.next_prompt_path()?;
         drop(state);
 
         server
@@ -656,7 +665,7 @@ impl SecretService {
         &self,
         objects: Vec<OwnedObjectPath>,
         #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
+    ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), SecretError> {
         {
             let mut state = self.state.lock().await;
             state.lock_vault();
@@ -667,7 +676,10 @@ impl SecretService {
 
     /// Drop the DEK and every session. The vault must be reopened from the
     /// passphrase after this.
-    async fn lock_service(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<()> {
+    async fn lock_service(
+        &self,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> Result<(), SecretError> {
         {
             let mut state = self.state.lock().await;
             state.lock_vault();
@@ -677,26 +689,27 @@ impl SecretService {
         Ok(())
     }
 
-    async fn change_lock(&self, _collection: OwnedObjectPath) -> fdo::Result<OwnedObjectPath> {
+    async fn change_lock(
+        &self,
+        _collection: OwnedObjectPath,
+    ) -> Result<OwnedObjectPath, SecretError> {
         // Changing the passphrase is a first-class UI flow, not something a
         // random bus peer gets to trigger headlessly.
-        Err(fdo::Error::NotSupported(
+        Err(fdo_error(fdo::Error::NotSupported(
             "change the passphrase from the locket application".into(),
-        ))
+        )))
     }
 
     async fn get_secrets(
         &self,
         items: Vec<OwnedObjectPath>,
         session: OwnedObjectPath,
-    ) -> fdo::Result<HashMap<OwnedObjectPath, SecretStruct>> {
-        ServiceState::ensure_unlocked(&self.state)
-            .await
-            .map_err(fdo::Error::from)?;
+    ) -> Result<HashMap<OwnedObjectPath, SecretStruct>, SecretError> {
+        ServiceState::ensure_unlocked(&self.state).await?;
 
         let state = self.state.lock().await;
-        let vault = state.vault().map_err(fdo::Error::from)?;
-        let sess = state.sessions.get(&session).map_err(fdo::Error::from)?;
+        let vault = state.vault()?;
+        let sess = state.sessions.get(&session)?;
 
         let mut out = HashMap::new();
         for path in items {
@@ -706,9 +719,7 @@ impl SecretService {
             let Some(item) = vault.item(item_id) else {
                 continue;
             };
-            let (parameters, value) = sess
-                .encode(&item.secret_bytes())
-                .map_err(fdo::Error::from)?;
+            let (parameters, value) = sess.encode(&item.secret_bytes())?;
             out.insert(
                 path,
                 SecretStruct {
@@ -722,7 +733,7 @@ impl SecretService {
         Ok(out)
     }
 
-    async fn read_alias(&self, name: String) -> fdo::Result<OwnedObjectPath> {
+    async fn read_alias(&self, name: String) -> Result<OwnedObjectPath, SecretError> {
         // Answered from the plaintext index when locked. Returning `/` here
         // tells a client the collection does not exist, which is a very
         // different claim from "it exists and is locked".
@@ -740,10 +751,10 @@ impl SecretService {
         name: String,
         collection: OwnedObjectPath,
         #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), SecretError> {
         {
             let mut state = self.state.lock().await;
-            let vault = state.vault_mut().map_err(fdo::Error::from)?;
+            let vault = state.vault_mut()?;
             let target = parse_collection_path(collection.as_str());
 
             for c in &mut vault.data_mut().collections {
@@ -754,7 +765,7 @@ impl SecretService {
                     c.alias = Some(name.clone());
                 }
             }
-            state.persist().map_err(fdo::Error::from)?;
+            state.persist()?;
         }
         // `/aliases/<name>` has to follow: libsecret addresses it directly.
         sync_objects(server, &self.state).await?;
@@ -805,29 +816,29 @@ impl CollectionIface {
     async fn delete(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<OwnedObjectPath> {
+    ) -> Result<OwnedObjectPath, SecretError> {
         {
             let mut state = self.state.lock().await;
-            let vault = state.vault_mut().map_err(fdo::Error::from)?;
+            let vault = state.vault_mut()?;
             let data = vault.data_mut();
 
             let Some(pos) = data.collections.iter().position(|c| c.id == self.id) else {
-                return Err(fdo::Error::UnknownObject("no such collection".into()));
+                return Err(SecretError::NoSuchObject("no such collection".into()));
             };
             // Deleting a collection deletes every item in it — through the
             // trash, item by item, because a whole collection wiped by one
             // call is exactly the accident the trash exists to survive.
             if data.collections[pos].items.iter().any(Item::is_internal) {
-                return Err(fdo::Error::AccessDenied(
+                return Err(fdo_error(fdo::Error::AccessDenied(
                     "this collection holds an item locket keeps for its own use".into(),
-                ));
+                )));
             }
             let item_ids: Vec<Uuid> = data.collections[pos].items.iter().map(|i| i.id).collect();
             for id in &item_ids {
                 data.trash_item(*id);
             }
             data.collections.remove(pos);
-            state.persist().map_err(fdo::Error::from)?;
+            state.persist()?;
         }
 
         // Its items, its own path and any alias it held all come off.
@@ -838,18 +849,15 @@ impl CollectionIface {
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
-    ) -> Result<Vec<OwnedObjectPath>, crate::error::SecretError> {
+    ) -> Result<Vec<OwnedObjectPath>, SecretError> {
         ServiceState::ensure_unlocked(&self.state).await?;
 
         let state = self.state.lock().await;
-        // If the user declined or the prompt timed out, this is a real
-        // IsLocked error *name*, so libsecret knows to unlock and retry rather
-        // than treating it as a hard failure or an absent secret.
-        let vault = state.vault().map_err(crate::error::SecretError::from)?;
+        let vault = state.vault()?;
         let collection = vault
             .data()
             .collection(self.id)
-            .ok_or_else(|| crate::error::SecretError::NoSuchObject("no such collection".into()))?;
+            .ok_or_else(|| SecretError::NoSuchObject("no such collection".into()))?;
 
         let query: std::collections::BTreeMap<String, String> = attributes.into_iter().collect();
         Ok(collection
@@ -868,12 +876,10 @@ impl CollectionIface {
         replace: bool,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-    ) -> fdo::Result<(OwnedObjectPath, OwnedObjectPath)> {
+    ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
         // Writes prompt too. An application that is told "locked" when it tries
         // to save typically discards the secret it was holding.
-        ServiceState::ensure_unlocked(&self.state)
-            .await
-            .map_err(fdo::Error::from)?;
+        ServiceState::ensure_unlocked(&self.state).await?;
 
         let label = take_string(&properties, prop::ITEM_LABEL).unwrap_or_default();
         let attributes = take_attributes(&properties, prop::ITEM_ATTRIBUTES);
@@ -883,23 +889,18 @@ impl CollectionIface {
             let mut state = self.state.lock().await;
 
             let plaintext = {
-                let session = state
-                    .sessions
-                    .get(&secret.session)
-                    .map_err(fdo::Error::from)?;
-                session
-                    .decode(&secret.parameters, &secret.value)
-                    .map_err(fdo::Error::from)?
+                let session = state.sessions.get(&secret.session)?;
+                session.decode(&secret.parameters, &secret.value)?
             };
             // Kept as bytes: a Secret Service secret is a byte array, and a
             // lossy conversion here destroys every binary one.
             let plaintext = plaintext.to_vec();
 
-            let vault = state.vault_mut().map_err(fdo::Error::from)?;
+            let vault = state.vault_mut()?;
             let collection = vault
                 .data_mut()
                 .collection_mut(self.id)
-                .ok_or_else(|| fdo::Error::UnknownObject("no such collection".into()))?;
+                .ok_or_else(|| SecretError::NoSuchObject("no such collection".into()))?;
 
             // `replace` means "overwrite the item with identical attributes",
             // which is how clients avoid piling up duplicates on every save.
@@ -939,7 +940,7 @@ impl CollectionIface {
                 }
             };
             collection.modified = now();
-            state.persist().map_err(fdo::Error::from)?;
+            state.persist()?;
             (item_path(self.id, id), existing.is_some())
         };
 
@@ -1045,16 +1046,16 @@ impl ItemIface {
     async fn delete(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
-    ) -> fdo::Result<OwnedObjectPath> {
+    ) -> Result<OwnedObjectPath, SecretError> {
         {
             let mut state = self.state.lock().await;
-            let vault = state.vault_mut().map_err(fdo::Error::from)?;
-            refuse_internal(vault.item(self.id))?;
+            let vault = state.vault_mut()?;
+            refuse_internal(vault.item(self.id)).map_err(fdo_error)?;
             // Soft-delete. To this client — and every other one — the item is
             // gone: the trash lives outside the collections that SearchItems
             // and the properties walk, so only locket's own trash UI sees it.
             vault.trash_item(self.id);
-            state.persist().map_err(fdo::Error::from)?;
+            state.persist()?;
         }
         sync_objects(server, &self.state).await?;
         Ok(null_path())
@@ -1066,21 +1067,17 @@ impl ItemIface {
     /// this method the body signature `(oayays)` — four top-level arguments.
     /// The spec wants one argument of type `(oayays)`, i.e. body `((oayays))`,
     /// and libsecret checks. Wrapping in a 1-tuple restores the nesting.
-    async fn get_secret(&self, session: OwnedObjectPath) -> fdo::Result<(SecretStruct,)> {
-        ServiceState::ensure_unlocked(&self.state)
-            .await
-            .map_err(fdo::Error::from)?;
+    async fn get_secret(&self, session: OwnedObjectPath) -> Result<(SecretStruct,), SecretError> {
+        ServiceState::ensure_unlocked(&self.state).await?;
 
         let state = self.state.lock().await;
-        let vault = state.vault().map_err(fdo::Error::from)?;
-        let sess = state.sessions.get(&session).map_err(fdo::Error::from)?;
+        let vault = state.vault()?;
+        let sess = state.sessions.get(&session)?;
         let item = vault
             .item(self.id)
-            .ok_or_else(|| fdo::Error::UnknownObject("no such item".into()))?;
+            .ok_or_else(|| SecretError::NoSuchObject("no such item".into()))?;
 
-        let (parameters, value) = sess
-            .encode(&item.secret_bytes())
-            .map_err(fdo::Error::from)?;
+        let (parameters, value) = sess.encode(&item.secret_bytes())?;
         Ok((SecretStruct {
             session,
             parameters,
@@ -1089,34 +1086,27 @@ impl ItemIface {
         },))
     }
 
-    async fn set_secret(&self, secret: SecretStruct) -> fdo::Result<()> {
-        ServiceState::ensure_unlocked(&self.state)
-            .await
-            .map_err(fdo::Error::from)?;
+    async fn set_secret(&self, secret: SecretStruct) -> Result<(), SecretError> {
+        ServiceState::ensure_unlocked(&self.state).await?;
 
         let mut state = self.state.lock().await;
         let plaintext = {
-            let session = state
-                .sessions
-                .get(&secret.session)
-                .map_err(fdo::Error::from)?;
-            session
-                .decode(&secret.parameters, &secret.value)
-                .map_err(fdo::Error::from)?
+            let session = state.sessions.get(&secret.session)?;
+            session.decode(&secret.parameters, &secret.value)?
         };
         let plaintext = plaintext.to_vec();
 
-        let vault = state.vault_mut().map_err(fdo::Error::from)?;
-        refuse_internal(vault.item(self.id))?;
+        let vault = state.vault_mut()?;
+        refuse_internal(vault.item(self.id)).map_err(fdo_error)?;
         let item = vault
             .item_mut(self.id)
-            .ok_or_else(|| fdo::Error::UnknownObject("no such item".into()))?;
+            .ok_or_else(|| SecretError::NoSuchObject("no such item".into()))?;
         // SetSecret is an edit: file the value being overwritten.
         item.record_revision();
         item.set_secret_bytes(&plaintext);
         item.content_type = secret.content_type;
         item.touch();
-        state.persist().map_err(fdo::Error::from)?;
+        state.persist()?;
         Ok(())
     }
 
@@ -1246,7 +1236,7 @@ pub struct SessionIface {
 
 #[interface(name = "org.freedesktop.Secret.Session")]
 impl SessionIface {
-    async fn close(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<()> {
+    async fn close(&self, #[zbus(object_server)] server: &ObjectServer) -> Result<(), SecretError> {
         self.state.lock().await.sessions.close(&self.path);
         let _ = server.remove::<SessionIface, _>(&self.path).await;
         Ok(())
@@ -1274,7 +1264,7 @@ impl PromptIface {
         _window_id: String,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), SecretError> {
         let sender = self.state.lock().await.prompts.clone();
 
         let granted = match sender {
@@ -1291,11 +1281,10 @@ impl PromptIface {
         };
 
         let result = if granted {
-            OwnedValue::try_from(Value::from(self.objects.clone()))
-                .map_err(|e| fdo::Error::Failed(e.to_string()))?
+            OwnedValue::try_from(Value::from(self.objects.clone())).map_err(zbus::Error::from)?
         } else {
             OwnedValue::try_from(Value::from(Vec::<OwnedObjectPath>::new()))
-                .map_err(|e| fdo::Error::Failed(e.to_string()))?
+                .map_err(zbus::Error::from)?
         };
 
         PromptIface::completed(&emitter, !granted, result).await?;
@@ -1307,9 +1296,9 @@ impl PromptIface {
         &self,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-    ) -> fdo::Result<()> {
+    ) -> Result<(), SecretError> {
         let empty = OwnedValue::try_from(Value::from(Vec::<OwnedObjectPath>::new()))
-            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+            .map_err(zbus::Error::from)?;
         PromptIface::completed(&emitter, true, empty).await?;
         let _ = server.remove::<PromptIface, _>(&self.path).await;
         Ok(())

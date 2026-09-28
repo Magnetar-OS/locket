@@ -67,6 +67,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   was quietly dropped. A desktop notification says so too. Every way of
   locking the vault (idle, screen lock, suspend, shutdown, a client's
   `Lock`) now saves anything pending first.
+- Every Secret Service method now answers with the specification's error
+  names (`org.freedesktop.Secret.Error.IsLocked`, `NoSession`,
+  `NoSuchObject`). Only one method did before; the rest answered a generic
+  `Failed` for a locked vault and `UnknownObject` for a missing session,
+  which libsecret cannot tell apart from a hard failure.
 
 ## [1.2.0] - 2026-09-22
 

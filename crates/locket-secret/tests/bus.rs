@@ -288,3 +288,38 @@ async fn a_store_that_did_not_reach_the_disk_is_an_error() {
         "the other writer's change was not picked up"
     );
 }
+
+/// libsecret decides between "unlock and retry" and "give up" on the D-Bus
+/// error *name*. Only `Collection.SearchItems` used to return the
+/// specification's names; everything else answered a generic `Failed` for a
+/// locked vault and `UnknownObject` for a missing session.
+#[tokio::test]
+async fn errors_carry_the_secret_service_names() {
+    use std::collections::HashMap;
+    use zbus::zvariant::OwnedObjectPath;
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let service = client.service().await;
+
+    // A session nobody opened.
+    let bogus = OwnedObjectPath::try_from("/org/freedesktop/secrets/session/s999").unwrap();
+    let result: zbus::Result<HashMap<OwnedObjectPath, locket_secret::service::SecretStruct>> =
+        service
+            .call("GetSecrets", &(Vec::<OwnedObjectPath>::new(), &bogus))
+            .await;
+    assert_eq!(
+        locket_secret::testing::error_name(&result.unwrap_err()),
+        "org.freedesktop.Secret.Error.NoSession"
+    );
+
+    // Locked, with no frontend to ask: the answer is IsLocked, by name.
+    let () = client.manager().await.call("Lock", &()).await.unwrap();
+    let result: zbus::Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>)> = service
+        .call("SearchItems", &(HashMap::<String, String>::new(),))
+        .await;
+    assert_eq!(
+        locket_secret::testing::error_name(&result.unwrap_err()),
+        "org.freedesktop.Secret.Error.IsLocked"
+    );
+}
