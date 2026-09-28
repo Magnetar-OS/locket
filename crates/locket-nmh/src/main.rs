@@ -11,6 +11,7 @@
 
 mod protocol;
 
+use locket_secret::frontend::{self, Question};
 use protocol::{Match, Request, Response};
 use zbus::zvariant::OwnedObjectPath;
 
@@ -68,14 +69,28 @@ struct SecretStruct {
     content_type: String,
 }
 
-struct Host {
-    connection: zbus::Connection,
-    session: OwnedObjectPath,
+/// Who is asked before a password leaves.
+trait Presence {
+    async fn allow(&self, question: &Question) -> bool;
 }
 
-impl Host {
-    async fn connect() -> Option<Self> {
-        let connection = zbus::Connection::session().await.ok()?;
+/// The person at the keyboard, through locket's own dialog.
+struct Dialog;
+
+impl Presence for Dialog {
+    async fn allow(&self, question: &Question) -> bool {
+        frontend::ask(question, frontend::CONFIRM_TIMEOUT).await
+    }
+}
+
+struct Host<P> {
+    connection: zbus::Connection,
+    session: OwnedObjectPath,
+    presence: P,
+}
+
+impl<P: Presence> Host<P> {
+    async fn connect(connection: zbus::Connection, presence: P) -> Option<Self> {
         let service = SecretServiceProxy::new(&connection).await.ok()?;
         // `plain` is fine: this is a local client on the user's own bus, and
         // the extension is the untrusted party here, not the transport.
@@ -84,6 +99,7 @@ impl Host {
         Some(Self {
             connection,
             session,
+            presence,
         })
     }
 
@@ -197,6 +213,20 @@ impl Host {
                 message: "that entry is not saved for this site".into(),
             };
         }
+
+        // The origin check above only protects an honest extension from a tab
+        // that navigated. The extension itself names `url`, and a hostile one
+        // can name any site it likes; what it cannot do is answer this
+        // dialog, which locket puts up and reads the answer from itself.
+        let question = Question::Fill {
+            site: protocol::origin_of(url),
+            entry: label,
+        };
+        if !self.presence.allow(&question).await {
+            tracing::info!("a fill was not allowed");
+            return Response::Refused;
+        }
+
         match item.get_secret(&self.session).await {
             Ok((secret,)) => match String::from_utf8(secret.value) {
                 Ok(password) => Response::Secret {
@@ -219,7 +249,7 @@ impl Host {
     }
 }
 
-impl Host {
+impl<P: Presence> Host<P> {
     /// Store a submitted credential: update the entry already saved for this
     /// origin and username, or create a new one in the default collection.
     async fn save(&self, url: &str, username: &str, password: &str) -> Response {
@@ -266,6 +296,16 @@ impl Host {
             let Some(item) = self.item(&path).await else {
                 continue;
             };
+            // Saving what is already there is a no-op, not a revision. The
+            // extension no longer reads the stored password to decide whether
+            // a submitted one is new — that would mean a confirmation dialog on
+            // every login — so the comparison happens here, and nothing about
+            // the stored value leaves this process.
+            if let Ok((current,)) = item.get_secret(&self.session).await
+                && zeroize::Zeroizing::new(current.value).as_slice() == secret.value
+            {
+                return Response::Unchanged;
+            }
             return match item.set_secret(&secret).await {
                 Ok(()) => Response::Saved { updated: true },
                 Err(e) => Response::Error {
@@ -321,6 +361,12 @@ impl Host {
     }
 }
 
+/// The Secret Service on the session bus, asking through locket's dialog.
+async fn connect() -> Option<Host<Dialog>> {
+    let connection = zbus::Connection::session().await.ok()?;
+    Host::connect(connection, Dialog).await
+}
+
 /// Is a daemon there, and is it unlocked?
 async fn status() -> Response {
     match locket_secret::client::status().await {
@@ -369,7 +415,7 @@ async fn main() {
 
         let response = match request {
             Request::Status => status().await,
-            other => match Host::connect().await {
+            other => match connect().await {
                 None => Response::Error {
                     message: "no secret service is running".into(),
                 },
@@ -402,5 +448,132 @@ async fn main() {
             tracing::error!("could not reply: {e}");
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use locket_core::model::{Item, ItemKind};
+    use locket_secret::testing::Daemon;
+
+    /// Answers every question the same way, and counts them.
+    struct Answer {
+        allow: bool,
+        asked: std::cell::Cell<u32>,
+    }
+
+    impl Answer {
+        fn new(allow: bool) -> Self {
+            Self {
+                allow,
+                asked: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl Presence for &Answer {
+        async fn allow(&self, _question: &Question) -> bool {
+            self.asked.set(self.asked.get() + 1);
+            self.allow
+        }
+    }
+
+    /// A daemon holding one login for github.com, and its item id.
+    async fn daemon_with_login() -> (Daemon, String) {
+        let daemon = Daemon::start().await;
+        let id = {
+            let mut state = daemon.state.lock().await;
+            let vault = state.vault.as_mut().unwrap();
+            let mut item = Item::new(ItemKind::Login, "GitHub")
+                .with_attribute("url", "https://github.com")
+                .with_attribute("username", "ada");
+            item.set_secret_bytes(b"hunter2");
+            let collection = vault.data().collections[0].id;
+            let id = vault.add_item(collection, item).unwrap();
+            vault.save().unwrap();
+            locket_secret::service::item_path(collection, id).to_string()
+        };
+        locket_secret::service::register_vault_objects(
+            daemon.server.object_server(),
+            &daemon.state,
+        )
+        .await
+        .unwrap();
+        (daemon, id)
+    }
+
+    /// The extension names the page, so a hostile one can name any site and
+    /// the origin check passes. What it cannot do is answer locket's dialog:
+    /// without the person's yes, no password leaves.
+    #[tokio::test]
+    async fn a_password_is_released_only_when_the_person_allows_it() {
+        let (daemon, id) = daemon_with_login().await;
+
+        let refuse = Answer::new(false);
+        let host = Host::connect(daemon.bus.connect().await, &refuse)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.get(&id, "https://github.com/login").await,
+            Response::Refused
+        );
+        assert_eq!(refuse.asked.get(), 1, "the person was never asked");
+
+        let allow = Answer::new(true);
+        let host = Host::connect(daemon.bus.connect().await, &allow)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.get(&id, "https://github.com/login").await,
+            Response::Secret {
+                id: id.clone(),
+                password: "hunter2".into()
+            }
+        );
+    }
+
+    /// A page the entry is not saved for is refused before anyone is asked:
+    /// a dialog offering github.com's password to another site would be a
+    /// question with only one safe answer.
+    #[tokio::test]
+    async fn another_sites_page_is_refused_without_asking() {
+        let (daemon, id) = daemon_with_login().await;
+        let allow = Answer::new(true);
+        let host = Host::connect(daemon.bus.connect().await, &allow)
+            .await
+            .unwrap();
+        assert!(matches!(
+            host.get(&id, "https://github.com.evil.test/").await,
+            Response::Error { .. }
+        ));
+        assert_eq!(allow.asked.get(), 0);
+    }
+
+    /// Saving what is already stored writes nothing and asks nobody.
+    #[tokio::test]
+    async fn saving_the_stored_password_again_changes_nothing() {
+        let (daemon, _) = daemon_with_login().await;
+        let refuse = Answer::new(false);
+        let host = Host::connect(daemon.bus.connect().await, &refuse)
+            .await
+            .unwrap();
+        assert_eq!(
+            host.save("https://github.com/session", "ada", "hunter2")
+                .await,
+            Response::Unchanged
+        );
+        assert_eq!(refuse.asked.get(), 0);
+        let state = daemon.state.lock().await;
+        let item = state
+            .vault
+            .as_ref()
+            .unwrap()
+            .data()
+            .all_items()
+            .find(|(_, i)| i.label == "GitHub")
+            .map(|(_, i)| i.clone())
+            .unwrap();
+        assert!(item.history.is_empty(), "an unchanged save made a revision");
     }
 }

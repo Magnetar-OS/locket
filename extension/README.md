@@ -44,9 +44,16 @@ The popup lists credentials matching the current page and fills on click. It
 never fills automatically, never asks for your passphrase, and shows nothing
 while the vault is locked — unlock in locket itself.
 
+**Every fill is confirmed in locket.** Clicking **Fill** asks the native host
+for one password, and the host puts up a locket dialog naming the entry and
+the site before it hands anything over. The extension cannot answer that
+dialog: a compromised extension can ask for passwords, but each one needs
+you to say yes. It can still list the labels and usernames saved for any
+site it names, because the host has no independent view of your tabs.
+
 **Saving** is offer-only. A content script notices a login form being
-submitted; if the vault does not already hold that exact value for that
-site, the toolbar icon gains a badge and the popup's next opening asks
+submitted; unless it is the login locket just filled, the toolbar icon gains
+a badge and the popup's next opening asks
 "Save login for this site?" — nothing is written until you say so, and
 "Not now" forgets it. The pending credential waits in the browser's
 session storage, which is memory-backed and gone when the browser closes.

@@ -9,9 +9,13 @@
 //! never exposes the vault wholesale:
 //!
 //! * `Search` returns *metadata only* — labels and usernames, never a
-//!   password — and only for entries matching the origin the caller names.
-//! * `Get` returns exactly one secret, for one id the extension already had to
-//!   learn from a matching `Search`.
+//!   password — for entries matching the origin the caller names. The host
+//!   has no view of the browser's tabs, so "the origin the caller names" is
+//!   whatever the extension says: a hostile extension can list the labels
+//!   and usernames saved for any site it cares to ask about.
+//! * `Get` returns exactly one secret, and only after the person at the
+//!   keyboard allowed it in a dialog of locket's own that names the entry and
+//!   the site. The extension cannot answer that dialog; it can only ask.
 //! * Nothing unlocks the vault. A locked vault answers `Locked` and stops;
 //!   the passphrase is typed into locket's own window, never a web page.
 
@@ -50,6 +54,10 @@ pub enum Request {
     /// id alone would be the whole authorisation: a tab that navigated between
     /// the search and the click would be filled with another site's password,
     /// which is the exact failure autofill is supposed to prevent.
+    ///
+    /// Then it asks the person, in locket's own dialog, and answers `Refused`
+    /// unless they allow it: `url` comes from the extension, so the origin
+    /// check cannot stop an extension that is itself hostile.
     Get { id: String, url: String },
     /// Store a credential the user just submitted, after they confirmed the
     /// save in the popup.
@@ -88,8 +96,13 @@ pub enum Response {
     Saved {
         updated: bool,
     },
+    /// The entry saved for this origin and username already holds exactly
+    /// this password; nothing was written.
+    Unchanged,
     /// The vault is locked; the user must unlock in locket itself.
     Locked,
+    /// The person did not allow the secret out: refused, or did not answer.
+    Refused,
     Error {
         message: String,
     },

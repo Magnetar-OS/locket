@@ -24,10 +24,13 @@ async function renderPending() {
   save.onclick = async () => {
     save.disabled = true;
     const r = await send({ type: "save-pending" });
-    if (r.type === "saved") {
-      text.querySelector(".label").textContent = r.updated
-        ? "Updated the saved login."
-        : "Saved.";
+    if (r.type === "saved" || r.type === "unchanged") {
+      text.querySelector(".label").textContent =
+        r.type === "unchanged"
+          ? "Already saved."
+          : r.updated
+            ? "Updated the saved login."
+            : "Saved.";
       actions.remove();
       setTimeout(() => saveBox.textContent = "", 1200);
     } else {
@@ -87,6 +90,7 @@ async function renderPending() {
         url: tab.url,
       });
       if (r.type === "ok") window.close();
+      else if (r.type === "refused") out.textContent = "Not allowed in locket.";
       else out.textContent = r.message || "Could not fill.";
     };
     row.append(text, fill);

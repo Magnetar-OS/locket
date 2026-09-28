@@ -34,7 +34,7 @@ model underneath it.
 | `pam_locket.so` | no | the unlock socket's peer credentials | the login stack, as root |
 | SSH agent (in `locketd`) | via the daemon | nothing about its callers | any process running as you |
 | Secret portal backend | via the daemon | `xdg-desktop-portal` to name the app id | sandboxed applications |
-| `locket-native-host` | **no** | nothing — treats the extension as hostile | the browser, one process per connection |
+| `locket-native-host` | **no** | nothing — treats the extension as hostile; a person's "Allow" in locket's own dialog gates every password | the browser, one process per connection |
 | Browser extension | no | nothing it is given | every page you visit |
 | `locket-applet` | no | nothing — an ordinary Secret Service client | the panel |
 
@@ -110,21 +110,39 @@ What is still true in this position:
 
 ### D. A hostile browser extension
 
-Assumed hostile by construction. The native host never exposes the vault:
-`Search` returns labels and usernames for the requested origin only,
-`Get` releases one secret and **re-checks the origin at release time**
-against the page it is going into — the id from a previous search is not an
-authorisation, because a tab can navigate in between. Origin matching is on
-suffix boundaries, so `example.com.evil.test` and `notexample.com` do not
-match a credential for `example.com`, and a subdomain credential does not
-leak to its parent. Nothing unlocks the vault; a locked vault answers
-`Locked` and stops.
+Assumed hostile by construction — it runs beside every page and is one
+supply-chain compromise away. What makes that hard is that the native host
+has **no independent view of the browser**: the page URL in every request is
+a field the extension fills in. So the host's guarantees are the ones that
+hold whatever the extension claims:
+
+- **No password leaves without the person.** `Get` puts up a locket dialog
+  (`locket --confirm-fill <site> <entry>`, the same private-pipe mechanism as
+  SSH confirmation) naming the entry and the site, and releases the one
+  secret only on "Allow once"; a refusal, a closed dialog, 30 seconds of
+  silence or no graphical session all answer `Refused`. The extension can
+  ask, and cannot answer. A hostile extension naming `github.com` gets a
+  dialog saying so — not the password.
+- **Metadata is not protected against it.** `Search` returns labels and
+  usernames — never passwords — for whatever origin it is asked about, and
+  a hostile extension can ask about every site it can think of. That the
+  vault holds a login for a site, and under which username, is disclosed to
+  a compromised extension without asking.
+- **The origin check protects an honest extension from a page**, not the
+  vault from the extension: `Get` re-checks the entry against the page it is
+  going into, so a tab that navigated between the listing and the click is
+  not filled with the previous site's password. Origin matching is on suffix
+  boundaries, so `example.com.evil.test` and `notexample.com` do not match a
+  credential for `example.com`, a subdomain credential does not leak to its
+  parent, and a URL without a host (`data:`, `file:`) matches nothing.
+- **Nothing unlocks the vault.** A locked vault answers `Locked` and stops.
 
 Writing is deliberately less guarded than reading — an attacker gains
 nothing by *adding* secrets — with one rule: an update lands only on an item
 already saved for that origin *and* username, so a write can never silently
 retarget another site's credential, and the value it replaces goes into the
-item's history.
+item's history. Saving the value already stored is a no-op; the comparison
+happens in the host and nothing about the stored value is returned.
 
 ### E. A sandboxed Flatpak application
 

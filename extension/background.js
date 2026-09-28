@@ -1,5 +1,6 @@
 // Talks to locket-native-host. Nothing here caches secrets: a password is
-// requested only when the user picks an entry, and is handed straight to the
+// requested only when the user picks an entry — and locket then asks them, in
+// its own dialog, whether to let it out — and is handed straight to the
 // content script for that one fill.
 const HOST = "com.magnetaros.locket";
 
@@ -36,21 +37,37 @@ async function setPending(pending) {
   }
 }
 
+// What this browser session last filled, per origin, so that submitting a
+// login locket has just filled is not offered back as a new one. Only a keyed
+// digest is kept, under a key that exists in this worker's memory and nowhere
+// else: never the password, and nothing that outlives the worker.
+//
+// This replaces reading the stored password back to compare, which is no
+// longer silent — every `get` asks the person in locket — and would put a
+// dialog in front of every login. A login typed by hand still gets the offer;
+// saving a value the vault already holds is a no-op on the host's side.
+const fillKey = crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, [
+  "sign",
+]);
+const filled = new Map();
+
+async function digest(username, password) {
+  const bytes = await crypto.subtle.sign(
+    "HMAC",
+    await fillKey,
+    new TextEncoder().encode(`${username}\0${password}`)
+  );
+  return btoa(String.fromCharCode(...new Uint8Array(bytes)));
+}
+
 // A form was submitted with a password in it. Decide whether it is worth
-// offering: a value identical to what the vault already holds is not.
+// offering: the login locket itself just filled is not.
 async function submitted(msg) {
   const status = await ask({ type: "status" });
   if (status.type !== "status" || !status.unlocked) return;
 
-  const matches = await ask({ type: "search", url: msg.url });
-  if (matches.type === "matches") {
-    const existing = matches.items.find((i) => i.username === msg.username);
-    if (existing) {
-      // Same username: only offer if the password actually changed.
-      const current = await ask({ type: "get", id: existing.id, url: msg.url });
-      if (current.type === "secret" && current.password === msg.password) return;
-    }
-  }
+  const site = origin(msg.url);
+  if (site && filled.get(site) === (await digest(msg.username, msg.password))) return;
 
   await setPending({
     url: msg.url,
@@ -89,7 +106,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
           username: pending.username,
           password: pending.password,
         });
-        if (saved.type === "saved") await setPending(null);
+        if (saved.type === "saved" || saved.type === "unchanged") await setPending(null);
         reply(saved);
         break;
       }
@@ -124,6 +141,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
           func: fillForm,
           args: [msg.username, secret.password],
         });
+        filled.set(origin(tab.url), await digest(msg.username, secret.password));
         reply({ type: "ok" });
         break;
       }

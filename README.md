@@ -881,12 +881,17 @@ alongside every page you visit and is one supply-chain compromise away from
 hostile. So the host never exposes the vault wholesale:
 
 * `search` returns metadata only — labels and usernames, never a password —
-  and only for entries matching the origin the caller names.
-* `get` returns exactly one secret, and re-checks the origin at that moment
-  against the page the secret is about to be typed into. The id is not the
-  authorisation: a tab can navigate between the popup opening and the click,
-  and an extension is assumed hostile. The extension checks the tab too, but
-  the host does not rely on that.
+  for entries matching the origin the caller names. The host cannot see the
+  browser's tabs, so that origin is the extension's word: a compromised
+  extension can list what is saved for any site it asks about.
+* `get` returns exactly one secret, and only after you allowed it in a locket
+  dialog naming the entry and the site (`locket --confirm-fill`, answered over
+  a pipe only the host holds). The extension can ask for a password; it
+  cannot say yes. Refusing, closing the dialog, or 30 seconds without an
+  answer returns `refused`.
+* Before asking, `get` re-checks the entry against the page the secret is
+  about to be typed into, so a tab that navigated between the popup opening
+  and the click is not filled with the previous site's password.
 * A secret that is not text is refused rather than converted lossily — some
   genuinely are binary, and none of those belong in a login form.
 * Nothing unlocks the vault. A locked vault answers `locked` and stops; the

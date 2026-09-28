@@ -468,6 +468,10 @@ dialog-ssh-title = Allow this SSH signature?
 dialog-ssh-body =
     Something on this machine is asking to authenticate with “{ $key }”. This key
     is set to ask every time, so nothing happens unless you allow it.
+dialog-fill-title = Fill this password?
+dialog-fill-body =
+    The browser extension wants the password of “{ $entry }” to type into a page
+    on { $site }. Nothing is handed over unless you allow it.
 dialog-allow-once = Allow once
 dialog-refuse = Refuse
 dialog-delete-title = Move to the trash?

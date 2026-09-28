@@ -6,7 +6,8 @@
 //!   was locked. The GUI is started with `--prompt`; the answer is the vault
 //!   becoming unlocked, which the daemon observes on its own.
 //! * **A confirmation.** One use of one secret needs a yes from a person: an
-//!   SSH signature with a `confirm-each-use` key. See [`ask`].
+//!   SSH signature with a `confirm-each-use` key, or a password the browser
+//!   extension wants to fill. See [`ask`].
 //!
 //! # Why a confirmation is its own process
 //!
@@ -38,7 +39,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-/// How long a confirmation waits. An `ssh` client is holding
+/// How long a confirmation waits. An `ssh` client, or a browser tab, is holding
 /// its request open on the other side of it; a use nobody has allowed after
 /// half a minute is one nobody asked for.
 pub const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,12 +49,17 @@ pub const ALLOW: &str = "allow\n";
 
 /// The flag that asks the frontend about one signature.
 pub const CONFIRM_SIGNING_FLAG: &str = "--confirm-signing";
+/// The flag that asks the frontend about one browser fill.
+pub const CONFIRM_FILL_FLAG: &str = "--confirm-fill";
 
 /// One use of a secret that needs a person's yes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Question {
     /// Sign with the SSH key known by this comment.
     Signing { key: String },
+    /// Hand the password of the entry labelled `entry` to the browser, to type
+    /// into a page on `site`.
+    Fill { site: String, entry: String },
 }
 
 impl Question {
@@ -61,6 +67,9 @@ impl Question {
     fn args(&self) -> Vec<OsString> {
         match self {
             Question::Signing { key } => vec![CONFIRM_SIGNING_FLAG.into(), key.into()],
+            Question::Fill { site, entry } => {
+                vec![CONFIRM_FILL_FLAG.into(), site.into(), entry.into()]
+            }
         }
     }
 }
@@ -294,6 +303,17 @@ mod tests {
             assert!(options.contains(&wanted.to_owned()), "{wanted} missing");
         }
         assert_eq!(command, ["--", &name, "--confirm-signing", "work laptop"]);
+    }
+
+    #[test]
+    fn a_fill_confirmation_names_the_site_and_the_entry() {
+        let question = Question::Fill {
+            site: "github.com".into(),
+            entry: "GitHub".into(),
+        };
+        let (command, _) =
+            frontend_command(Mode::Confirm(&question), Launcher::Direct, CONFIRM_TIMEOUT);
+        assert_eq!(args(&command), ["--confirm-fill", "github.com", "GitHub"]);
     }
 
     fn shell(script: &str) -> std::process::Command {

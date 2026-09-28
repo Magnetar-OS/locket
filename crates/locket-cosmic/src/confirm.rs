@@ -1,8 +1,9 @@
 //! The dialog that allows one use of one secret.
 //!
 //! Started by whatever needs the yes — `locketd` for an SSH signature with a
-//! `confirm-each-use` key — as `locket --confirm-signing <key>`. It is its own
-//! process, never a
+//! `confirm-each-use` key, `locket-native-host` for a password the browser
+//! extension wants to fill — as `locket --confirm-signing <key>` or
+//! `locket --confirm-fill <site> <entry>`. It is its own process, never a
 //! hand-off to a running window, and it answers on standard output: the line
 //! [`locket_secret::frontend::ALLOW`] and a clean exit, or nothing. The asking
 //! process holds the other end of that pipe and nobody else does, which is the
@@ -16,7 +17,7 @@ use cosmic::app::{Core, Task};
 use cosmic::iced::Length;
 use cosmic::prelude::*;
 use cosmic::widget;
-use locket_secret::frontend::{CONFIRM_SIGNING_FLAG, Question};
+use locket_secret::frontend::{CONFIRM_FILL_FLAG, CONFIRM_SIGNING_FLAG, Question};
 
 use crate::fl;
 
@@ -33,6 +34,13 @@ pub fn question_from_args(args: &[String]) -> Option<Result<Question, String>> {
         CONFIRM_SIGNING_FLAG => Some(match rest {
             [key] => Ok(Question::Signing { key: key.clone() }),
             _ => Err(format!("{CONFIRM_SIGNING_FLAG} takes one key name")),
+        }),
+        CONFIRM_FILL_FLAG => Some(match rest {
+            [site, entry] => Ok(Question::Fill {
+                site: site.clone(),
+                entry: entry.clone(),
+            }),
+            _ => Err(format!("{CONFIRM_FILL_FLAG} takes a site and an entry")),
         }),
         _ => None,
     }
@@ -102,6 +110,15 @@ impl cosmic::Application for Confirm {
                 fl!("dialog-ssh-title"),
                 fl!("dialog-ssh-body", key = key.clone()),
             ),
+            Question::Fill { site, entry } => (
+                "web-browser-symbolic",
+                fl!("dialog-fill-title"),
+                fl!(
+                    "dialog-fill-body",
+                    entry = entry.clone(),
+                    site = site.clone()
+                ),
+            ),
         };
         widget::dialog()
             .icon(widget::icon::from_name(icon).size(48))
@@ -138,6 +155,13 @@ mod tests {
             question_from_args(&args(&["--confirm-signing", "work"])),
             Some(Ok(Question::Signing { key: "work".into() }))
         );
+        assert_eq!(
+            question_from_args(&args(&["--confirm-fill", "github.com", "GitHub"])),
+            Some(Ok(Question::Fill {
+                site: "github.com".into(),
+                entry: "GitHub".into()
+            }))
+        );
     }
 
     /// A malformed confirmation start is still a confirmation start: it must
@@ -146,6 +170,10 @@ mod tests {
     fn a_malformed_confirmation_is_not_an_ordinary_start() {
         assert!(matches!(
             question_from_args(&args(&["--confirm-signing"])),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            question_from_args(&args(&["--confirm-fill", "github.com"])),
             Some(Err(_))
         ));
         assert_eq!(question_from_args(&args(&["--prompt"])), None);

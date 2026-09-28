@@ -14,6 +14,15 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   from a private pipe; `AnswerConfirm` and `ConfirmRequested` are gone, and
   the question no longer appears in the main window. Two signatures waiting
   at once each get their own dialog, and neither holds up an unlock prompt.
+- The browser extension can no longer take a password without you. The
+  native host released any saved password for whatever site the extension
+  named, so a compromised extension could collect every stored login
+  silently. Every fill now puts up a locket dialog naming the entry and the
+  site (`locket --confirm-fill`), and nothing is handed over unless you
+  allow it; the extension cannot answer that dialog. The extension no longer
+  reads a stored password back to decide whether to offer saving a login —
+  it remembers what it just filled instead — and saving a password the
+  vault already holds changes nothing.
 
 ### Fixed
 
