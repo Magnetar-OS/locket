@@ -147,11 +147,19 @@ pub fn write_message<W: std::io::Write>(writer: &mut W, response: &Response) -> 
 /// `www.` is dropped so a credential saved on `www.example.com` still matches
 /// `example.com`; anything unparseable falls back to the raw string so a bare
 /// hostname works too.
+///
+/// Only text that does not parse falls back. A URL that parses without a
+/// host (`data:`, `file:`, `about:`) has no origin and yields `""`: its text
+/// is the page's own, and `data:text/html,….example.com` would otherwise end
+/// in `.example.com` and pass [`origin_matches`].
 pub fn origin_of(url: &str) -> String {
-    let parsed = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned));
-    let host = parsed.unwrap_or_else(|| url.trim().to_owned());
+    let host = match url::Url::parse(url) {
+        Ok(parsed) => match parsed.host_str() {
+            Some(host) => host.to_owned(),
+            None => return String::new(),
+        },
+        Err(_) => url.trim().to_owned(),
+    };
     host.strip_prefix("www.").unwrap_or(&host).to_lowercase()
 }
 
@@ -278,6 +286,22 @@ mod tests {
         // leak to the parent.
         assert!(!origin_matches("mail.example.com", "example.com"));
         assert!(!origin_matches("", "example.com"));
+    }
+
+    /// A URL that parses but has no host — `data:`, `file:` — names no
+    /// origin. Treating its text as a hostname would run the suffix check
+    /// over characters the page chose.
+    #[test]
+    fn a_page_without_a_host_matches_nothing() {
+        assert!(!origin_matches(
+            "example.com",
+            "data:text/html,<form>login</form>.example.com"
+        ));
+        assert!(!origin_matches(
+            "example.com",
+            "file:///tmp/login.example.com"
+        ));
+        assert_eq!(origin_of("data:text/html,x.example.com"), "");
     }
 
     #[test]

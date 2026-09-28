@@ -16,6 +16,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   leaving the application's data encrypted under a key that no longer
   existed; the daemon now reloads before creating the key and hands out
   nothing it could not save.
+- The browser host no longer treats the text of a URL without a host
+  (`data:`, `file:`) as a site name, which let such a page match a
+  credential saved for a domain its text happened to end in.
+
 ## [1.2.0] - 2026-09-22
 
 ### Changed
