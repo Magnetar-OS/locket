@@ -55,20 +55,25 @@ zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 # --- Crypto ----------------------------------------------------------------
 # HELD BACK DELIBERATELY — do not `cargo upgrade --incompatible` these.
 #
-# chacha20poly1305, aes, cbc, hmac, sha2, sha1, hkdf and signature form one
-# RustCrypto generation (aead 0.5 / cipher 0.4 / digest 0.10 / signature 2).
-# Newer releases of all of them exist, but two crates we depend on have not
-# followed and have no newer release as of 2026-08:
+# argon2, chacha20poly1305, aes, cbc, hmac, sha2, sha1, hkdf, signature and
+# rsa form one RustCrypto generation (aead 0.5 / cipher 0.4 / digest 0.10 /
+# signature 2). Newer releases of all of them exist; what holds the block is
+# the SSH side, which has no stable release on the new generation as of
+# 2026-09-28:
 #
-#   * ssh-key 0.6.7 (newest) implements `Signer<Signature>` from signature 2.
-#     Bumping to signature 3 breaks the SSH agent with no forward fix.
-#   * argon2 0.5.3 (newest) is built on password-hash 0.5 / digest 0.10.
-#     Bumping sha2/hmac to the digest 0.11 line splits the tree.
+#   * ssh-key 0.6.7 (newest stable; 0.7 is still a release candidate)
+#     implements `Signer<Signature>` from signature 2. Bumping to signature 3
+#     breaks the SSH agent with no forward fix.
+#   * rsa 0.9.10 (newest stable; 0.10 is still a release candidate) is the
+#     generation ssh-key's own RSA support is built on.
 #
-# Upgrading anyway compiles nothing: aes 0.9/cbc 0.2 drop
-# `encrypt_padded_vec_mut`, and hmac 0.13 moves `new_from_slice` from `Mac` to
-# `KeyInit`. Revisit when ssh-key and argon2 publish against the new
-# generation, and move the whole block together.
+# argon2 is no longer a reason on its own — 0.6.0 is stable on digest 0.11 —
+# but it moves with the rest. Upgrading anyway compiles nothing: aes 0.9/cbc
+# 0.2 drop `encrypt_padded_vec_mut`, and hmac 0.13 moves `new_from_slice` from
+# `Mac` to `KeyInit`. Revisit when ssh-key 0.7 and rsa 0.10 are stable, and
+# move the whole block together. (The lock already carries the newer
+# generation beside this one, through keepass; holding this block is what
+# keeps the vault and agent code on the older one.)
 #
 # These carry exact `=` requirements on purpose: `cargo upgrade` treats a
 # pinned requirement as opt-out and skips it even with `--incompatible`
@@ -115,7 +120,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 rsa = { version = "=0.9.10", features = ["sha1", "sha2"] }
 ssh-key = { version = "=0.6.7", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std", "getrandom"] }
 signature = "=2.2.0"
-ssh-encoding = "0.3"
 
 # --- Serialization / errors / logging --------------------------------------
 serde = { version = "1", features = ["derive"] }
