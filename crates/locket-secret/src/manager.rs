@@ -99,6 +99,15 @@ impl Manager {
         Ok(())
     }
 
+    /// The person dismissed the unlock dialog: refuse the requests waiting
+    /// on it now. Their `Prompt`s complete with `dismissed = true`, which is
+    /// the Secret Service's way of saying no, instead of each client waiting
+    /// out its timeout.
+    async fn cancel_unlock(&self) -> fdo::Result<()> {
+        self.state.lock().await.unlock_refused.notify_waiters();
+        Ok(())
+    }
+
     /// Set the idle timeout, in seconds. 0 turns it off.
     ///
     /// The frontend owns this number — it is stored with the rest of the
@@ -195,11 +204,16 @@ impl Manager {
 /// prompt outstanding, resolves any pending prompt just the same.
 ///
 /// Signing confirmations do not come through here: see [`crate::frontend`].
+///
+/// `launch` starts a frontend when none answered the signal —
+/// [`crate::frontend::spawn_prompt`] in the daemon.
 pub async fn serve_prompts(
     connection: zbus::Connection,
     state: SharedState,
     mut requests: tokio::sync::mpsc::Receiver<crate::service::PromptRequest>,
+    launch: impl Fn() -> std::io::Result<String>,
 ) {
+    let refused = state.lock().await.unlock_refused.clone();
     while let Some(request) = requests.recv().await {
         let reply = request.reply;
 
@@ -227,17 +241,33 @@ pub async fn serve_prompts(
         // frontend a moment to react, then start one — otherwise an
         // application asking for a secret on a machine with no locket window
         // open just waits for a prompt nobody can answer.
-        if !wait_until_unlocked(&state, std::time::Duration::from_secs(2)).await {
-            match crate::frontend::spawn_prompt() {
-                Ok(path) => tracing::info!("no frontend responded; launched {path} to prompt"),
-                Err(e) => tracing::warn!("could not launch the frontend to prompt: {e}"),
+        let answer = async {
+            if !wait_until_unlocked(&state, std::time::Duration::from_secs(2)).await {
+                match launch() {
+                    Ok(path) => {
+                        tracing::info!("no frontend responded; launched {path} to prompt");
+                    }
+                    Err(e) => tracing::warn!("could not launch the frontend to prompt: {e}"),
+                }
             }
-        }
-
-        let unlocked = wait_until_unlocked(&state, PROMPT_TIMEOUT).await;
-        if !unlocked {
-            tracing::info!("unlock request timed out after {PROMPT_TIMEOUT:?}");
-        }
+            let unlocked = wait_until_unlocked(&state, PROMPT_TIMEOUT).await;
+            if !unlocked {
+                tracing::info!("unlock request timed out after {PROMPT_TIMEOUT:?}");
+            }
+            unlocked
+        };
+        let unlocked = tokio::select! {
+            unlocked = answer => unlocked,
+            () = refused.notified() => {
+                tracing::info!("the unlock dialog was dismissed; refusing");
+                // Everything queued behind this request was waiting on the
+                // same dialog, and gets the same answer.
+                while let Ok(queued) = requests.try_recv() {
+                    let _ = queued.reply.send(false);
+                }
+                false
+            }
+        };
         let _ = reply.send(unlocked);
     }
 }

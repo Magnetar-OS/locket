@@ -258,6 +258,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connection.clone(),
         state.clone(),
         prompt_rx,
+        locket_secret::frontend::spawn_prompt,
     ));
 
     if args.unlock_socket {

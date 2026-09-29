@@ -723,6 +723,15 @@ impl App {
         closed
     }
 
+    /// Tell the daemon the unlock request was refused, so the application
+    /// that asked hears "no" now rather than after the daemon's timeout.
+    fn refuse_unlock() -> Task<Message> {
+        cosmic::task::future(async {
+            daemon::cancel_unlock().await;
+            Message::Tick
+        })
+    }
+
     /// Ask for a window that already exists to come forward.
     ///
     /// Best effort, and the same effort libcosmic makes when a second instance
@@ -842,7 +851,10 @@ impl App {
                 return Task::batch(tasks);
             }
 
-            prompt::Message::Dismiss => return self.close_prompt(),
+            prompt::Message::Dismiss => {
+                self.unlock_requested_by_app = false;
+                return Task::batch([self.close_prompt(), Self::refuse_unlock()]);
+            }
 
             prompt::Message::OpenWindow => {
                 // The dialog stays: it is the thing that can answer the
@@ -857,8 +869,9 @@ impl App {
                 self.prompt = None;
                 self.unlock_requested_by_app = false;
                 if self.core.main_window_id().is_none() {
-                    return cosmic::iced::exit();
+                    return Self::refuse_unlock().chain(cosmic::iced::exit());
                 }
+                return Self::refuse_unlock();
             }
         }
 

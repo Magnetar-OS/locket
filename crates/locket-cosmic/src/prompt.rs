@@ -47,9 +47,8 @@ pub enum Message {
     Focus,
     /// Show the whole application instead.
     OpenWindow,
-    /// Dismissed without an answer. Nothing is sent to the daemon: the Secret
-    /// Service has no way to refuse a prompt, so its request simply waits out
-    /// its own timeout, exactly as it would if nobody were at the machine.
+    /// Dismissed without an answer: the daemon is told, and the request that
+    /// raised the dialog is refused — its `Prompt` completes dismissed.
     Dismiss,
     /// The window went away — the compositor closed it, or something else did.
     Closed,

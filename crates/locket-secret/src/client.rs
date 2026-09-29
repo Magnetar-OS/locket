@@ -18,6 +18,8 @@ pub const MANAGER_PATH: &str = "/org/locket/Manager";
 pub trait Manager {
     fn unlock(&self, passphrase: &str) -> zbus::Result<bool>;
     fn lock(&self) -> zbus::Result<()>;
+    /// The person dismissed the unlock dialog.
+    fn cancel_unlock(&self) -> zbus::Result<()>;
     /// Tell the daemon its copy of the vault file is out of date.
     fn reload(&self) -> zbus::Result<bool>;
     /// Set the daemon's idle timeout, in seconds. 0 turns it off.

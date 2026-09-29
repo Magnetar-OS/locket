@@ -90,6 +90,17 @@ pub async fn unlock(passphrase: String) -> bool {
     }
 }
 
+/// Tell the daemon the person dismissed its unlock request, so the
+/// application that asked is refused now instead of after a timeout.
+pub async fn cancel_unlock() {
+    let Some((_connection, proxy)) = client::connect().await else {
+        return;
+    };
+    if let Err(e) = proxy.cancel_unlock().await {
+        tracing::warn!("could not refuse the unlock request: {e}");
+    }
+}
+
 /// Give the daemon the idle timeout from the desktop's settings.
 ///
 /// The frontend owns the number; the daemon's `--auto-lock` flag is only the

@@ -117,6 +117,9 @@ pub struct ServiceState {
     pub sessions: SessionStore,
     pub config: ServiceConfig,
     pub prompts: Option<tokio::sync::mpsc::Sender<PromptRequest>>,
+    /// Woken when the person dismisses the unlock dialog, so the waiting
+    /// request is refused now rather than when it times out.
+    pub unlock_refused: Arc<tokio::sync::Notify>,
     /// Where to tell the person about a write that did not land. `None`
     /// sends nothing — tests, and a daemon with no session bus to reach.
     pub notifications: Option<zbus::Connection>,
@@ -148,6 +151,7 @@ impl ServiceState {
             sessions: SessionStore::new(),
             config,
             prompts: None,
+            unlock_refused: Arc::default(),
             notifications: None,
             prompt_counter: AtomicU64::new(0),
             observers: Vec::new(),

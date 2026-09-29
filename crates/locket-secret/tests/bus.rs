@@ -460,3 +460,51 @@ async fn a_late_unlock_does_not_replace_the_open_vault() {
         "the open vault was replaced by a late unlock"
     );
 }
+
+/// Dismissing the unlock dialog refuses the request that raised it. It used
+/// to leave the application waiting out the daemon's two-minute timeout.
+#[tokio::test]
+async fn dismissing_the_unlock_dialog_refuses_the_prompt() {
+    use futures_util::StreamExt as _;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    daemon.state.lock().await.prompts = Some(tx);
+    // Never the real GUI: a test must not start anything on this desktop.
+    tokio::spawn(locket_secret::manager::serve_prompts(
+        daemon.server.clone(),
+        daemon.state.clone(),
+        rx,
+        || Ok("nothing".to_owned()),
+    ));
+    let () = client.manager().await.call("Lock", &()).await.unwrap();
+
+    let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = client
+        .service()
+        .await
+        .call("Unlock", &(Vec::<OwnedObjectPath>::new(),))
+        .await
+        .unwrap();
+    let prompt = client
+        .proxy(prompt.as_str(), "org.freedesktop.Secret.Prompt")
+        .await;
+    let mut completed = prompt.receive_signal("Completed").await.unwrap();
+    let () = prompt.call("Prompt", &("",)).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let () = client
+        .manager()
+        .await
+        .call("CancelUnlock", &())
+        .await
+        .unwrap();
+
+    let signal = tokio::time::timeout(std::time::Duration::from_secs(5), completed.next())
+        .await
+        .expect("the dismissed prompt was not answered")
+        .unwrap();
+    let (dismissed, _): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+    assert!(dismissed);
+}
