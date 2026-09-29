@@ -59,3 +59,11 @@ a badge and the popup's next opening asks
 session storage, which is memory-backed and gone when the browser closes.
 An update to an existing entry files the old password into the item's
 history in locket, so even a mistaken save is undoable there.
+
+## Version
+
+The extension carries locket's version and is bumped with every release
+(`release.config.json` lists both manifests). It speaks to the native host
+from the same release: the message set is not versioned separately, and a
+host newer than the extension may answer in ways an older extension does
+not know — `refused` and `unchanged` arrived that way.

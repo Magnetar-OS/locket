@@ -11,7 +11,15 @@
       "pattern": "\\[\\[package\\]\\]\\nname = \"locket-[a-z]+\"\\nversion = \"(.+)\"",
       "all": true
     },
-    "res/com.magnetaros.Locket.metainfo.xml"
+    "res/com.magnetaros.Locket.metainfo.xml",
+    {
+      "path": "extension/manifest.json",
+      "pattern": "\"version\": \"([^\"]+)\""
+    },
+    {
+      "path": "extension/manifest.firefox.json",
+      "pattern": "\"version\": \"([^\"]+)\""
+    }
   ],
   "publish": null,
   "steps": [
