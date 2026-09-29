@@ -136,11 +136,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
           reply(secret);
           break;
         }
-        await chrome.scripting.executeScript({
+        // The tab can still navigate between that check and this injection,
+        // and `executeScript` goes to whatever document the tab holds by
+        // then. So the injected code checks the origin itself, in the
+        // document it actually landed in, and fills nothing anywhere else.
+        const [injected] = await chrome.scripting.executeScript({
           target: { tabId: msg.tabId },
           func: fillForm,
-          args: [msg.username, secret.password],
+          args: [origin(tab.url), msg.username, secret.password],
         });
+        if (!injected?.result) {
+          reply({ type: "error", message: "That tab is no longer on the page you picked." });
+          break;
+        }
         filled.set(origin(tab.url), await digest(msg.username, secret.password));
         reply({ type: "ok" });
         break;
@@ -161,9 +169,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
 // or the value being written. Assigning through the prototype's value setter
 // is what makes frameworks that patch inputs (React and friends) observe the
 // change, and it works from the isolated world.
-function fillForm(username, password) {
+//
+// Returns whether it filled. `expectedOrigin` is the origin the credential was
+// released for; a document from anywhere else gets nothing.
+function fillForm(expectedOrigin, username, password) {
+  if (location.origin !== expectedOrigin) return false;
   const pw = document.querySelector('input[type="password"]:not([disabled])');
-  if (!pw) return;
+  if (!pw) return false;
   const form = pw.form || document;
   const user = form.querySelector(
     'input[type="email"], input[type="text"], input[name*="user" i], input[name*="email" i], input[id*="user" i]'
@@ -179,4 +191,5 @@ function fillForm(username, password) {
   };
   if (username) set(user, username);
   set(pw, password);
+  return true;
 }

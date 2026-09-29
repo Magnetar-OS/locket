@@ -903,7 +903,9 @@ hostile. So the host never exposes the vault wholesale:
 
 Origin matching is on suffix boundaries, so `mail.example.com` matches an entry
 saved for `example.com`, while `notexample.com` and `example.com.evil.test` do
-not, and a credential saved for a subdomain never leaks up to the parent.
+not, and a credential saved for a subdomain never leaks up to the parent. A
+credential saved from an `https://` page is not offered to the `http://` page
+of the same host.
 Getting that wrong is how a manager hands passwords to a lookalike domain, so
 it is tested directly.
 

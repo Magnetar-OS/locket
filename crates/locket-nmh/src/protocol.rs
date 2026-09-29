@@ -176,6 +176,14 @@ pub fn origin_of(url: &str) -> String {
     host.strip_prefix("www.").unwrap_or(&host).to_lowercase()
 }
 
+/// The scheme of a URL, when it is one; a bare hostname has none.
+fn scheme_of(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .filter(|u| u.host_str().is_some())
+        .map(|u| u.scheme().to_owned())
+}
+
 /// Whether a stored credential belongs to the origin being asked about.
 ///
 /// Matching is on registrable-ish suffix boundaries: `mail.example.com`
@@ -183,6 +191,14 @@ pub fn origin_of(url: &str) -> String {
 /// `example.com.evil.test` must not either. Getting this wrong is how a
 /// password manager hands credentials to a lookalike domain.
 pub fn origin_matches(stored: &str, requested: &str) -> bool {
+    // A credential saved from an `https://` page is not typed into the
+    // plain-`http://` page of the same host, where anyone on the path can
+    // read the form. The other way round is an upgrade, and fine.
+    if scheme_of(stored).as_deref() == Some("https")
+        && scheme_of(requested).as_deref() == Some("http")
+    {
+        return false;
+    }
     let stored = origin_of(stored);
     let requested = origin_of(requested);
     if stored.is_empty() || requested.is_empty() {
@@ -299,6 +315,24 @@ mod tests {
         // leak to the parent.
         assert!(!origin_matches("mail.example.com", "example.com"));
         assert!(!origin_matches("", "example.com"));
+    }
+
+    /// A credential saved on the secure page does not go to the insecure one.
+    #[test]
+    fn an_https_credential_is_not_offered_to_an_http_page() {
+        assert!(!origin_matches(
+            "https://example.com",
+            "http://example.com/login"
+        ));
+        assert!(origin_matches(
+            "http://example.com",
+            "https://example.com/login"
+        ));
+        assert!(origin_matches("example.com", "http://example.com/login"));
+        assert!(origin_matches(
+            "https://example.com",
+            "https://example.com/login"
+        ));
     }
 
     /// A URL that parses but has no host — `data:`, `file:` — names no

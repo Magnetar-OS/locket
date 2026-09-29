@@ -100,6 +100,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   `CollectionChanged`), not only when one is created, so a keyring browser
   no longer keeps showing a deleted entry. Deleting an item that is already
   gone is an error rather than a second success.
+- The browser extension fills nothing into a tab that navigated away
+  between the click and the fill: the injected code checks the page's
+  origin itself. A login saved from an `https://` page is no longer
+  offered to, or filled into, the `http://` page of the same site.
 
 ## [1.2.0] - 2026-09-22
 
