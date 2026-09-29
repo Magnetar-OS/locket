@@ -191,6 +191,39 @@ impl ServiceState {
         self.notify_opened();
     }
 
+    /// Install a vault an unlock just opened, unless one is open already.
+    ///
+    /// Unlocks derive their key with the state released — Argon2id takes a
+    /// while — so two can race: PAM at login and the GUI, say. The loser's
+    /// copy is dropped here instead of replacing the vault the winner put in
+    /// place, and with it anything written to that one since. Returns whether
+    /// this vault was the one installed.
+    ///
+    /// A file in an older format is upgraded on the way in, so the next
+    /// locked start has a collection index to answer `ReadAlias` from.
+    pub fn install_unlocked(&mut self, mut vault: Vault) -> bool {
+        if !self.is_locked() {
+            return false;
+        }
+        if vault.format() < locket_core::vault::FORMAT_VERSION
+            && let Err(e) = vault.save()
+        {
+            tracing::warn!("could not upgrade the vault format: {e}");
+        }
+        self.index = vault
+            .data()
+            .collections
+            .iter()
+            .map(|c| CollectionIndex {
+                id: c.id,
+                label: c.label.clone(),
+                alias: c.alias.clone(),
+            })
+            .collect();
+        self.open_vault(vault);
+        true
+    }
+
     /// Drop the vault — and with it the DEK — and tell everyone watching.
     ///
     /// The item objects come off the bus with it, by way of the object tree's

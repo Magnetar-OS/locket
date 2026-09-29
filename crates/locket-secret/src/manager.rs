@@ -75,27 +75,9 @@ impl Manager {
             }
         };
 
-        {
-            let mut state = self.state.lock().await;
-            // Upgrade an older file now that it is open, so the next locked
-            // start has a collection index to answer ReadAlias from.
-            let mut vault = vault;
-            if vault.format() < locket_core::vault::FORMAT_VERSION
-                && let Err(e) = vault.save()
-            {
-                tracing::warn!("could not upgrade the vault format: {e}");
-            }
-            state.index = vault
-                .data()
-                .collections
-                .iter()
-                .map(|c| locket_core::vault::CollectionIndex {
-                    id: c.id,
-                    label: c.label.clone(),
-                    alias: c.alias.clone(),
-                })
-                .collect();
-            state.open_vault(vault);
+        if !self.state.lock().await.install_unlocked(vault) {
+            // Another unlock finished first; its vault stays.
+            return Ok(true);
         }
         sync_objects(server, &self.state)
             .await

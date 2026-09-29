@@ -85,6 +85,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Adding an item after a Secret Service client deleted every collection
   no longer crashes locket, the daemon or the CLI; a new default
   collection is created for it.
+- Unlocking at login from PAM and from locket at the same moment no longer
+  lets the slower of the two replace the vault the faster one opened,
+  losing anything written to it in between.
 
 ## [1.2.0] - 2026-09-22
 

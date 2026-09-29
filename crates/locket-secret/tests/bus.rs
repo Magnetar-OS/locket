@@ -432,3 +432,31 @@ async fn one_client_cannot_use_anothers_session() {
         "org.freedesktop.Secret.Error.NoSession"
     );
 }
+
+/// Two unlocks racing — PAM at login and the GUI — derive their keys with
+/// the state released. The second to finish used to replace the vault the
+/// first had installed, and with it anything written there in between.
+#[tokio::test]
+async fn a_late_unlock_does_not_replace_the_open_vault() {
+    use locket_core::model::{Item, ItemKind};
+
+    let daemon = Daemon::start().await;
+    let late = locket_core::Vault::open(daemon.vault_path(), support_passphrase()).unwrap();
+    {
+        let mut state = daemon.state.lock().await;
+        let vault = state.vault.as_mut().unwrap();
+        vault.add_item_default(Item::new(ItemKind::Note, "not yet saved"));
+    }
+    assert!(!daemon.state.lock().await.install_unlocked(late));
+    let state = daemon.state.lock().await;
+    assert!(
+        state
+            .vault
+            .as_ref()
+            .unwrap()
+            .data()
+            .all_items()
+            .any(|(_, i)| i.label == "not yet saved"),
+        "the open vault was replaced by a late unlock"
+    );
+}

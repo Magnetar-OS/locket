@@ -196,25 +196,13 @@ async fn handle(
         .map_err(std::io::Error::other)?;
 
     let unlocked = match opened {
-        Ok(mut vault) => {
-            if vault.format() < locket_core::vault::FORMAT_VERSION
-                && let Err(e) = vault.save()
-            {
-                tracing::warn!("could not upgrade the vault format: {e}");
+        Ok(vault) => {
+            // Another unlock finished first: its vault stays, and this one is
+            // still a success to report.
+            if !state.lock().await.install_unlocked(vault) {
+                stream.write_all(&[locket_ipc::REPLY_UNLOCKED]).await?;
+                return Ok(());
             }
-            let mut guard = state.lock().await;
-            guard.index = vault
-                .data()
-                .collections
-                .iter()
-                .map(|c| locket_core::vault::CollectionIndex {
-                    id: c.id,
-                    label: c.label.clone(),
-                    alias: c.alias.clone(),
-                })
-                .collect();
-            guard.open_vault(vault);
-            drop(guard);
             if let Err(e) = sync_objects(connection.object_server(), &state).await {
                 tracing::error!("could not publish vault objects after unlock: {e}");
             }
