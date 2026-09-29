@@ -213,6 +213,12 @@ impl ServiceState {
         self.tree.changed.notify_one();
     }
 
+    /// Ask for the published objects to be brought in step with the vault,
+    /// after a change made outside the D-Bus methods that do it themselves.
+    pub fn objects_changed(&self) {
+        self.tree.changed.notify_one();
+    }
+
     pub fn is_locked(&self) -> bool {
         self.vault.is_none()
     }

@@ -82,6 +82,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   `LockService` takes them off the bus as well as forgetting them. They
   used to accumulate for the daemon's lifetime. A session can only be used
   by the application that opened it.
+- Adding an item after a Secret Service client deleted every collection
+  no longer crashes locket, the daemon or the CLI; a new default
+  collection is created for it.
 
 ## [1.2.0] - 2026-09-22
 

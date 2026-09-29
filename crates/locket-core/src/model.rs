@@ -868,7 +868,15 @@ impl VaultData {
     }
 
     /// The collection new items go into when the caller does not name one.
+    ///
+    /// A vault with no collections left — every one deleted over the Secret
+    /// Service — gets a fresh default one, rather than a panic at the next
+    /// item somebody adds.
     pub fn default_collection_mut(&mut self) -> &mut Collection {
+        if self.collections.is_empty() {
+            self.collections
+                .push(Collection::new("Login").with_alias("default"));
+        }
         let idx = self
             .collections
             .iter()
@@ -1206,5 +1214,20 @@ mod tests {
         assert_ne!(restored_to, work_id);
         let (c, _) = data.find_item(id).expect("item not restored");
         assert_eq!(c.alias.as_deref(), Some("default"));
+    }
+
+    /// Deleting every collection is something a Secret Service client can
+    /// do. The next item added — the portal's first key, a GUI add, a CLI
+    /// add — used to index an empty list and panic.
+    #[test]
+    fn adding_an_item_with_no_collections_left_creates_one() {
+        let mut data = VaultData::default();
+        data.collections.clear();
+        data.default_collection_mut()
+            .items
+            .push(Item::new(ItemKind::Note, "n"));
+        assert_eq!(data.collections.len(), 1);
+        assert_eq!(data.collections[0].alias.as_deref(), Some("default"));
+        assert_eq!(data.item_count(), 1);
     }
 }

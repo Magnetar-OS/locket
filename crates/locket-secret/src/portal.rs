@@ -241,6 +241,8 @@ fn mint_master(vault: &mut Vault) -> crate::Result<Zeroizing<Vec<u8>>> {
 /// into it, rather than the save refusing for a conflict.
 fn app_secret(state: &mut ServiceState, app_id: &str) -> crate::Result<Zeroizing<Vec<u8>>> {
     let master = master_secret(state.vault_mut()?)?;
+    // A first master is a new item, perhaps in a new default collection.
+    state.objects_changed();
     Ok(derive_app_secret(&master, app_id))
 }
 
