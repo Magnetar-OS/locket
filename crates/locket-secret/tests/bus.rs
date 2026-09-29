@@ -508,3 +508,56 @@ async fn dismissing_the_unlock_dialog_refuses_the_prompt() {
     let (dismissed, _): (bool, OwnedValue) = signal.body().deserialize().unwrap();
     assert!(dismissed);
 }
+
+/// Deletions and edits are announced, not only creations: a client that
+/// lists items (Seahorse, say) otherwise keeps showing a deleted one. And an
+/// item already deleted is `NoSuchObject`, not a second success.
+#[tokio::test]
+async fn deletions_and_edits_are_announced() {
+    use futures_util::StreamExt as _;
+    use locket_core::model::{Item, ItemKind};
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let (collection, path) = {
+        let mut state = daemon.state.lock().await;
+        let vault = state.vault.as_mut().unwrap();
+        let collection = vault.data().collections[0].id;
+        let id = vault
+            .add_item(collection, Item::new(ItemKind::Note, "n"))
+            .unwrap();
+        vault.save().unwrap();
+        (
+            collection,
+            locket_secret::service::item_path(collection, id),
+        )
+    };
+    locket_secret::service::sync_objects(daemon.server.object_server(), &daemon.state)
+        .await
+        .unwrap();
+    let collection = client
+        .proxy(
+            locket_secret::service::collection_path(collection).as_str(),
+            "org.freedesktop.Secret.Collection",
+        )
+        .await;
+    let mut changed = collection.receive_signal("ItemChanged").await.unwrap();
+    let mut deleted = collection.receive_signal("ItemDeleted").await.unwrap();
+    let item = client
+        .proxy(path.as_str(), "org.freedesktop.Secret.Item")
+        .await;
+
+    item.set_property("Label", "renamed").await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), changed.next())
+        .await
+        .expect("no ItemChanged for a new label");
+
+    let _: zbus::zvariant::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), deleted.next())
+        .await
+        .expect("no ItemDeleted");
+
+    // The object went with it, so a stale client's second Delete fails.
+    let again: zbus::Result<zbus::zvariant::OwnedObjectPath> = item.call("Delete", &()).await;
+    assert!(again.is_err(), "deleting a deleted item succeeded");
+}

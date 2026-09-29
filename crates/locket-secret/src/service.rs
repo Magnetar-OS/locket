@@ -36,6 +36,37 @@ fn fdo_error(error: fdo::Error) -> SecretError {
     SecretError::ZBus(zbus::Error::FDO(Box::new(error)))
 }
 
+/// Announce that an item changed or went away, on its collection's path.
+async fn item_signal(
+    connection: &zbus::Connection,
+    collection: Uuid,
+    item: Uuid,
+    deleted: bool,
+) -> zbus::Result<()> {
+    let emitter = SignalEmitter::new(connection, collection_path(collection))?;
+    let path = item_path(collection, item);
+    if deleted {
+        CollectionIface::item_deleted(&emitter, path.as_ref()).await
+    } else {
+        CollectionIface::item_changed(&emitter, path.as_ref()).await
+    }
+}
+
+/// Announce that a collection changed or went away, on the service's path.
+async fn collection_signal(
+    connection: &zbus::Connection,
+    collection: Uuid,
+    deleted: bool,
+) -> zbus::Result<()> {
+    let emitter = SignalEmitter::new(connection, crate::SERVICE_PATH)?;
+    let path = collection_path(collection);
+    if deleted {
+        SecretService::collection_deleted(&emitter, path.as_ref()).await
+    } else {
+        SecretService::collection_changed(&emitter, path.as_ref()).await
+    }
+}
+
 /// The unique bus name a call came from.
 fn caller(header: &zbus::message::Header<'_>) -> Option<String> {
     header.sender().map(|s| s.to_string())
@@ -856,6 +887,7 @@ impl CollectionIface {
     async fn delete(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
         {
             let mut state = self.state.lock().await;
@@ -883,6 +915,7 @@ impl CollectionIface {
 
         // Its items, its own path and any alias it held all come off.
         sync_objects(server, &self.state).await?;
+        collection_signal(connection, self.id, true).await?;
         Ok(null_path())
     }
 
@@ -1022,19 +1055,25 @@ impl CollectionIface {
     }
 
     #[zbus(property)]
-    async fn set_label(&self, value: String) -> zbus::Result<()> {
-        let mut state = self.state.lock().await;
-        let vault = state
-            .vault_mut()
-            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
-        if let Some(c) = vault.data_mut().collection_mut(self.id) {
-            c.label = value;
-            c.modified = now();
+    async fn set_label(
+        &self,
+        value: String,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::Result<()> {
+        {
+            let mut state = self.state.lock().await;
+            let vault = state
+                .vault_mut()
+                .map_err(|e| zbus::Error::Failure(e.to_string()))?;
+            if let Some(c) = vault.data_mut().collection_mut(self.id) {
+                c.label = value;
+                c.modified = now();
+            }
+            state
+                .persist()
+                .map_err(|e| zbus::Error::Failure(e.to_string()))?;
         }
-        state
-            .persist()
-            .map_err(|e| zbus::Error::Failure(e.to_string()))?;
-        Ok(())
+        collection_signal(connection, self.id, false).await
     }
 
     #[zbus(property)]
@@ -1089,6 +1128,7 @@ impl ItemIface {
     async fn delete(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<OwnedObjectPath, SecretError> {
         {
             let mut state = self.state.lock().await;
@@ -1097,10 +1137,15 @@ impl ItemIface {
             // Soft-delete. To this client — and every other one — the item is
             // gone: the trash lives outside the collections that SearchItems
             // and the properties walk, so only locket's own trash UI sees it.
+            // Checked first: a miss must not leave the vault marked dirty.
+            if vault.item(self.id).is_none() {
+                return Err(SecretError::NoSuchObject("no such item".into()));
+            }
             vault.trash_item(self.id);
             state.persist()?;
         }
         sync_objects(server, &self.state).await?;
+        item_signal(connection, self.collection, self.id, true).await?;
         Ok(null_path())
     }
 
@@ -1137,6 +1182,7 @@ impl ItemIface {
         &self,
         secret: SecretStruct,
         #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
         ServiceState::ensure_unlocked(&self.state).await?;
 
@@ -1160,6 +1206,8 @@ impl ItemIface {
         item.content_type = secret.content_type;
         item.touch();
         state.persist()?;
+        drop(state);
+        item_signal(connection, self.collection, self.id, false).await?;
         Ok(())
     }
 
@@ -1180,7 +1228,11 @@ impl ItemIface {
     }
 
     #[zbus(property)]
-    async fn set_attributes(&self, value: HashMap<String, String>) -> zbus::Result<()> {
+    async fn set_attributes(
+        &self,
+        value: HashMap<String, String>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::Result<()> {
         let mut state = self.state.lock().await;
         let vault = state
             .vault_mut()
@@ -1193,7 +1245,8 @@ impl ItemIface {
         state
             .persist()
             .map_err(|e| zbus::Error::Failure(e.to_string()))?;
-        Ok(())
+        drop(state);
+        item_signal(connection, self.collection, self.id, false).await
     }
 
     #[zbus(property)]
@@ -1208,7 +1261,11 @@ impl ItemIface {
     }
 
     #[zbus(property)]
-    async fn set_label(&self, value: String) -> zbus::Result<()> {
+    async fn set_label(
+        &self,
+        value: String,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::Result<()> {
         let mut state = self.state.lock().await;
         let vault = state
             .vault_mut()
@@ -1220,7 +1277,8 @@ impl ItemIface {
         state
             .persist()
             .map_err(|e| zbus::Error::Failure(e.to_string()))?;
-        Ok(())
+        drop(state);
+        item_signal(connection, self.collection, self.id, false).await
     }
 
     #[zbus(property, name = "Type")]
@@ -1240,7 +1298,11 @@ impl ItemIface {
     }
 
     #[zbus(property, name = "Type")]
-    async fn set_type(&self, value: String) -> zbus::Result<()> {
+    async fn set_type(
+        &self,
+        value: String,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::Result<()> {
         let mut state = self.state.lock().await;
         let vault = state
             .vault_mut()
@@ -1252,7 +1314,8 @@ impl ItemIface {
         state
             .persist()
             .map_err(|e| zbus::Error::Failure(e.to_string()))?;
-        Ok(())
+        drop(state);
+        item_signal(connection, self.collection, self.id, false).await
     }
 
     #[zbus(property)]

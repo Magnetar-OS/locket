@@ -95,6 +95,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Unlocking at login from PAM and from locket at the same moment no longer
   lets the slower of the two replace the vault the faster one opened,
   losing anything written to it in between.
+- Secret Service clients are told when an item or collection is deleted or
+  edited (`ItemDeleted`, `ItemChanged`, `CollectionDeleted`,
+  `CollectionChanged`), not only when one is created, so a keyring browser
+  no longer keeps showing a deleted entry. Deleting an item that is already
+  gone is an error rather than a second success.
 
 ## [1.2.0] - 2026-09-22
 
