@@ -106,10 +106,25 @@ impl SessionStore {
         Ok((session, output))
     }
 
-    pub fn get(&self, path: &OwnedObjectPath) -> Result<&Session> {
+    /// The session at `path`, for the client `caller`.
+    ///
+    /// A session belongs to the connection that opened it. Another client
+    /// naming its path is told there is no such session: a borrowed DH
+    /// session would only yield ciphertext under someone else's key, but
+    /// there is no reason to hand even that out.
+    pub fn get(&self, path: &OwnedObjectPath, caller: Option<&str>) -> Result<&Session> {
         self.sessions
             .get(path)
+            .filter(|session| match (session.owner.as_deref(), caller) {
+                (Some(owner), Some(caller)) => owner == caller,
+                _ => true,
+            })
             .ok_or_else(|| Error::NoSession(path.to_string()))
+    }
+
+    /// Every open session's path.
+    pub fn paths(&self) -> impl Iterator<Item = &OwnedObjectPath> {
+        self.sessions.keys()
     }
 
     pub fn close(&mut self, path: &OwnedObjectPath) -> Option<Session> {
@@ -204,7 +219,7 @@ mod tests {
         assert_eq!(store.len(), 2);
 
         assert!(store.close(&a.path).is_some());
-        assert!(store.get(&a.path).is_err());
+        assert!(store.get(&a.path, None).is_err());
         assert_eq!(store.len(), 1);
     }
 
@@ -220,6 +235,10 @@ mod tests {
 
         let closed = store.close_for_owner(":1.42");
         assert_eq!(closed, vec![mine.path]);
-        assert!(store.get(&theirs.path).is_ok());
+        assert!(store.get(&theirs.path, Some(":1.99")).is_ok());
+        assert!(
+            store.get(&theirs.path, Some(":1.42")).is_err(),
+            "one client used another's session"
+        );
     }
 }

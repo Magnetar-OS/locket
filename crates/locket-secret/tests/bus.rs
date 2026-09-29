@@ -376,3 +376,59 @@ async fn a_prompt_returns_before_the_person_answers() {
     assert!(!dismissed);
     answer.await.unwrap();
 }
+
+/// Sessions — each holding a DH key — were never closed when their client
+/// went away, nor taken off the bus by `LockService`, which dropped them.
+#[tokio::test]
+async fn sessions_end_with_their_client_and_with_lock_service() {
+    let daemon = Daemon::start().await;
+
+    let leaving = daemon.client().await;
+    let session = leaving.open_session().await;
+    let watcher = daemon.client().await;
+    assert!(watcher.exists(session.as_str()).await);
+    drop(leaving);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while watcher.exists(session.as_str()).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a departed client's session is still open"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let session = watcher.open_session().await;
+    let () = watcher
+        .service()
+        .await
+        .call("LockService", &())
+        .await
+        .unwrap();
+    assert!(
+        !watcher.exists(session.as_str()).await,
+        "LockService left its sessions published"
+    );
+}
+
+/// A session belongs to the client that opened it.
+#[tokio::test]
+async fn one_client_cannot_use_anothers_session() {
+    use std::collections::HashMap;
+    use zbus::zvariant::OwnedObjectPath;
+
+    let daemon = Daemon::start().await;
+    let owner = daemon.client().await;
+    let session = owner.open_session().await;
+    let other = daemon.client().await;
+
+    let result: zbus::Result<HashMap<OwnedObjectPath, locket_secret::service::SecretStruct>> =
+        other
+            .service()
+            .await
+            .call("GetSecrets", &(Vec::<OwnedObjectPath>::new(), &session))
+            .await;
+    assert_eq!(
+        locket_secret::testing::error_name(&result.unwrap_err()),
+        "org.freedesktop.Secret.Error.NoSession"
+    );
+}

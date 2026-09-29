@@ -36,6 +36,11 @@ fn fdo_error(error: fdo::Error) -> SecretError {
     SecretError::ZBus(zbus::Error::FDO(Box::new(error)))
 }
 
+/// The unique bus name a call came from.
+fn caller(header: &zbus::message::Header<'_>) -> Option<String> {
+    header.sender().map(|s| s.to_string())
+}
+
 /// The `(oayays)` struct every secret crosses the bus in.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Value, OwnedValue)]
 pub struct SecretStruct {
@@ -549,16 +554,7 @@ impl SecretService {
         }
         .map_err(zbus::Error::from)?;
 
-        server
-            .at(
-                session.path.clone(),
-                SessionIface {
-                    state: self.state.clone(),
-                    path: session.path.clone(),
-                },
-            )
-            .await?;
-
+        sync_objects(server, &self.state).await?;
         Ok((output, session.path))
     }
 
@@ -704,12 +700,13 @@ impl SecretService {
         &self,
         items: Vec<OwnedObjectPath>,
         session: OwnedObjectPath,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, SecretStruct>, SecretError> {
         ServiceState::ensure_unlocked(&self.state).await?;
 
         let state = self.state.lock().await;
         let vault = state.vault()?;
-        let sess = state.sessions.get(&session)?;
+        let sess = state.sessions.get(&session, caller(&header).as_deref())?;
 
         let mut out = HashMap::new();
         for path in items {
@@ -876,6 +873,7 @@ impl CollectionIface {
         replace: bool,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
         // Writes prompt too. An application that is told "locked" when it tries
         // to save typically discards the secret it was holding.
@@ -889,7 +887,9 @@ impl CollectionIface {
             let mut state = self.state.lock().await;
 
             let plaintext = {
-                let session = state.sessions.get(&secret.session)?;
+                let session = state
+                    .sessions
+                    .get(&secret.session, caller(&header).as_deref())?;
                 session.decode(&secret.parameters, &secret.value)?
             };
             // Kept as bytes: a Secret Service secret is a byte array, and a
@@ -1067,12 +1067,16 @@ impl ItemIface {
     /// this method the body signature `(oayays)` — four top-level arguments.
     /// The spec wants one argument of type `(oayays)`, i.e. body `((oayays))`,
     /// and libsecret checks. Wrapping in a 1-tuple restores the nesting.
-    async fn get_secret(&self, session: OwnedObjectPath) -> Result<(SecretStruct,), SecretError> {
+    async fn get_secret(
+        &self,
+        session: OwnedObjectPath,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> Result<(SecretStruct,), SecretError> {
         ServiceState::ensure_unlocked(&self.state).await?;
 
         let state = self.state.lock().await;
         let vault = state.vault()?;
-        let sess = state.sessions.get(&session)?;
+        let sess = state.sessions.get(&session, caller(&header).as_deref())?;
         let item = vault
             .item(self.id)
             .ok_or_else(|| SecretError::NoSuchObject("no such item".into()))?;
@@ -1086,12 +1090,18 @@ impl ItemIface {
         },))
     }
 
-    async fn set_secret(&self, secret: SecretStruct) -> Result<(), SecretError> {
+    async fn set_secret(
+        &self,
+        secret: SecretStruct,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> Result<(), SecretError> {
         ServiceState::ensure_unlocked(&self.state).await?;
 
         let mut state = self.state.lock().await;
         let plaintext = {
-            let session = state.sessions.get(&secret.session)?;
+            let session = state
+                .sessions
+                .get(&secret.session, caller(&header).as_deref())?;
             session.decode(&secret.parameters, &secret.value)?
         };
         let plaintext = plaintext.to_vec();
@@ -1238,7 +1248,7 @@ pub struct SessionIface {
 impl SessionIface {
     async fn close(&self, #[zbus(object_server)] server: &ObjectServer) -> Result<(), SecretError> {
         self.state.lock().await.sessions.close(&self.path);
-        let _ = server.remove::<SessionIface, _>(&self.path).await;
+        sync_objects(server, &self.state).await?;
         Ok(())
     }
 }
@@ -1342,22 +1352,53 @@ pub async fn register_objects(server: &ObjectServer, state: &SharedState) -> Res
 /// Keep the object tree in step with the vault for as long as the daemon runs.
 ///
 /// Every D-Bus method that changes what exists brings the tree in step itself
-/// before it returns, so its caller sees the result. This task covers the
-/// changes that arrive any other way — the idle timer and the session locking
-/// the vault, a reload picked up on the way into a write — which
-/// [`ServiceState`] announces through [`ObjectTree::changed`].
-pub fn spawn_upkeep(server: &ObjectServer, state: &SharedState) {
-    let server = server.clone();
-    let state = state.clone();
+/// before it returns, so its caller sees the result. This covers the changes
+/// that arrive any other way: the idle timer and the session locking the
+/// vault, a reload picked up on the way into a write — which [`ServiceState`]
+/// announces through [`ObjectTree::changed`] — and clients leaving the bus,
+/// whose sessions (and their DH keys) are closed with them.
+pub fn spawn_upkeep(connection: &zbus::Connection, state: &SharedState) {
+    let server = connection.object_server().clone();
+    let watched = state.clone();
     tokio::spawn(async move {
-        let tree = state.lock().await.tree.clone();
+        let tree = watched.lock().await.tree.clone();
         loop {
             tree.changed.notified().await;
-            if let Err(e) = sync_objects(&server, &state).await {
+            if let Err(e) = sync_objects(&server, &watched).await {
                 tracing::error!("could not bring the published objects in step: {e}");
             }
         }
     });
+
+    let connection = connection.clone();
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = reap_sessions(&connection, &state).await {
+            tracing::error!("not closing the sessions of clients that leave the bus: {e}");
+        }
+    });
+}
+
+/// Close each session when the client that opened it leaves the bus.
+async fn reap_sessions(connection: &zbus::Connection, state: &SharedState) -> Result<()> {
+    use futures_util::StreamExt as _;
+
+    let bus = fdo::DBusProxy::new(connection).await?;
+    let mut changes = bus.receive_name_owner_changed().await?;
+    while let Some(change) = changes.next().await {
+        let Ok(args) = change.args() else {
+            continue;
+        };
+        // A unique name losing its owner is a connection that has gone.
+        if args.new_owner().is_some() || !args.name().starts_with(':') {
+            continue;
+        }
+        let mut guard = state.lock().await;
+        if !guard.sessions.close_for_owner(args.name()).is_empty() {
+            guard.tree.changed.notify_one();
+        }
+    }
+    Ok(())
 }
 
 /// What is published on the bus, and the signal that it may be stale.
@@ -1375,6 +1416,7 @@ struct Published {
     aliases: HashMap<String, Uuid>,
     /// `(collection, item)`.
     items: HashSet<(Uuid, Uuid)>,
+    sessions: HashSet<OwnedObjectPath>,
 }
 
 impl Published {
@@ -1407,6 +1449,7 @@ impl Published {
             collections: index.iter().map(|c| c.id).collect(),
             aliases,
             items,
+            sessions: state.sessions.paths().cloned().collect(),
         }
     }
 }
@@ -1435,6 +1478,9 @@ pub async fn sync_objects(server: &ObjectServer, state: &SharedState) -> Result<
     }
     for &id in published.collections.difference(&wanted.collections) {
         unpublish::<CollectionIface>(server, &collection_path(id)).await?;
+    }
+    for path in published.sessions.difference(&wanted.sessions) {
+        unpublish::<SessionIface>(server, path).await?;
     }
 
     for &id in wanted.collections.difference(&published.collections) {
@@ -1471,6 +1517,18 @@ pub async fn sync_objects(server: &ObjectServer, state: &SharedState) -> Result<
                     state: state.clone(),
                     collection,
                     id,
+                },
+            )
+            .await?;
+    }
+
+    for path in wanted.sessions.difference(&published.sessions) {
+        server
+            .at(
+                path.clone(),
+                SessionIface {
+                    state: state.clone(),
+                    path: path.clone(),
                 },
             )
             .await?;

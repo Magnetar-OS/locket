@@ -77,6 +77,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   for the passphrase before returning, and GDBus clients give up on a call
   after 25 seconds; it now returns at once and reports through `Completed`,
   as the specification describes.
+- Secret Service sessions, each holding a Diffie-Hellman key, are closed
+  when the application that opened them leaves the bus, and
+  `LockService` takes them off the bus as well as forgetting them. They
+  used to accumulate for the daemon's lifetime. A session can only be used
+  by the application that opened it.
 
 ## [1.2.0] - 2026-09-22
 

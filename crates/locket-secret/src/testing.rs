@@ -139,7 +139,7 @@ impl Daemon {
         register_objects(server.object_server(), &state)
             .await
             .expect("publish the service objects");
-        spawn_upkeep(server.object_server(), &state);
+        spawn_upkeep(&server, &state);
         server
             .object_server()
             .at(

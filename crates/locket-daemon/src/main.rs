@@ -245,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection = zbus::connection::Builder::session()?.build().await?;
     state.lock().await.notifications = Some(connection.clone());
     register_objects(connection.object_server(), &state).await?;
-    spawn_upkeep(connection.object_server(), &state);
+    spawn_upkeep(&connection, &state);
 
     connection
         .object_server()
