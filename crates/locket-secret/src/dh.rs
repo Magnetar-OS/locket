@@ -222,8 +222,15 @@ mod tests {
         let mut other = key;
         other[0] ^= 0xff;
 
-        let (iv, ct) = encrypt(&key, b"a much longer secret value here").unwrap();
-        assert!(decrypt(&other, &iv, &ct).is_err());
+        let plaintext = b"a much longer secret value here";
+        let (iv, ct) = encrypt(&key, plaintext).unwrap();
+        // CBC under the wrong key decrypts to noise, and noise ends in valid
+        // PKCS#7 padding about once in 256 tries — so the property is that
+        // the secret does not come back, not that an error always does.
+        assert!(
+            decrypt(&other, &iv, &ct).map_or(true, |wrong| wrong != plaintext),
+            "the wrong key recovered the secret"
+        );
         assert!(decrypt(&key, &[0u8; 4], &ct).is_err());
     }
 }
