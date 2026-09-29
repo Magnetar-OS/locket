@@ -25,7 +25,7 @@ jobs:
     name: Test (no GUI)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system libraries
         run: |
           sudo apt-get update
@@ -51,7 +51,7 @@ jobs:
     name: Build (GUI)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system libraries
         run: |
           sudo apt-get update
@@ -72,7 +72,7 @@ jobs:
     name: Fuzz (bounded)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install system libraries
         run: |
           sudo apt-get update
@@ -97,7 +97,7 @@ jobs:
     name: Metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y appstream desktop-file-utils shellcheck
       - name: AppStream metainfo
         # --no-net because the URLs it wants to reach are this repository, which
