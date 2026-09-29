@@ -4,6 +4,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Rebuilt against the current COSMIC libraries (libcosmic `03d7dcb`).
+
 ### Added
 
 - Cancelling locket's unlock dialog now refuses the application that
