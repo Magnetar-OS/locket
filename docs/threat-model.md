@@ -31,7 +31,7 @@ model underneath it.
 | `locketd` | **yes**, while unlocked | the vault file, the session bus | every client below |
 | `locket` (GUI) | yes, when running daemonless | the vault file, `cosmic-config` | the person at the keyboard |
 | `locket-cli` | yes, while it runs | the vault file only — never the daemon | a terminal |
-| `pam_locket.so` | no | the unlock socket's peer credentials | the login stack, as root |
+| `pam_locket.so` | no | the unlock socket's location — a 0700 directory in the user's 0700 `XDG_RUNTIME_DIR`; no peer credentials are checked | the login stack, as root |
 | SSH agent (in `locketd`) | via the daemon | nothing about its callers | any process running as you |
 | Secret portal backend | via the daemon | `xdg-desktop-portal` to name the app id | sandboxed applications |
 | `locket-native-host` | **no** | nothing — treats the extension as hostile; a person's "Allow" in locket's own dialog gates every password | the browser, one process per connection |
@@ -107,6 +107,13 @@ What is still true in this position:
   input into the compositor.
 - **Locking is the defence**, which is why it happens on idle, on session
   lock, on the compositor raising `LockedHint`, and on suspend.
+- **The control interface is not a boundary.** `org.locket.Manager1`
+  authenticates no caller: a process running as you can turn the idle lock
+  off (`SetAutoLock(0)`), lock the vault, refuse a pending unlock
+  (`CancelUnlock`), and try passphrases through `Unlock` or the unlock
+  socket at Argon2id's cost per guess, unthrottled. Locking on session lock
+  and suspend is not a setting and cannot be turned off this way. None of
+  this reveals a secret it could not already read in this position.
 
 ### D. A hostile browser extension
 

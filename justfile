@@ -58,12 +58,9 @@ icon-sizes := '16x16 24x24 32x32 48x48 64x64 128x128 256x256 512x512'
 # Default recipe which runs `just build-release`
 default: build-release
 
-# Everything CI runs, cheapest failure first
-#
-# `fmt-check` is deliberately not in here: the tree is not rustfmt-clean, and
-# making it so is a decision about house style rather than something a check
-# should force. The recipe exists for when that decision is made.
-check-all: validate-metadata check test
+# Everything CI runs, cheapest failure first. The tree is rustfmt-clean and
+# CI enforces it, so formatting is checked here too.
+check-all: fmt-check validate-metadata check test
 
 # Runs `cargo clean`
 clean:
