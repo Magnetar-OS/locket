@@ -615,9 +615,10 @@ it is locked, so a passphrase is still typed once per session.
 It is a small window but not a panel popup, and the difference is the same one
 the applet is careful about below: it is a titled, decorated toplevel that the
 compositor lists and stacks like any other window, not an undecorated surface
-appearing where the system's own prompts appear. Dismissing it sends the daemon
-nothing — the Secret Service has no way to *refuse* a prompt, so the request
-waits out its own timeout exactly as it would if nobody were at the machine.
+appearing where the system's own prompts appear. Dismissing it tells the daemon
+(`Manager1.CancelUnlock`), and the application that asked is refused at once:
+its Secret Service prompt completes as dismissed, which is the specification's
+way of saying no.
 
 If no locket is running when the request arrives, the daemon starts one with
 `--prompt`: that instance opens the dialog and no main window at all, and ends

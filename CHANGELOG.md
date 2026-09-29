@@ -4,6 +4,13 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Added
+
+- Cancelling locket's unlock dialog now refuses the application that
+  asked, straight away: its request completes as dismissed, as the Secret
+  Service specification provides, instead of waiting out a two-minute
+  timeout. New `org.locket.Manager1.CancelUnlock` method.
+
 ### Security
 
 - A process running as you can no longer approve its own SSH signature with
