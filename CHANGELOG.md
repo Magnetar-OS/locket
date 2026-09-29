@@ -104,6 +104,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   between the click and the fill: the injected code checks the page's
   origin itself. A login saved from an `https://` page is no longer
   offered to, or filled into, the `http://` page of the same site.
+- The Secret portal backend answers only `xdg-desktop-portal`. Any program
+  that could reach the daemon could name any Flatpak application and be
+  handed that application's key.
 
 ## [1.2.0] - 2026-09-22
 

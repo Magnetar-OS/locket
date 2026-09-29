@@ -151,6 +151,14 @@ collide, no application sees another's key, and the key is reproducible from
 a vault backup — verified end to end with a real Flatpak through
 `xdg-desktop-portal`.
 
+The backend answers only the connection that owns
+`org.freedesktop.portal.Desktop`, because that is what vouches for the
+`app_id` (tested over a private bus). This does not protect one application's
+key from a sandboxed app granted `--talk-name=org.freedesktop.secrets`: such
+an app is an ordinary Secret Service client, and in position C it can read
+the portal master item itself (locket keeps that item from being changed or
+deleted over the bus, not from being read).
+
 ### F. Someone on the network
 
 Only one thing reaches the network, only when asked: the Have I Been Pwned

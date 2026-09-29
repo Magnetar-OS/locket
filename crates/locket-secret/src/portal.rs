@@ -46,6 +46,10 @@ use zeroize::Zeroizing;
 
 use crate::service::{ServiceState, SharedState};
 
+/// The name `xdg-desktop-portal` owns. It alone may ask a backend for an
+/// application's secret: it is what vouches for the `app_id`.
+pub const PORTAL_FRONTEND: &str = "org.freedesktop.portal.Desktop";
+
 /// Length of a derived application secret.
 pub const APP_SECRET_LEN: usize = 64;
 
@@ -246,6 +250,23 @@ fn app_secret(state: &mut ServiceState, app_id: &str) -> crate::Result<Zeroizing
     Ok(derive_app_secret(&master, app_id))
 }
 
+/// Whether a call came from the connection that owns [`PORTAL_FRONTEND`].
+async fn from_portal_frontend(
+    connection: &zbus::Connection,
+    header: &zbus::message::Header<'_>,
+) -> bool {
+    let Some(sender) = header.sender() else {
+        return false;
+    };
+    let Ok(bus) = fdo::DBusProxy::new(connection).await else {
+        return false;
+    };
+    let Ok(name) = zbus::names::BusName::try_from(PORTAL_FRONTEND) else {
+        return false;
+    };
+    matches!(bus.get_name_owner(name).await, Ok(owner) if owner.as_str() == sender.as_str())
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -283,7 +304,19 @@ impl SecretPortal {
         app_id: String,
         fd: zbus::zvariant::OwnedFd,
         _options: HashMap<String, OwnedValue>,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
     ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+        // The app id is only as good as whoever names it. The daemon shares
+        // one connection between this backend and the Secret Service, so any
+        // peer that can reach the one can call the other; only the portal
+        // frontend, which looks the id up from the caller's sandbox, may.
+        if !from_portal_frontend(connection, &header).await {
+            tracing::warn!(
+                "portal secret for `{app_id}` requested by something other than xdg-desktop-portal; refusing"
+            );
+            return Ok((2, HashMap::new()));
+        }
         if app_id.is_empty() {
             tracing::warn!("portal secret requested with an empty app id; refusing");
             return Ok((2, HashMap::new()));

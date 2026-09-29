@@ -561,3 +561,66 @@ async fn deletions_and_edits_are_announced() {
     let again: zbus::Result<zbus::zvariant::OwnedObjectPath> = item.call("Delete", &()).await;
     assert!(again.is_err(), "deleting a deleted item succeeded");
 }
+
+/// Only `xdg-desktop-portal` may ask the portal backend for an application's
+/// key: it is what vouches for the app id. Any bus peer used to be able to
+/// name any app id and receive that application's key.
+#[tokio::test]
+async fn only_the_portal_frontend_gets_an_applications_key() {
+    use std::collections::HashMap;
+    use std::io::Read as _;
+    use zbus::zvariant::{Fd, OwnedObjectPath, OwnedValue, Value};
+
+    let daemon = Daemon::start().await;
+    daemon
+        .server
+        .object_server()
+        .at(
+            "/org/freedesktop/portal/desktop",
+            locket_secret::portal::SecretPortal::new(daemon.state.clone()),
+        )
+        .await
+        .unwrap();
+
+    async fn ask(client: &locket_secret::testing::Client) -> (u32, Vec<u8>) {
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let handle =
+            OwnedObjectPath::try_from("/org/freedesktop/portal/desktop/request/1").unwrap();
+        let (code, _): (u32, HashMap<String, OwnedValue>) = client
+            .proxy(
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.impl.portal.Secret",
+            )
+            .await
+            .call(
+                "RetrieveSecret",
+                &(
+                    handle,
+                    "org.example.App",
+                    Fd::from(&writer),
+                    HashMap::<String, Value>::new(),
+                ),
+            )
+            .await
+            .unwrap();
+        drop(writer);
+        let mut secret = Vec::new();
+        reader.read_to_end(&mut secret).unwrap();
+        (code, secret)
+    }
+
+    let anyone = daemon.client().await;
+    let (code, secret) = ask(&anyone).await;
+    assert_eq!(code, 2, "a bus peer was handed an application's key");
+    assert!(secret.is_empty());
+
+    let portal = daemon.client().await;
+    portal
+        .connection
+        .request_name(locket_secret::portal::PORTAL_FRONTEND)
+        .await
+        .unwrap();
+    let (code, secret) = ask(&portal).await;
+    assert_eq!(code, 0);
+    assert_eq!(secret.len(), locket_secret::portal::APP_SECRET_LEN);
+}
