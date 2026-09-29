@@ -101,13 +101,12 @@ zxcvbn = "3.1"
 # The one network client in the workspace, used only by locket-hibp for the
 # opt-in Have I Been Pwned range check. rustls so nothing links OpenSSL for
 # it; no default features so no cookie jar, no proxy discovery, no surprises.
-# reqwest 0.13 split the old `rustls-tls` feature: `rustls` brings the stack,
-# and the trust anchors are now chosen separately. `rustls-native-certs` uses
-# the system store, so an enterprise or user-added root works here the same
-# way it does for every other program on the machine.
-reqwest = { version = "0.13", default-features = false, features = [
+# `rustls` verifies through rustls-platform-verifier, i.e. against the
+# system trust store, so an enterprise or user-added root works here the same
+# way it does for every other program on the machine. (0.13.1 also exposed a
+# `rustls-native-certs` feature that its code never used; 0.13.5 removed it.)
+reqwest = { version = "0.13.5", default-features = false, features = [
     "rustls",
-    "rustls-native-certs",
     "http2",
 ] }
 
