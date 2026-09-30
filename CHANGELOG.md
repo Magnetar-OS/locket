@@ -34,6 +34,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   the SSH agent straight away, instead of after the daemon's next write or
   unlock. It never starts a daemon to do so and says nothing when there is
   none.
+- The Security page no longer offers to add a TPM or security key. Nothing
+  in locket can unlock the vault with one yet, so a factor added there
+  opened nothing; the page now says so, and factors added earlier are still
+  listed and can be removed. A TPM factor can no longer be added without a
+  PIN.
 
 ### Fixed
 

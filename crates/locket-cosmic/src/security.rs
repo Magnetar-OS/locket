@@ -96,18 +96,36 @@ pub fn is_last_passphrase(vault: &Vault, slot_id: Uuid) -> bool {
     passphrase_slots.len() == 1 && passphrase_slots[0].id == slot_id
 }
 
+/// The factors the page offers to add.
+///
+/// None, for now. Enrolment works, but nothing in locket opens the vault
+/// with a TPM or security-key slot yet — the window, the daemon and PAM all
+/// unlock with the passphrase — so offering it would add a factor that
+/// unlocks nothing. The enrolment code stays for when that is wired, and
+/// slots enrolled earlier are still listed and removable.
+pub fn offered_factors() -> &'static [Factor] {
+    &[]
+}
+
+/// The PIN a TPM slot is sealed under, which is required.
+///
+/// Without one the chip releases the key to anything on this machine that
+/// asks, and the dictionary-attack lockout the page describes never comes
+/// into play.
+pub fn tpm_pin(pin: &str) -> Result<&str, String> {
+    if pin.is_empty() {
+        return Err(fl!("error-tpm-pin-required"));
+    }
+    Ok(pin)
+}
+
 /// Enrol a TPM slot. Blocking: talks to the chip.
 #[cfg(feature = "tpm")]
 pub fn enroll_tpm(vault: &mut Vault, pin: &str) -> Result<Uuid, String> {
-    let pin = if pin.is_empty() { None } else { Some(pin) };
-    let (factor, kek) = locket_tpm::enroll(pin).map_err(|e| e.to_string())?;
-    let label = if pin.is_some() {
-        "TPM 2.0 (PIN)"
-    } else {
-        "TPM 2.0"
-    };
+    let pin = tpm_pin(pin)?;
+    let (factor, kek) = locket_tpm::enroll(Some(pin)).map_err(|e| e.to_string())?;
     vault
-        .add_slot(label, factor, &kek)
+        .add_slot("TPM 2.0 (PIN)", factor, &kek)
         .map_err(|e| e.to_string())
 }
 
@@ -267,42 +285,49 @@ impl Security {
             .push(widget::divider::horizontal::default())
             .push(widget::text::caption_heading(fl!("security-add-heading")));
 
-        column = column.push(
-            widget::text_input::secure_input(
-                fl!("security-pin-placeholder"),
-                &self.pin,
-                None,
-                true,
-            )
-            .on_input(Message::PinChanged),
-        );
+        if offered_factors().is_empty() {
+            column = column.push(
+                widget::text::body(fl!("security-hardware-unavailable"))
+                    .wrapping(cosmic::iced::core::text::Wrapping::WordOrGlyph),
+            );
+        } else {
+            column = column.push(
+                widget::text_input::secure_input(
+                    fl!("security-pin-placeholder"),
+                    &self.pin,
+                    None,
+                    true,
+                )
+                .on_input(Message::PinChanged),
+            );
 
-        let mut buttons = widget::row::with_capacity(2).spacing(spacing.space_xs);
-        for factor in [Factor::TpmPin, Factor::SecurityKey] {
-            let busy = self.busy == Some(factor);
-            let label = if busy {
-                match factor {
-                    Factor::TpmPin => fl!("security-sealing-short"),
-                    Factor::SecurityKey => fl!("security-touch-short"),
-                }
-            } else {
-                fl!("security-add-factor", factor = factor.label())
-            };
-            let button = widget::button::standard(label);
-            buttons = buttons.push(if busy || !factor.compiled_in() {
-                Element::from(button)
-            } else {
-                Element::from(button.on_press(Message::Enroll(factor)))
-            });
+            let mut buttons = widget::row::with_capacity(2).spacing(spacing.space_xs);
+            for &factor in offered_factors() {
+                let busy = self.busy == Some(factor);
+                let label = if busy {
+                    match factor {
+                        Factor::TpmPin => fl!("security-sealing-short"),
+                        Factor::SecurityKey => fl!("security-touch-short"),
+                    }
+                } else {
+                    fl!("security-add-factor", factor = factor.label())
+                };
+                let button = widget::button::standard(label);
+                buttons = buttons.push(if busy || !factor.compiled_in() {
+                    Element::from(button)
+                } else {
+                    Element::from(button.on_press(Message::Enroll(factor)))
+                });
+            }
+            column = column.push(buttons);
+
+            if !Factor::TpmPin.compiled_in() || !Factor::SecurityKey.compiled_in() {
+                column = column.push(widget::text::caption(fl!("security-build-missing")));
+            }
+
+            // The honest caveat, where someone choosing a PIN will read it.
+            column = column.push(widget::text::caption(fl!("security-tpm-caveat")));
         }
-        column = column.push(buttons);
-
-        if !Factor::TpmPin.compiled_in() || !Factor::SecurityKey.compiled_in() {
-            column = column.push(widget::text::caption(fl!("security-build-missing")));
-        }
-
-        // The honest caveat, where someone choosing a PIN will read it.
-        column = column.push(widget::text::caption(fl!("security-tpm-caveat")));
 
         // -- change the passphrase -------------------------------------------
         column = column
@@ -465,6 +490,22 @@ mod tests {
             user_verification: false,
         }));
         assert!(fido.contains("presence only"), "{fido}");
+    }
+
+    /// Nothing in locket opens the vault with a TPM or security-key slot yet,
+    /// so enrolling one would add a factor that cannot unlock anything.
+    #[test]
+    fn hardware_enrolment_is_not_offered_until_it_can_unlock() {
+        assert!(offered_factors().is_empty(), "{:?}", offered_factors());
+    }
+
+    /// A TPM slot with no PIN releases its key to anything on the machine
+    /// that asks, and the chip's lockout — the page's stated safeguard —
+    /// never applies.
+    #[test]
+    fn an_empty_tpm_pin_is_refused() {
+        assert!(tpm_pin("").is_err());
+        assert_eq!(tpm_pin("2468"), Ok("2468"));
     }
 
     #[test]
