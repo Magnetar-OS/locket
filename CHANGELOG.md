@@ -215,6 +215,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - An attachment goes to the item you added it from, even if you select
   another item while the file dialog is open, and saving one over an
   existing file makes that file readable only by you.
+- A daemon restarted while the window is open gets the idle timeout chosen
+  in Settings again, instead of running on its own default until the window
+  is reopened.
 
 ### Security
 

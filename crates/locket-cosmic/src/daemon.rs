@@ -30,6 +30,13 @@ pub enum DaemonEvent {
     Unavailable,
 }
 
+/// What the subscription hears from the bus.
+enum Heard {
+    UnlockRequested,
+    /// The daemon's name changed hands: `true` when somebody owns it now.
+    Owner(bool),
+}
+
 /// Watch the daemon for unlock requests.
 pub fn subscription() -> Subscription<DaemonEvent> {
     Subscription::run(|| {
@@ -49,16 +56,41 @@ pub fn subscription() -> Subscription<DaemonEvent> {
                 let locked = proxy.locked().await.unwrap_or(true);
                 let _ = tx.send(DaemonEvent::Connected { locked }).await;
 
-                let Ok(mut requests) = proxy.receive_unlock_requested().await else {
+                let Ok(requests) = proxy.receive_unlock_requested().await else {
                     let _ = tx.send(DaemonEvent::Unavailable).await;
                     continue;
                 };
+                // A signal stream does not end when the daemon leaves the bus
+                // — it follows the name to whoever owns it next — so a
+                // restarted daemon has to be noticed through the name itself.
+                // Without this it ran on its own idle default, because
+                // `Connected` is what hands it the user's setting.
+                let Ok(owners) = proxy.inner().receive_owner_changed().await else {
+                    let _ = tx.send(DaemonEvent::Unavailable).await;
+                    continue;
+                };
+                let mut heard = cosmic::iced::futures::stream::select(
+                    requests.map(|_| Heard::UnlockRequested),
+                    owners.map(|owner| Heard::Owner(owner.is_some())),
+                );
 
-                // The stream ends when the daemon drops off the bus, which
-                // sends us back around to reconnect.
-                while requests.next().await.is_some() {
-                    tracing::info!("daemon asked for an unlock");
-                    let _ = tx.send(DaemonEvent::UnlockRequested).await;
+                while let Some(event) = heard.next().await {
+                    let event = match event {
+                        Heard::UnlockRequested => {
+                            tracing::info!("daemon asked for an unlock");
+                            DaemonEvent::UnlockRequested
+                        }
+                        // A fresh connection, so the lock state is the new
+                        // daemon's rather than a value cached from the old.
+                        Heard::Owner(true) => DaemonEvent::Connected {
+                            locked: match client::connect().await {
+                                Some((_connection, fresh)) => fresh.locked().await.unwrap_or(true),
+                                None => true,
+                            },
+                        },
+                        Heard::Owner(false) => DaemonEvent::Unavailable,
+                    };
+                    let _ = tx.send(event).await;
                 }
                 let _ = tx.send(DaemonEvent::Unavailable).await;
             }
