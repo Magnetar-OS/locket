@@ -13,6 +13,7 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Changed
 
+- Rebuilt against the current COSMIC libraries (libcosmic `6af8b70`).
 - A locked vault no longer keeps an application waiting past the point where
   the application stops listening. `git push`, `secret-tool` and anything else
   on libsecret used to hang for 25 seconds per call and then report "Timeout
