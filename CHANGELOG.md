@@ -188,6 +188,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   browser extension updated. locket says the item changed; saving again
   replaces that change, and the replaced version stays in the item's
   history.
+- Auto-type no longer presses Enter or Tab for a line break or tab inside a
+  password; such a value is refused instead of submitting the form or
+  splitting across fields. A login with an empty username is typed as the
+  password alone, into the field you clicked, instead of the field after it.
 
 ### Security
 

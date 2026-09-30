@@ -32,13 +32,13 @@ const KEY_DELAY_MS: u64 = 8;
 ///
 /// Printable ASCII and Latin-1 *are* their keysyms; everything else maps
 /// through the Unicode range (`0x0100_0000 + codepoint`), per the keysym
-/// registry. Control characters other than tab and return are refused: a
-/// secret containing one is data, and typing it would do something.
+/// registry. Control characters are refused, tab and return included: a
+/// value containing one is data, and typing it would act on the form — Tab
+/// moves the rest into another field, and Return submits a form nobody has
+/// reviewed.
 fn keysym_for(c: char) -> Option<i32> {
     let code = c as u32;
     match c {
-        '\t' => Some(0xff09),
-        '\r' | '\n' => Some(0xff0d),
         _ if (0x20..=0x7e).contains(&code) => Some(code as i32),
         _ if (0xa0..=0xff).contains(&code) => Some(code as i32),
         _ if code >= 0x100 => Some((0x0100_0000 + code) as i32),
@@ -50,8 +50,10 @@ fn keysym_for(c: char) -> Option<i32> {
 ///
 /// The permission dialog is the compositor's, shown before the countdown
 /// starts, so the person is never racing a timer while reading a consent
-/// prompt. `PersistMode::Application` lets the compositor remember the
-/// answer, so the dialog is a first-use cost rather than a per-use one.
+/// prompt. `PersistMode::Application` asks for the answer to be kept while
+/// locket runs, but the portal only honours that through a restore token
+/// passed to the next session, and none is kept here — so the compositor may
+/// ask on every use.
 ///
 /// `wanted` is cleared when the window locks; every key checks it first, so
 /// nothing is typed from a vault that has since been locked.
@@ -60,14 +62,33 @@ pub async fn type_credentials(
     secret: SecretString,
     wanted: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    // Worked out before asking for access, so a value that cannot be typed
+    // is refused without a permission dialog for nothing.
+    let keys = keystrokes(username.as_deref(), secret.expose())?;
     let proxy = RemoteDesktop::new().await.map_err(portal_error)?;
     let session = proxy
         .create_session(Default::default())
         .await
         .map_err(portal_error)?;
+    let typed = type_into(&proxy, &session, &keys, &wanted).await;
+    // The session is what holds the keyboard. The portal only ends it on its
+    // own when this process leaves the bus, so without this every auto-type
+    // left one open for as long as locket ran.
+    let closed = session.close().await;
+    typed?;
+    closed.map_err(|e| format!("typed, but could not end the input session: {e}"))
+}
+
+/// Ask for the keyboard, wait out the countdown, and press `keys`.
+async fn type_into(
+    proxy: &RemoteDesktop,
+    session: &Session<RemoteDesktop>,
+    keys: &[i32],
+    wanted: &AtomicBool,
+) -> Result<(), String> {
     proxy
         .select_devices(
-            &session,
+            session,
             SelectDevicesOptions::default()
                 .set_devices(BitFlags::from(DeviceType::Keyboard))
                 .set_persist_mode(PersistMode::Application),
@@ -75,7 +96,7 @@ pub async fn type_credentials(
         .await
         .map_err(portal_error)?;
     let devices = proxy
-        .start(&session, None, StartOptions::default())
+        .start(session, None, StartOptions::default())
         .await
         .map_err(portal_error)?
         .response()
@@ -88,26 +109,36 @@ pub async fn type_credentials(
     // click decides where the text lands.
     tokio::time::sleep(std::time::Duration::from_secs(COUNTDOWN_SECS)).await;
 
-    if let Some(username) = &username {
-        type_text(&proxy, &session, username, &wanted).await?;
-        press(&proxy, &session, 0xff09, &wanted).await?; // Tab
-    }
-    type_text(&proxy, &session, secret.expose(), &wanted).await?;
-    Ok(())
-}
-
-async fn type_text(
-    proxy: &RemoteDesktop,
-    session: &Session<RemoteDesktop>,
-    text: &str,
-    wanted: &AtomicBool,
-) -> Result<(), String> {
-    for c in text.chars() {
-        let keysym = keysym_for(c)
-            .ok_or_else(|| format!("the value contains an untypeable character ({c:?})"))?;
+    for &keysym in keys {
         press(proxy, session, keysym, wanted).await?;
     }
     Ok(())
+}
+
+/// Tab, between the username and the password.
+const TAB: i32 = 0xff09;
+
+/// Every key to press, worked out before the first one is: a value that
+/// cannot be typed is refused whole rather than half-typed.
+fn keystrokes(username: Option<&str>, secret: &str) -> Result<Vec<i32>, String> {
+    let mut keys = Vec::new();
+    // An empty username field is no username: typing nothing and then Tab
+    // would land the password in the field after the one clicked.
+    if let Some(username) = username.filter(|u| !u.is_empty()) {
+        keys.extend(typed(username)?);
+        keys.push(TAB);
+    }
+    keys.extend(typed(secret)?);
+    Ok(keys)
+}
+
+fn typed(text: &str) -> Result<Vec<i32>, String> {
+    text.chars()
+        .map(|c| {
+            keysym_for(c)
+                .ok_or_else(|| format!("the value contains an untypeable character ({c:?})"))
+        })
+        .collect()
 }
 
 async fn press(
@@ -165,15 +196,24 @@ mod tests {
         assert_eq!(keysym_for('🔑'), Some(0x0100_0000 + 0x1f511));
     }
 
+    /// Tab and Enter act on the form: Tab moves the password into the next
+    /// field, Enter submits a form nobody has looked at. Inside a value they
+    /// are refused like every other control character.
     #[test]
-    fn tab_and_return_map_and_other_controls_are_refused() {
-        assert_eq!(keysym_for('\t'), Some(0xff09));
-        assert_eq!(keysym_for('\n'), Some(0xff0d));
-        assert_eq!(
-            keysym_for('\u{7}'),
-            None,
-            "a bell character became a keystroke"
-        );
-        assert_eq!(keysym_for('\u{1b}'), None, "escape became a keystroke");
+    fn control_characters_in_a_value_are_refused_tab_and_return_included() {
+        for c in ['\t', '\n', '\r', '\u{7}', '\u{1b}'] {
+            assert_eq!(keysym_for(c), None, "{c:?} became a keystroke");
+        }
+        assert!(keystrokes(Some("ada"), "hunter2\n").is_err());
+        assert!(keystrokes(Some("ada\t"), "hunter2").is_err());
+    }
+
+    /// An empty username field is not a username: typing nothing and then
+    /// Tab would put the password into the field after the one clicked.
+    #[test]
+    fn an_empty_username_types_no_tab() {
+        assert_eq!(keystrokes(Some(""), "pw"), Ok(vec![0x70, 0x77]));
+        assert_eq!(keystrokes(None, "pw"), Ok(vec![0x70, 0x77]));
+        assert_eq!(keystrokes(Some("a"), "pw"), Ok(vec![0x61, TAB, 0x70, 0x77]));
     }
 }
