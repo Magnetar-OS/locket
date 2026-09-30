@@ -54,6 +54,38 @@ fn create_0600(path: &Path) -> Result<std::fs::File> {
     })
 }
 
+/// Create `path` with [`create_0600`], fill it with `write`, and sync it.
+///
+/// If filling it fails, the partly written file is removed. A plaintext
+/// export that stopped half-way would otherwise leave a fragment of every
+/// secret on disk, and block the next attempt at the same name. The file is
+/// written where it will stay rather than renamed into place, because
+/// renaming without overwriting is not something FAT or exFAT — a USB stick
+/// — can do.
+fn write_new_0600(path: &Path, write: impl FnOnce(&mut std::fs::File) -> Result<()>) -> Result<()> {
+    let mut file = create_0600(path)?;
+    let filled = write(&mut file).and_then(|()| {
+        file.sync_all().map_err(|e| Error::Io {
+            path: path.to_path_buf(),
+            source: e,
+        })
+    });
+    let Err(error) = filled else {
+        return Ok(());
+    };
+    drop(file);
+    match std::fs::remove_file(path) {
+        Ok(()) => Err(error),
+        Err(e) => Err(Error::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::new(
+                e.kind(),
+                format!("{error}; and the partly written file could not be removed: {e}"),
+            ),
+        }),
+    }
+}
+
 /// Everything, as JSON. Returns how many items were written.
 pub fn to_json(vault: &Vault, path: &Path) -> Result<usize> {
     let mut items = Vec::new();
@@ -86,15 +118,12 @@ pub fn to_json(vault: &Vault, path: &Path) -> Result<usize> {
         "items": items,
     });
 
-    let mut file = create_0600(path)?;
-    file.write_all(&serde_json::to_vec_pretty(&document).map_err(|e| Error::Vault(e.to_string()))?)
-        .map_err(|e| Error::Io {
+    let bytes = serde_json::to_vec_pretty(&document).map_err(|e| Error::Vault(e.to_string()))?;
+    write_new_0600(path, |file| {
+        file.write_all(&bytes).map_err(|e| Error::Io {
             path: path.to_path_buf(),
             source: e,
-        })?;
-    file.sync_all().map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
+        })
     })?;
     Ok(count)
 }
@@ -102,7 +131,21 @@ pub fn to_json(vault: &Vault, path: &Path) -> Result<usize> {
 /// The flat CSV, Bitwarden's column names. Returns `(written, lossy)`:
 /// `lossy` counts items that had fields or attachments CSV cannot carry.
 pub fn to_csv(vault: &Vault, path: &Path) -> Result<(usize, usize)> {
-    let file = create_0600(path)?;
+    let mut written = 0usize;
+    let mut lossy = 0usize;
+    write_new_0600(path, |file| {
+        write_csv(vault, file, path, &mut written, &mut lossy)
+    })?;
+    Ok((written, lossy))
+}
+
+fn write_csv(
+    vault: &Vault,
+    file: &mut std::fs::File,
+    path: &Path,
+    written: &mut usize,
+    lossy: &mut usize,
+) -> Result<()> {
     let mut writer = csv::Writer::from_writer(file);
     writer
         .write_record([
@@ -118,8 +161,6 @@ pub fn to_csv(vault: &Vault, path: &Path) -> Result<(usize, usize)> {
         ])
         .map_err(|e| Error::Vault(e.to_string()))?;
 
-    let mut written = 0usize;
-    let mut lossy = 0usize;
     for (collection, item) in vault.data().all_items() {
         let notes = item.field_value(field_names::NOTES).unwrap_or_default();
         let carried: &[&str] = &[
@@ -134,7 +175,7 @@ pub fn to_csv(vault: &Vault, path: &Path) -> Result<(usize, usize)> {
                 .iter()
                 .any(|f| !carried.contains(&f.name.as_str()))
         {
-            lossy += 1;
+            *lossy += 1;
         }
         writer
             .write_record([
@@ -149,13 +190,12 @@ pub fn to_csv(vault: &Vault, path: &Path) -> Result<(usize, usize)> {
                 item.field_value(field_names::TOTP).unwrap_or_default(),
             ])
             .map_err(|e| Error::Vault(e.to_string()))?;
-        written += 1;
+        *written += 1;
     }
     writer.flush().map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
-    })?;
-    Ok((written, lossy))
+    })
 }
 
 /// A KDBX 4 database KeePassXC opens directly, sealed under `passphrase`.
@@ -271,6 +311,35 @@ mod tests {
         v.add_item_default(item);
         v.add_item_default(Item::new(ItemKind::Note, "Plain note").with_secret("body"));
         v
+    }
+
+    /// No export path can be made to fail after its file exists from
+    /// outside, so this drives the writer they share: a plaintext export
+    /// that stops part-way must not leave a fragment of every secret on
+    /// disk, nor block the next attempt at the same name.
+    #[test]
+    fn a_failed_export_leaves_no_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.csv");
+        let result = write_new_0600(&path, |file| {
+            file.write_all(b"folder,name,login_password\nWork,GitHub,hunter2\n")
+                .unwrap();
+            Err(Error::Vault("stopped part-way".into()))
+        });
+        assert!(result.is_err());
+        assert!(!path.exists(), "the partly written export was left behind");
+
+        write_new_0600(&path, |file| {
+            file.write_all(b"ok").unwrap();
+            Ok(())
+        })
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]

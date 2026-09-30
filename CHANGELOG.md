@@ -238,6 +238,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   agent can use, where they used to arrive as empty logins, and servers no
   longer turn into SSH keys. Card expiry dates, addresses, email addresses
   and birth dates before 1970 are kept instead of dropped.
+- A plaintext export (JSON or CSV) that failed part-way used to leave the
+  half-written file behind, holding some of your secrets in the clear and
+  blocking a retry under the same name. The partial file is now removed, and
+  CSV exports are flushed to disk like the other formats.
 
 ### Security
 
