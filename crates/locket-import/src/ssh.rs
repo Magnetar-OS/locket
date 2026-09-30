@@ -218,9 +218,9 @@ pub fn scan(dir: &Path) -> Result<Vec<KeyFile>> {
             continue;
         }
 
-        let public = std::fs::read_to_string(path.with_extension("pub"))
-            .ok()
-            .or_else(|| std::fs::read_to_string(format!("{}.pub", path.display())).ok());
+        // OpenSSH's own naming appends `.pub`; replacing the extension instead
+        // would pair `deploy.old` with `deploy.pub`, another key's half.
+        let public = std::fs::read_to_string(format!("{}.pub", path.display())).ok();
         let comment = public.as_deref().and_then(comment_of);
         // OpenSSH's own naming: `id_ed25519` -> `id_ed25519-cert.pub`.
         let certificate = std::fs::read_to_string(format!("{}-cert.pub", path.display()))
@@ -567,6 +567,28 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
             !item.matches("b3BlbnNzaC1rZXktdjE"),
             "the key body is searchable"
         );
+    }
+
+    /// OpenSSH appends `.pub`; it never replaces an extension. A key named
+    /// `deploy.old` used to pick up `deploy.pub` — another key's public half
+    /// and comment.
+    #[test]
+    fn a_dotted_key_name_gets_its_own_pub() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("deploy"), UNENCRYPTED).unwrap();
+        std::fs::write(
+            dir.path().join("deploy.pub"),
+            "ssh-ed25519 AAAA deploy@current\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("deploy.old"), UNENCRYPTED).unwrap();
+        std::fs::write(dir.path().join("deploy.old.pub"), UNENCRYPTED_PUB).unwrap();
+
+        let found = scan(dir.path()).unwrap();
+        let old = found.iter().find(|k| k.name == "deploy.old").unwrap();
+        assert_eq!(old.comment.as_deref(), Some("ada@lovelace"));
+        let current = found.iter().find(|k| k.name == "deploy").unwrap();
+        assert_eq!(current.comment.as_deref(), Some("deploy@current"));
     }
 
     #[test]

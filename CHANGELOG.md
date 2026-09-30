@@ -102,6 +102,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   the summary said nothing was unreadable; they are now counted as
   unreadable and named in a note, so you know which codes are still only on
   the phone.
+- Importing SSH keys whose file names contain a dot, such as `deploy.old`,
+  could attach the public key and comment of a different key (`deploy.pub`).
+  Each key now gets its own `.pub` file, the way OpenSSH names them.
 
 ### Security
 
