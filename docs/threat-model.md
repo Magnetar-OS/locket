@@ -181,8 +181,10 @@ deleted over the bus, not from being read).
 
 Only one thing reaches the network, only when asked: the Have I Been Pwned
 check sends the first five hex characters of a secret's SHA-1 — twenty bits,
-shared with roughly sixteen million other passwords — over HTTPS, with
-response padding requested. The password, and its full hash, do not leave
+one of about a million prefixes, each shared by some two thousand of the
+breached passwords the service knows (measured September 2026) and by one in
+a million of every password there could be — over HTTPS, with response
+padding requested. The password, and its full hash, do not leave
 the machine. Everything else in locket is local.
 
 ## Deliberate exposures

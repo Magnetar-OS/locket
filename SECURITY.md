@@ -78,5 +78,5 @@ overnight soak.
 
 ## Supported versions
 
-Nothing is released yet. Until there is a tag, the supported version is the tip
-of `main`.
+The latest release, and the tip of `main`. Fixes are not backported to
+older releases.

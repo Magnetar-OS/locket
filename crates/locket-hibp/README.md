@@ -8,8 +8,9 @@ wanting a breach check has to reach for this crate on purpose, behind an
 explicit user opt-in.
 
 What actually leaves the machine: the first five hex characters of the
-SHA-1 of a password — 20 bits, shared by every one of the ~16 million
-passwords per bucket — never the password, never its full hash. The
+SHA-1 of a password — 20 bits, one of about a million prefixes, each
+shared by some two thousand of the breached passwords the service holds —
+never the password, never its full hash. The
 server returns the whole bucket and the matching is done here. The
 `Add-Padding` header is sent so even the response length does not say
 whether anything matched.
