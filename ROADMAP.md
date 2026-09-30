@@ -29,9 +29,9 @@ Ahead — things KeePassXC does not do, or does less deeply:
   exclusion and live TOTP; derived (not stored) portal app secrets; multi-slot
   key wrapping where hardware *adds* a factor instead of replacing one.
 
-At parity: TOTP (with QR round-trip), password + Diceware generation, SSH
+At parity: TOTP (with QR round-trip), password generation, SSH
 agent (arguably ahead: certificates, `sk-` keys, per-key confirm), CLI,
-browser extension basics, import from eight sources, tags, favorites,
+browser extension basics, import from eleven sources, tags, favorites,
 auto-lock, clipboard clearing.
 
 Behind — and the substance of this roadmap:
