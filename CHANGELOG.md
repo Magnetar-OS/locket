@@ -4,6 +4,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-30
+
 ### Added
 
 - `org.locket.Manager1.VaultLocked(reason)`: the daemon now says when the
@@ -835,7 +837,8 @@ scripts/locket-setup            # reinstalls under the new id
 - `ssh-add -x` and `-X` work: the lock passphrase is kept and compared in
   constant time.
 
-[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Magnetar-OS/locket/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/Magnetar-OS/locket/compare/v1.2.0...v2.0.0
 [1.2.0]: https://github.com/Magnetar-OS/locket/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Magnetar-OS/locket/compare/v1.0.0...v1.1.0
