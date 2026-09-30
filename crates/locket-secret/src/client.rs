@@ -64,6 +64,58 @@ pub async fn connect() -> Option<(Connection, ManagerProxy<'static>)> {
     None
 }
 
+/// Tell a daemon that is already running that `vault` was just written, so it
+/// re-reads the file instead of serving what it read before.
+///
+/// For a writer that has to work with no daemon at all — the command line.
+/// `None` means there was nobody to tell: no session bus, no daemon on it, or
+/// a daemon serving a different file. Otherwise the result of `Reload`.
+///
+/// Unlike [`connect`], this never starts a daemon. It asks the bus who owns
+/// the name before calling it, because a call to a name nobody owns is what
+/// makes the bus activate the service registered for it — and a recovery tool
+/// run because the daemon will not start must not sit waiting for it to.
+pub async fn reload_running(vault: &std::path::Path) -> Option<zbus::Result<bool>> {
+    let connection = Connection::session().await.ok()?;
+    let bus = zbus::fdo::DBusProxy::new(&connection).await.ok()?;
+    for name in BUS_NAMES {
+        let Ok(bus_name) = zbus::names::BusName::try_from(*name) else {
+            continue;
+        };
+        if !bus.name_has_owner(bus_name).await.unwrap_or(false) {
+            continue;
+        }
+        let Ok(proxy) = ManagerProxy::builder(&connection)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .destination(*name)
+            .and_then(|b| b.path(MANAGER_PATH))
+        else {
+            continue;
+        };
+        let Ok(proxy) = proxy.build().await else {
+            continue;
+        };
+        // Something else may own the name — gnome-keyring, on the freedesktop
+        // one — and a locketd may be serving another vault.
+        let Ok(served) = proxy.vault_path().await else {
+            continue;
+        };
+        if !same_file(std::path::Path::new(&served), vault) {
+            continue;
+        }
+        return Some(proxy.reload().await);
+    }
+    None
+}
+
+/// Whether two paths name one file, however each was spelled.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 /// A snapshot of the daemon's state, for status displays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Status {

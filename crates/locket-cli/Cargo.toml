@@ -31,3 +31,8 @@ tracing-subscriber.workspace = true
 zeroize.workspace = true
 uuid.workspace = true
 rpassword = "7"
+
+[dev-dependencies]
+tempfile = "3"
+# A private bus with a daemon's objects on it; see locket_secret::testing.
+locket-secret = { workspace = true, features = ["test-bus"] }

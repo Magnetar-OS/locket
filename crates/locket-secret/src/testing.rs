@@ -38,8 +38,22 @@ pub struct PrivateBus {
 
 impl PrivateBus {
     pub fn start() -> Self {
+        Self::start_with(None)
+    }
+
+    /// A bus that can activate the services described in `services` — a
+    /// directory the test wrote, never the system's. For checking that
+    /// something does *not* start a service by calling its name.
+    pub fn start_activating(services: &Path) -> Self {
+        Self::start_with(Some(services))
+    }
+
+    fn start_with(services: Option<&Path>) -> Self {
         let dir = tempfile::tempdir().expect("temporary directory for the bus");
         let config = dir.path().join("bus.conf");
+        let services = services
+            .map(|d| format!("<servicedir>{}</servicedir>", d.display()))
+            .unwrap_or_default();
         std::fs::write(
             &config,
             format!(
@@ -48,6 +62,7 @@ impl PrivateBus {
 <busconfig>
   <type>session</type>
   <listen>unix:dir={}</listen>
+  {services}
   <auth>EXTERNAL</auth>
   <policy context="default">
     <allow send_destination="*" eavesdrop="true"/>

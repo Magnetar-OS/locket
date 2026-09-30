@@ -21,6 +21,12 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Nothing asks to be unlocked behind a locked screen. A request that would
   raise the dialog there is refused at once and asks again when the screen is
   back.
+- `locket-cli` tells a running daemon to re-read the vault after it writes
+  it, as the application already did. An item added, edited or removed from
+  a terminal is there for libsecret applications, the browser extension and
+  the SSH agent straight away, instead of after the daemon's next write or
+  unlock. It never starts a daemon to do so and says nothing when there is
+  none.
 
 ### Fixed
 

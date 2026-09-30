@@ -152,8 +152,12 @@ go through it — so the vault is unlocked once per session rather than once per
 application.
 
 `locket-cli` is the exception, on purpose: it opens the vault file itself and
-never talks to the daemon, so it still works when the daemon will not start.
-The GUI does the same as a fallback when no daemon is on the bus.
+never goes through the daemon, so it still works when the daemon will not
+start. When it has written the file it tells a daemon that is already running
+to re-read it (`org.locket.Manager1.Reload`), and that is all: it does not
+start a daemon, waits five seconds at most for one, and says nothing when
+there is none. The GUI does the same as a fallback when no daemon is on the
+bus.
 
 ### Key slots
 
@@ -1005,7 +1009,9 @@ not an exotic one. Saving is done under an advisory lock on a sibling
   to catch up by whoever wrote it (`org.locket.Manager1.Reload`);
 * the frontend reloads before it edits, polls for external changes while it is
   open, and calls `Reload` after saving so the daemon is never left serving
-  what it read ten minutes ago.
+  what it read ten minutes ago;
+* `locket-cli` calls `Reload` after saving too, when a daemon serving that file
+  is running — without ever starting one.
 
 A conflict that survives all that loses one write and says so. It does not
 silently discard the other side's, which is what the previous arrangement did

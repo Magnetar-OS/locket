@@ -1,7 +1,13 @@
 //! `locket-cli` — scriptable access to a locket vault.
 //!
-//! Operates directly on the vault file. It deliberately does not talk to
+//! Operates directly on the vault file. It deliberately does not go through
 //! `locketd`, so it keeps working for recovery when the daemon will not start.
+//!
+//! After it has written the file it tells a daemon that is already running,
+//! and serving that file, to re-read it — the daemon's libsecret clients and
+//! SSH agent would otherwise go on serving what it read before. That is the
+//! whole of its dealings with the daemon: it never starts one, never waits
+//! long for one, and nothing it does depends on the answer.
 
 #![forbid(unsafe_code)]
 
@@ -683,7 +689,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 item.label.clone()
             })?;
 
-            vault.save()?;
+            save(&mut vault)?;
             println!("updated {label}");
         }
 
@@ -716,11 +722,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if permanent {
                 vault.remove_item(id).ok_or("could not remove the item")?;
-                vault.save()?;
+                save(&mut vault)?;
                 println!("permanently deleted {label}");
             } else {
                 vault.trash_item(id).ok_or("could not trash the item")?;
-                vault.save()?;
+                save(&mut vault)?;
                 println!("moved {label} to the trash; `trash restore` brings it back");
             }
         }
@@ -746,7 +752,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Opening may itself have purged; keep that.
                     if vault.is_dirty() {
-                        vault.save()?;
+                        save(&mut vault)?;
                     }
                 }
                 TrashCommand::Restore { query } => {
@@ -757,7 +763,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|t| t.item.label.clone())
                         .unwrap_or_default();
                     vault.restore_item(id).ok_or("could not restore the item")?;
-                    vault.save()?;
+                    save(&mut vault)?;
                     println!("restored {label}");
                 }
                 TrashCommand::Purge { query, yes } => {
@@ -775,7 +781,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     vault.purge_item(id).ok_or("could not purge the item")?;
-                    vault.save()?;
+                    save(&mut vault)?;
                     println!("permanently deleted {label}");
                 }
                 TrashCommand::Retain { days } => {
@@ -787,7 +793,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             })?),
                         };
                     vault.data_mut().settings.trash_retention_days = retention;
-                    vault.save()?;
+                    save(&mut vault)?;
                     match retention {
                         Some(days) => println!("trashed items are purged after {days} day(s)"),
                         None => println!("trashed items are kept until emptied by hand"),
@@ -810,7 +816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     vault.data_mut().trash.clear();
-                    vault.save()?;
+                    save(&mut vault)?;
                     println!("emptied the trash ({count} item(s))");
                 }
             }
@@ -828,7 +834,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let item = vault.item_mut(id).ok_or("item vanished")?;
                 let dropped = item.forget_history();
                 let label = item.label.clone();
-                vault.save()?;
+                save(&mut vault)?;
                 println!("dropped {dropped} revision(s) of {label}");
                 return Ok(());
             }
@@ -854,7 +860,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let label = vault.edit_item(id, |item| {
                         item.restore_revision(n).map(|()| item.label.clone())
                     })??;
-                    vault.save()?;
+                    save(&mut vault)?;
                     println!("restored revision {n} of {label}");
                 }
             }
@@ -875,7 +881,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let item = vault.item_mut(id).ok_or("item vanished")?;
                     item.add_attachment(&name, mime, data)?;
                     let label = item.label.clone();
-                    vault.save()?;
+                    save(&mut vault)?;
                     println!("attached {name} ({size} bytes) to {label}");
                     eprintln!(
                         "\n{} is untouched; the vault holds an encrypted copy.",
@@ -915,7 +921,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or_else(|| format!("no attachment `{name}` on {}", item.label))?;
                     item.remove_attachment(attachment_id);
                     let label = item.label.clone();
-                    vault.save()?;
+                    save(&mut vault)?;
                     println!("removed {name} from {label}");
                 }
             }
@@ -1059,7 +1065,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("would merge: {report}");
                 println!("(dry run; nothing written)");
             } else {
-                vault.save()?;
+                save(&mut vault)?;
                 println!("merged: {report}");
                 eprintln!(
                     "\n{} was only read. Delete it once you have confirmed the merge.",
@@ -1119,7 +1125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("would import {summary}");
                 println!("(dry run; nothing written)");
             } else {
-                vault.save()?;
+                save(&mut vault)?;
                 println!("imported {summary}");
                 println!(
                     "vault now holds {} item(s), up from {before}",
@@ -1137,7 +1143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let summary =
                 locket_import::pass::import_store(&mut vault, &store, &gpg, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", store.display());
         }
 
@@ -1162,7 +1168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 keyfile.as_deref(),
                 into.as_deref(),
             )?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", database.display());
         }
 
@@ -1170,7 +1176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary =
                 locket_import::bitwarden::import_file(&mut vault, &file, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", file.display());
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every secret it held.",
@@ -1182,7 +1188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary =
                 locket_import::onepassword::import_file(&mut vault, &file, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", file.display());
             for note in &summary.notes {
                 eprintln!("\n{note}");
@@ -1197,7 +1203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary =
                 locket_import::protonpass::import_file(&mut vault, &file, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", file.display());
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every secret it held.",
@@ -1208,7 +1214,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ImportCsv { file, into } => {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary = locket_import::csv::import_file(&mut vault, &file, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", file.display());
             // The export is every credential you own, in the clear.
             eprintln!(
@@ -1227,7 +1233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary =
                 locket_import::dotenv::import_dir(&mut vault, &dir, grouping, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", dir.display());
             eprintln!(
                 "\nThe .env files are untouched. Delete them only once the projects read \
@@ -1242,7 +1248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary = locket_import::ssh::import_dir(&mut vault, &dir, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", dir.display());
             for note in &summary.notes {
                 eprintln!("\n{note}");
@@ -1263,7 +1269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary =
                 locket_import::cloud::import_home(&mut vault, &home, &sqlite, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", home.display());
             eprintln!(
                 "\nThe source files still hold the same credentials in the clear. \
@@ -1274,7 +1280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::ImportTotp { file, into } => {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary = locket_import::totp::import_file(&mut vault, &file, into.as_deref())?;
-            vault.save()?;
+            save(&mut vault)?;
             println!("imported {summary} from {}", file.display());
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every seed it held.",
@@ -1317,7 +1323,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("an empty passphrase is not a passphrase".into());
             }
             vault.change_passphrase(&new, params)?;
-            vault.save()?;
+            save(&mut vault)?;
             if rederive_only {
                 println!(
                     "re-derived at argon2id m={}KiB t={} p={} for {}",
@@ -1426,12 +1432,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let id = vault.add_item_default(item);
-            vault.save()?;
+            save(&mut vault)?;
             println!("{id}");
         }
     }
 
     Ok(())
+}
+
+/// Write the vault, then tell a running daemon that it changed.
+fn save(vault: &mut Vault) -> Result<(), Box<dyn std::error::Error>> {
+    vault.save()?;
+    notify_daemon(vault.path());
+    Ok(())
+}
+
+/// How long a running daemon gets to answer before this tool carries on.
+const DAEMON_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Tell a running daemon to re-read the vault file just written.
+///
+/// Best effort, and silent unless a daemon was there and could not be told:
+/// the write has already succeeded either way, and a daemon that missed this
+/// catches up at its own next write or unlock.
+fn notify_daemon(vault: &std::path::Path) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let told = runtime.block_on(async {
+        tokio::time::timeout(
+            DAEMON_PATIENCE,
+            locket_secret::client::reload_running(vault),
+        )
+        .await
+    });
+    match told {
+        Ok(None | Some(Ok(_))) => {}
+        Ok(Some(Err(e))) => eprintln!(
+            "saved, but the running daemon could not be told to re-read the vault ({e}); \
+             applications see this change after the daemon's next write or unlock"
+        ),
+        Err(_) => eprintln!(
+            "saved, but the running daemon did not answer; applications see this change \
+             after the daemon's next write or unlock"
+        ),
+    }
 }
 
 /// Read one y/N answer from stdin. The prompt is already printed.

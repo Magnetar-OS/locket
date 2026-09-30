@@ -30,7 +30,7 @@ model underneath it.
 | `locket-core` | in memory, while open | nothing — no I/O, no D-Bus, no UI | linked into everything below |
 | `locketd` | **yes**, while unlocked | the vault file, the session bus | every client below |
 | `locket` (GUI) | yes, when running daemonless | the vault file, `cosmic-config` | the person at the keyboard |
-| `locket-cli` | yes, while it runs | the vault file only — never the daemon | a terminal |
+| `locket-cli` | yes, while it runs | the vault file only; it reads nothing from the daemon, and tells a running one to re-read the file after a write | a terminal |
 | `pam_locket.so` | no | the unlock socket's location — a 0700 directory in the user's 0700 `XDG_RUNTIME_DIR`; no peer credentials are checked | the login stack, as root |
 | SSH agent (in `locketd`) | via the daemon | nothing about its callers | any process running as you |
 | Secret portal backend | via the daemon | `xdg-desktop-portal` to name the app id | sandboxed applications |
@@ -189,10 +189,13 @@ Each of these is a decision, not an oversight.
   by 2026 standards and fixed by the wire format. It protects secrets in
   transit on your own session bus only — never the vault at rest — and the
   alternative clients negotiate otherwise is `plain`.
-- **`locket-cli` never talks to the daemon.** It opens the vault file
+- **`locket-cli` never goes through the daemon.** It opens the vault file
   directly so recovery still works when the daemon will not start. It
   therefore needs the passphrase every time, and holds the key for its own
-  lifetime only.
+  lifetime only. Its one call to a daemon is `Manager1.Reload` after it has
+  written the file — to one that is already running and serving that file,
+  found by asking the bus who owns the name, so that nothing is started. The
+  call carries no data and any process running as you could make it.
 - **Auto-type sends keystrokes to whatever has focus.** No portal names the
   focused window (measured — see
   [autotype-wayland.md](autotype-wayland.md)), so locket cannot check where
