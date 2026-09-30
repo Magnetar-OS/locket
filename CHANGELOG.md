@@ -76,6 +76,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Merging a diverged copy no longer loses the earlier versions an item went
   through on the side whose edit lost. They are kept in the item's history
   along with its last state there.
+- When a merge moves an item to the trash because the other copy deleted it,
+  restoring it now brings back its most recent edit. It could bring back an
+  older version, with the later edit gone.
 
 ### Security
 

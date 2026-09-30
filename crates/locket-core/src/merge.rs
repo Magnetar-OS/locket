@@ -170,18 +170,26 @@ fn merge_live_item(
     }
 
     // Live there, trashed here?
-    if let Some(t) = data.trashed(theirs.id) {
-        if theirs.modified > t.deleted {
-            // Edited after we deleted it: the edit wins.
-            data.purge_item(theirs.id);
+    if let Some(deleted) = data.trashed(theirs.id).map(|t| t.deleted) {
+        if theirs.modified > deleted {
+            // Edited after we deleted it: the edit wins, and the copy we
+            // deleted is filed like any other losing side.
+            let ours = data
+                .purge_item(theirs.id)
+                .expect("item was just found in the trash");
+            let mut winner = theirs.clone();
+            absorb_loser(&mut winner, &ours, report);
             let target = resolve_collection(data, their_collection);
             data.collection_mut(target)
                 .expect("collection resolved to an existing one")
                 .items
-                .push(theirs.clone());
+                .push(winner);
             report.restored += 1;
+        } else if let Some(entry) = data.trash.iter_mut().find(|e| e.item.id == theirs.id) {
+            // Our deletion is newer: it stays in the trash — holding their
+            // copy if they edited it after we last did.
+            keep_newer(&mut entry.item, theirs, report);
         }
-        // Otherwise our deletion is newer: it stays in the trash.
         return;
     }
 
@@ -202,13 +210,13 @@ fn merge_trashed_item(data: &mut VaultData, t: TrashedItem, report: &mut MergeRe
             .map(|(_, i)| i.modified)
             .expect("item was just found live");
         if t.deleted >= ours_modified {
-            // Deleted after our last edit: the deletion propagates. Keep
-            // *our* copy of the item in the trash — it is the newer-or-equal
-            // content by the check above only when timestamps tie, so prefer
-            // the trashed copy's own content, which the deleting side saw.
+            // Deleted after our last edit: the deletion propagates, and the
+            // trash keeps whichever copy was edited last — theirs, when they
+            // edited before deleting.
             data.trash_item(t.item.id);
             if let Some(entry) = data.trash.iter_mut().find(|e| e.item.id == t.item.id) {
                 entry.deleted = t.deleted;
+                keep_newer(&mut entry.item, &t.item, report);
             }
             report.trashed += 1;
         }
@@ -224,12 +232,25 @@ fn merge_trashed_item(data: &mut VaultData, t: TrashedItem, report: &mut MergeRe
                 ours.deleted = t.deleted;
                 report.trash_updated += 1;
             }
+            keep_newer(&mut ours.item, &t.item, report);
         }
         // Only their trash has it: carry it over, retention and all.
         None => {
             data.trash.push(t);
             report.trash_updated += 1;
         }
+    }
+}
+
+/// Leave the more recently edited of two copies of a trashed item in its trash
+/// entry, with the other filed into its history. A deletion decides whether
+/// the item is gone, not which edit a restore brings back.
+fn keep_newer(kept: &mut Item, other: &Item, report: &mut MergeReport) {
+    if other.modified > kept.modified {
+        let older = std::mem::replace(kept, other.clone());
+        absorb_loser(kept, &older, report);
+    } else {
+        absorb_loser(kept, other, report);
     }
 }
 
@@ -438,6 +459,54 @@ mod tests {
         let (_, item) = a.find_item(id).expect("edited item was not resurrected");
         assert_eq!(item.secret.expose(), "edited after the delete");
         assert!(a.trashed(id).is_none(), "restored item still in the trash");
+    }
+
+    /// A deletion that wins still has to keep the newest *content*: one side
+    /// may have edited the item before the other side deleted it. The trash
+    /// used to hold whichever copy the receiving vault had, so a restore
+    /// brought back a stale version and the edit was silently gone.
+    #[test]
+    fn a_winning_deletion_keeps_the_newest_edit_in_the_trash() {
+        // B edits, then deletes; A only has the older state. And the mirror:
+        // A deletes after editing, B edited later than A's edit but before
+        // A's deletion.
+        let scenarios = [
+            (("old", 1_000, None), ("newer", 1_500, Some(2_000))),
+            (("old", 1_000, Some(2_000)), ("newer", 1_500, None)),
+        ];
+        for (a_side, b_side) in scenarios {
+            let (base, id) = vault_with("Login", "original");
+            let side = |(secret, modified, deleted): (&str, u64, Option<u64>)| {
+                let mut data = fork(&base);
+                let item = &mut data.collections[0].items[0];
+                item.secret = secret.into();
+                item.modified = modified;
+                if let Some(at) = deleted {
+                    data.trash_item(id);
+                    data.trash[0].deleted = at;
+                }
+                data
+            };
+            let (a, b) = (side(a_side), side(b_side));
+
+            for (mut into, other) in [(fork(&a), fork(&b)), (fork(&b), fork(&a))] {
+                merge(&mut into, other);
+                assert!(into.find_item(id).is_none(), "the deletion did not win");
+                let trashed = &into.trashed(id).expect("item not in the trash").item;
+                assert_eq!(
+                    trashed.secret.expose(),
+                    "newer",
+                    "the trash kept the stale copy"
+                );
+                assert!(
+                    trashed
+                        .history
+                        .iter()
+                        .any(|r| r.item.secret.expose() == "old"),
+                    "the older copy was not filed"
+                );
+            }
+        }
     }
 
     #[test]
