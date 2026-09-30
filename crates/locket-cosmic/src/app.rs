@@ -3764,9 +3764,12 @@ impl cosmic::Application for App {
             // until the task returns it, and there would be nothing to go
             // back to.
             self.import = None;
+            return self.update_title();
         } else if self.editor.is_some() {
-            // Same path as Cancel, so there is one way to abandon an edit.
+            // Same path as Cancel, so there is one way to abandon an edit —
+            // title included, which otherwise went on saying "Editing".
             self.editor = None;
+            return self.update_title();
         } else if self.core.window.show_context {
             self.core.window.show_context = false;
             self.selected = None;
