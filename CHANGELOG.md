@@ -85,6 +85,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Adding a TPM unlock factor from the Security page now finds the machine's
   TPM. It used to fail with "no TPM available" unless a TCTI environment
   variable had been set by hand.
+- Importing a Bitwarden JSON export of a personal vault failed with "not a
+  Bitwarden JSON export", because Bitwarden writes `"collectionIds": null`
+  on every item and the importer only accepted a list there. Such exports
+  now import.
 
 ### Security
 

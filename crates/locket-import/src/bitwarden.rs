@@ -17,17 +17,30 @@ use serde::Deserialize;
 
 use crate::{Error, ImportSummary, Result};
 
+/// Read `null` as the type's default, the same as an absent key.
+///
+/// `#[serde(default)]` alone only covers absence, and Bitwarden writes an
+/// explicit `null` for lists it has nothing to put in — `"collectionIds":
+/// null` on every item of a personal export.
+fn null_as_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Deserialize)]
 struct Export {
     #[serde(default)]
     encrypted: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     folders: Vec<Folder>,
     /// Organisation exports say `collections` where personal ones say
     /// `folders`; both are just named groups here.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     collections: Vec<Folder>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     items: Vec<Entry>,
 }
 
@@ -42,7 +55,11 @@ struct Entry {
     id: Option<String>,
     #[serde(rename = "folderId")]
     folder_id: Option<String>,
-    #[serde(default, rename = "collectionIds")]
+    #[serde(
+        default,
+        rename = "collectionIds",
+        deserialize_with = "null_as_default"
+    )]
     collection_ids: Vec<String>,
     /// 1 login, 2 secure note, 3 card, 4 identity.
     #[serde(rename = "type")]
@@ -54,13 +71,13 @@ struct Entry {
     login: Option<Login>,
     card: Option<Card>,
     identity: Option<Identity>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     fields: Vec<CustomField>,
 }
 
 #[derive(Deserialize)]
 struct Login {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     uris: Vec<Uri>,
     username: Option<String>,
     password: Option<String>,
@@ -316,6 +333,27 @@ mod tests {
         // The custom hidden field is masked; the linked one is dropped.
         assert_eq!(login.field("recovery").unwrap().kind, FieldKind::Secret);
         assert!(login.field("linked-username").is_none());
+    }
+
+    /// Bitwarden writes `"collectionIds": null` on every item of a personal
+    /// export — its own documented sample does — so `null` has to read as
+    /// "none", not as a malformed file.
+    #[test]
+    fn a_personal_export_with_null_lists_parses() {
+        let items = parse(
+            r#"{
+                "encrypted": false,
+                "folders": [],
+                "items": [{
+                    "id": "a1", "type": 1, "name": "X", "fields": null,
+                    "login": {"uris": null, "username": "ada", "password": "pw", "totp": null},
+                    "collectionIds": null
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].secret.expose(), "pw");
     }
 
     #[test]
