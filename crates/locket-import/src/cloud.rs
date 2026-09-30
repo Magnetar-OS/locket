@@ -290,12 +290,28 @@ pub fn azure_items(text: &str) -> Vec<Item> {
 /// whole YAML dependency for six lines. Indentation decides nesting, a
 /// zero-indent key is a host, and `user:` names the account a token belongs
 /// to.
+///
+/// A token under `users:` belongs to the account it is nested in. A token at
+/// host level belongs to the host's `user`, which gh may write after it — it
+/// sets the token, then the user, when it activates an account — so that
+/// token is only attributed once the host's block has been read.
 pub fn gh_entries(text: &str) -> Vec<(String, Option<String>, String)> {
     let mut out = Vec::new();
     let mut host: Option<String> = None;
     let mut user: Option<String> = None;
-    // Under `users:`, each nested key is an account name.
+    let mut host_token: Option<String> = None;
+    // Inside `users:`: how far it is indented, and the account being read.
+    let mut users_indent: Option<usize> = None;
     let mut current_account: Option<String> = None;
+
+    let finish_host = |out: &mut Vec<(String, Option<String>, String)>,
+                       host: &Option<String>,
+                       user: &Option<String>,
+                       token: Option<String>| {
+        if let (Some(host), Some(token)) = (host, token) {
+            out.push((host.clone(), user.clone(), token));
+        }
+    };
 
     for raw in text.lines() {
         if raw.trim().is_empty() || raw.trim_start().starts_with('#') {
@@ -310,30 +326,35 @@ pub fn gh_entries(text: &str) -> Vec<(String, Option<String>, String)> {
         let value = value.trim();
 
         if indent == 0 {
+            finish_host(&mut out, &host, &user, host_token.take());
             host = Some(key.to_owned());
             user = None;
+            users_indent = None;
             current_account = None;
             continue;
         }
+        // Back out to the host's own level: the `users:` block has ended.
+        if users_indent.is_some_and(|u| indent <= u) {
+            users_indent = None;
+            current_account = None;
+        }
         match key {
-            "user" => user = Some(value.to_owned()),
-            "oauth_token" if !value.is_empty() => {
-                if let Some(host) = host.clone() {
-                    // A token nested under `users:` belongs to that account;
-                    // one at host level belongs to `user`.
-                    out.push((
-                        host,
-                        current_account.clone().or_else(|| user.clone()),
-                        value.to_owned(),
-                    ));
+            "users" if value.is_empty() => users_indent = Some(indent),
+            "user" if users_indent.is_none() => user = Some(value.to_owned()),
+            "oauth_token" if !value.is_empty() => match (&host, &current_account) {
+                (Some(host), Some(account)) => {
+                    out.push((host.clone(), Some(account.clone()), value.to_owned()))
                 }
+                _ => host_token = Some(value.to_owned()),
+            },
+            // Under `users:`, a key with no value is an account name.
+            _ if value.is_empty() && users_indent.is_some() => {
+                current_account = Some(key.to_owned())
             }
-            // A key with no value that is not one we know is an account name
-            // under `users:`.
-            _ if value.is_empty() && key != "users" => current_account = Some(key.to_owned()),
             _ => {}
         }
     }
+    finish_host(&mut out, &host, &user, host_token);
     out
 }
 
@@ -619,7 +640,44 @@ mod tests {
         );
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "github.com");
+        assert_eq!(entries[0].1.as_deref(), Some("ada"));
         assert_eq!(entries[0].2, "gho_flat");
+    }
+
+    /// The order gh itself writes on `gh auth login` with plain-text storage:
+    /// the `users:` block first, then the active account's token and `user`
+    /// at host level (cli/cli internal/config/config.go, `Login` and
+    /// `activateUser`). The host-level token used to be given to the last
+    /// account listed under `users:`.
+    #[test]
+    fn a_host_level_token_after_the_users_block_belongs_to_user() {
+        let entries = gh_entries(
+            "github.com:\n\
+             \x20   users:\n\
+             \x20       ada:\n\
+             \x20           oauth_token: gho_a\n\
+             \x20       bob:\n\
+             \x20           oauth_token: gho_b\n\
+             \x20   git_protocol: https\n\
+             \x20   oauth_token: gho_a\n\
+             \x20   user: ada\n",
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|(_, user, token)| user.as_deref() == Some("bob") && token == "gho_a"),
+            "ada's token was given to bob: {entries:?}"
+        );
+        assert!(entries.contains(&(
+            "github.com".to_owned(),
+            Some("bob".to_owned()),
+            "gho_b".to_owned()
+        )));
+        assert!(entries.contains(&(
+            "github.com".to_owned(),
+            Some("ada".to_owned()),
+            "gho_a".to_owned()
+        )));
     }
 
     #[test]

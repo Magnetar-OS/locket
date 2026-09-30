@@ -150,6 +150,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   its real password; the field now gets a name of its own. Importing a
   `.kdbx` keeps each entry's tags, and no longer brings back entries from
   KeePass's Recycle Bin.
+- Importing GitHub CLI credentials could label a token with the wrong
+  account, or with none: with two accounts on one host, the active account's
+  token was filed under the other one. Each token is now filed under the
+  account gh keeps it for.
 
 ### Security
 
