@@ -288,6 +288,7 @@ import-error-no-folder = no directory chosen
 import-error-no-database = no database chosen
 import-error-no-home = cannot find your home directory
 import-error-keyring-elsewhere = the keyring import does not run here
+import-error-not-undone = { $error } — and what it had added so far could not be taken back out ({ $reason }), so lock the vault before doing anything else.
 
 
 ## Unlock screen

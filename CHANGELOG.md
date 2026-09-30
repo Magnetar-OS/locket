@@ -210,6 +210,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   would not take leaves other applications seeing a locked vault, and a
   failed lock leaves them able to read secrets. Both used to pass without a
   word; a successful unlock now also says it reached other applications.
+- An import that reports it failed no longer leaves some of its items behind
+  to be saved with your next change.
 
 ### Security
 

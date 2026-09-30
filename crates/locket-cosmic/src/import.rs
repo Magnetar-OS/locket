@@ -396,6 +396,11 @@ impl Job {
 /// Run a file-based import. Saves on success, so a crash afterwards cannot
 /// lose what was just imported.
 pub fn run_blocking(vault: &mut Vault, job: &Job) -> Outcome {
+    let outcome = import_blocking(vault, job);
+    settle(vault, outcome)
+}
+
+fn import_blocking(vault: &mut Vault, job: &Job) -> Outcome {
     refresh(vault);
     let into = (!job.collection.trim().is_empty()).then(|| job.collection.trim());
     let path = job.path.as_deref();
@@ -464,8 +469,36 @@ fn refresh(vault: &mut Vault) {
     }
 }
 
+/// What a failed import leaves in the vault it hands back: nothing.
+///
+/// An importer can fail after adding some items, and the save at the end can
+/// fail after adding all of them. Either way the screen says the import
+/// failed, so the half that got into memory is thrown away by re-reading the
+/// file — otherwise the next unrelated save would write it without a word.
+fn settle(vault: &mut Vault, outcome: Outcome) -> Outcome {
+    let Err(error) = outcome else {
+        return outcome;
+    };
+    if !vault.is_dirty() {
+        return Err(error);
+    }
+    match vault.reload() {
+        Ok(()) => Err(error),
+        Err(reload) => Err(fl!(
+            "import-error-not-undone",
+            error = error,
+            reason = reload.to_string()
+        )),
+    }
+}
+
 /// Run the live Secret Service import.
 pub async fn run_keyring(vault: &mut Vault, job: &Job) -> Outcome {
+    let outcome = import_keyring(vault, job).await;
+    settle(vault, outcome)
+}
+
+async fn import_keyring(vault: &mut Vault, job: &Job) -> Outcome {
     refresh(vault);
     let into = (!job.collection.trim().is_empty()).then(|| job.collection.trim());
     let summary =
@@ -545,6 +578,48 @@ mod tests {
                 .unwrap(),
         );
         assert!(matches!(form.picker(), Picker::Folder { .. }));
+    }
+
+    /// The save at the end of an import can fail — another process wrote the
+    /// file, the disk is full — after every item has been added in memory.
+    /// Reported as failed, the import must not leave those items behind to
+    /// be written by the next unrelated save.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_import_leaves_nothing_behind_in_memory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let mut vault = Vault::create(
+            dir.path().join("v.vault"),
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+        let csv = source.path().join("export.csv");
+        std::fs::write(
+            &csv,
+            "name,url,username,password\nSite,https://example.com,ada,hunter2\n",
+        )
+        .unwrap();
+        let before = vault.data().item_count();
+
+        // A directory the save cannot write its temporary file into.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let job = Job::from(&Import {
+            path: Some(csv),
+            ..Default::default()
+        });
+        let outcome = run_blocking(&mut vault, &job);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(outcome.is_err(), "the save should have failed");
+        assert_eq!(
+            vault.data().item_count(),
+            before,
+            "the failed import's items stayed in the vault"
+        );
     }
 
     #[test]
