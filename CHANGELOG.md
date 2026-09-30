@@ -79,6 +79,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - When a merge moves an item to the trash because the other copy deleted it,
   restoring it now brings back its most recent edit. It could bring back an
   older version, with the later edit gone.
+- The SSH agent answers a signature request it cannot meet with a small RSA
+  key, such as `rsa-sha2-512` on a 512-bit key, with a refusal. It used to
+  drop the connection.
 
 ### Security
 

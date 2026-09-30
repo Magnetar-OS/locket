@@ -66,10 +66,22 @@ impl RsaHash {
 /// Returns the raw signature; the caller wraps it with the algorithm name.
 pub fn rsa_signature(keypair: &RsaKeypair, data: &[u8], hash: RsaHash) -> Result<Vec<u8>> {
     let key = private_key(keypair)?;
+    // `try_sign`, not `sign`: a key too small for the digest cannot be padded,
+    // and `sign` panics on that rather than saying so.
+    let failed = |e: signature::Error| Error::Signing(format!("{}: {e}", hash.algorithm()));
     let signature = match hash {
-        RsaHash::Sha1 => SigningKey::<sha1::Sha1>::new(key).sign(data).to_vec(),
-        RsaHash::Sha256 => SigningKey::<sha2::Sha256>::new(key).sign(data).to_vec(),
-        RsaHash::Sha512 => SigningKey::<sha2::Sha512>::new(key).sign(data).to_vec(),
+        RsaHash::Sha1 => SigningKey::<sha1::Sha1>::new(key)
+            .try_sign(data)
+            .map_err(failed)?
+            .to_vec(),
+        RsaHash::Sha256 => SigningKey::<sha2::Sha256>::new(key)
+            .try_sign(data)
+            .map_err(failed)?
+            .to_vec(),
+        RsaHash::Sha512 => SigningKey::<sha2::Sha512>::new(key)
+            .try_sign(data)
+            .map_err(failed)?
+            .to_vec(),
     };
     Ok(signature)
 }
@@ -158,6 +170,36 @@ mod tests {
             };
             assert!(ok.is_ok(), "{hash:?} signature did not verify");
         }
+    }
+
+    /// PKCS#1 v1.5 cannot pad a SHA-512 digest into a 512-bit modulus.
+    /// `Signer::sign` panics on that, and the panic took the request down
+    /// with the agent's lock held instead of answering `SSH_AGENT_FAILURE`.
+    #[test]
+    fn a_key_too_small_for_the_hash_is_an_error_not_a_panic() {
+        use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+
+        let small = rsa::RsaPrivateKey::new(&mut OsRng, 512).unwrap();
+        let mpint = |n: &BigUint| Mpint::from_positive_bytes(&n.to_bytes_be()).unwrap();
+        let kp = RsaKeypair {
+            public: ssh_key::public::RsaPublicKey {
+                e: mpint(small.e()),
+                n: mpint(small.n()),
+            },
+            private: ssh_key::private::RsaPrivateKey {
+                d: mpint(small.d()),
+                iqmp: mpint(&small.crt_coefficient().unwrap()),
+                p: mpint(&small.primes()[0]),
+                q: mpint(&small.primes()[1]),
+            },
+        };
+
+        assert!(matches!(
+            rsa_signature(&kp, b"message", RsaHash::Sha512),
+            Err(Error::Signing(_))
+        ));
+        // The same key still signs where the digest fits.
+        assert!(rsa_signature(&kp, b"message", RsaHash::Sha256).is_ok());
     }
 
     #[test]
