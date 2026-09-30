@@ -12,8 +12,9 @@ app-comment = Passwords, keys and secrets for the COSMIC desktop
 
 security-title = Unlock factors
 security-blurb =
-    Any one of these opens the vault. Hardware factors are added alongside your
-    passphrase, never instead of it — so losing a device does not lose the vault.
+    Your passphrase opens the vault. A TPM or security-key factor added in an
+    earlier version is kept alongside it, never instead of it, but locket
+    cannot unlock with one yet.
 security-dismiss = Dismiss
 security-locked = Unlock the vault to manage factors.
 security-sealing = Sealing a key to the TPM…
@@ -42,8 +43,8 @@ factor-security-key = Security key
 security-passphrase-heading = Passphrase
 security-passphrase-blurb =
     Changing the passphrase rewraps the vault's key rather than re-encrypting
-    the vault, so it is fast whatever the vault holds — and every other unlock
-    factor keeps working.
+    the vault, so it is fast whatever the vault holds, and any other factor
+    stays as it was.
 security-current-passphrase = Current passphrase
 security-new-passphrase = New passphrase
 security-confirm-passphrase = Confirm new passphrase
@@ -53,7 +54,7 @@ kdf-stronger = Stronger — 256 MiB, 4 passes. Unlocking takes noticeably longer
 kdf-lighter = Lighter — 19 MiB, 2 passes. For hardware where Balanced hurts.
 security-change-passphrase = Change passphrase
 security-changing-passphrase = Changing…
-security-passphrase-changed = Passphrase changed. Other unlock factors keep working.
+security-passphrase-changed = Passphrase changed.
 error-current-passphrase-wrong = The current passphrase is not right.
 error-new-passphrases-differ = The two new passphrases do not match.
 error-new-passphrase-empty = Enter the new passphrase twice.

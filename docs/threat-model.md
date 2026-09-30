@@ -43,9 +43,15 @@ window holds a copy only while it is unlocked** — it locks itself on its own
 idle timer, on `Ctrl+L`, and when the daemon announces a lock from the panel,
 the screen locking or suspend. The pieces most exposed to hostile input — the
 extension, its host, the applet — hold none of it and cannot unlock anything.
-Unlike the daemon and the confirmation dialogs, the window does not make
-itself non-dumpable, so while it is unlocked a process that may `ptrace` it
-(Yama permitting) can read its memory.
+The window writes no core dump (it sets its core limit to zero at start),
+but unlike the daemon and the confirmation dialogs it does not make itself
+non-dumpable: xdg-desktop-portal identifies a caller by opening
+`/proc/<pid>/root`, which a non-dumpable process refuses, and every file
+dialog and auto-type go through the portal. So while it is unlocked, whether
+another process running as you can attach to it or read its memory rests on
+the kernel's Yama `ptrace_scope` (1, "descendants only", on Arch and most
+distributions). Its passphrases are held in wiping buffers; the text-input
+widget's own copies are beyond its reach.
 
 ## Attacker positions
 

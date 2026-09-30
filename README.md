@@ -1064,8 +1064,18 @@ every time the two processes were both open.
 
 ## Managing unlock factors
 
-The **Security** page in the GUI lists every slot and adds or removes them. Two
-rules are enforced there rather than left to judgement:
+**Hardware factors are enrolled nowhere today.** The vault format, the TPM and
+FIDO2 crates and their tests can seal the key to a TPM or a security key and
+open the vault with it — the run below did exactly that — but nothing a person
+uses unlocks that way yet: not the window, not PAM, not the unlock socket. A
+factor that cannot open anything only adds a way into the file, so the
+**Security** page no longer offers to add one and says why; a hardware slot
+added by an earlier version is still listed and can be removed. A TPM factor
+also needs a PIN now: without one the chip hands the key to anything on the
+machine that asks.
+
+The **Security** page lists every slot, changes the passphrase and removes
+slots. Two rules are enforced there rather than left to judgement:
 
 * A passphrase slot can never be the last one removed. Hardware is additive, so
   a dead motherboard or a lost token must not be a lost vault — the button says
@@ -1073,10 +1083,10 @@ rules are enforced there rather than left to judgement:
 * The screen states what a TPM PIN actually rests on: the chip's lockout, not
   the PIN's length, and that lockout is device-wide.
 
-Enrolment runs on a worker thread. A TPM seal takes the better part of a second
-and a security key takes as long as it takes someone to touch it, so the vault
-is moved into the worker and the screen says *"Waiting for you to touch your
-security key…"* rather than freezing or claiming to be locked.
+When enrolment comes back, it runs on a worker thread: a TPM seal takes the
+better part of a second and a security key takes as long as it takes someone
+to touch it, so the vault is moved into the worker rather than the window
+freezing.
 
 Hardware support is behind cargo features (`tpm`, `fido`, both on by default),
 because `tss-esapi` needs libtss2 and `ctap-hid-fido2` needs hidapi. Without
