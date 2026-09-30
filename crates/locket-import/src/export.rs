@@ -333,6 +333,40 @@ mod tests {
         }
     }
 
+    /// KeePass allows two entries with one title in one group. With no
+    /// username they had the same attributes, and the second password was
+    /// reported "already present" and lost. Each entry's own UUID now tells
+    /// them apart, and a second import of the file still skips both.
+    #[test]
+    fn two_kdbx_entries_with_one_title_both_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v =
+            Vault::create(dir.path().join("v.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        v.add_item_default(Item::new(ItemKind::Login, "Router").with_secret("first"));
+        v.add_item_default(Item::new(ItemKind::Login, "Router").with_secret("second"));
+        let out = dir.path().join("export.kdbx");
+        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+
+        let mut target =
+            Vault::create(dir.path().join("t.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        let first = crate::keepass::import_kdbx(&mut target, &out, "kdbx-pw", None, None).unwrap();
+        assert_eq!(first.imported, 2);
+        let second = crate::keepass::import_kdbx(&mut target, &out, "kdbx-pw", None, None).unwrap();
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.skipped_duplicate, 2);
+
+        // A vault that imported this file before the UUID was recorded holds
+        // the entries without it; they are still recognised.
+        let mut earlier =
+            Vault::create(dir.path().join("e.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        let mut legacy = target.data().all_items().next().unwrap().1.clone();
+        legacy.attributes.remove("keepass:uuid");
+        earlier.add_item_default(legacy);
+        let again = crate::keepass::import_kdbx(&mut earlier, &out, "kdbx-pw", None, None).unwrap();
+        assert_eq!(again.imported, 1);
+        assert_eq!(again.skipped_duplicate, 1);
+    }
+
     #[test]
     fn kdbx_seals_and_reopens_with_everything_that_fits() {
         let dir = tempfile::tempdir().unwrap();

@@ -17,6 +17,9 @@ use locket_core::{Field, FieldKind, Item, ItemKind, Vault, model::field_names};
 
 use crate::{Error, ImportSummary, Result};
 
+/// The attribute carrying a kdbx entry's UUID.
+const UUID_ATTRIBUTE: &str = "keepass:uuid";
+
 /// Field names kdbx defines itself; everything else is a custom field.
 const STANDARD_FIELDS: &[&str] = &["Title", "UserName", "Password", "URL", "Notes", "otp"];
 
@@ -34,6 +37,9 @@ pub struct KdbxEntry<'a> {
     pub custom: &'a [(String, String, bool)],
     /// Slash-joined group ancestry.
     pub group_path: &'a str,
+    /// The entry's own UUID. KeePass allows two entries with one title in
+    /// one group, so the path alone does not tell them apart.
+    pub uuid: Option<&'a str>,
 }
 
 /// Map one kdbx entry onto a locket item.
@@ -47,6 +53,7 @@ pub fn map_entry(entry: KdbxEntry<'_>) -> Item {
         otp,
         custom,
         group_path,
+        uuid,
     } = entry;
     let title = title.filter(|t| !t.is_empty()).unwrap_or("Untitled");
     let mut item = Item::new(ItemKind::Login, title).with_secret(password.unwrap_or_default());
@@ -98,6 +105,10 @@ pub fn map_entry(entry: KdbxEntry<'_>) -> Item {
             format!("{group_path}/{title}")
         },
     );
+    if let Some(uuid) = uuid {
+        item.attributes
+            .insert(UUID_ATTRIBUTE.into(), uuid.to_owned());
+    }
     item
 }
 
@@ -139,7 +150,17 @@ pub fn import_kdbx(
     collect(&db.root(), "", &mut items);
 
     for item in items {
-        if crate::already_present(vault, &item.attributes) {
+        // Entries imported before the UUID was recorded carry every other
+        // attribute and no UUID. One of those with the same password is this
+        // entry; a same-titled entry with another password is the one that
+        // used to be lost, and imports now.
+        let mut without_uuid = item.attributes.clone();
+        without_uuid.remove(UUID_ATTRIBUTE);
+        let imported_before = vault
+            .data()
+            .all_items()
+            .any(|(_, i)| i.attributes == without_uuid && i.secret == item.secret);
+        if crate::already_present(vault, &item.attributes) || imported_before {
             summary.skipped_duplicate += 1;
             continue;
         }
@@ -171,6 +192,7 @@ fn collect(group: &keepass::db::GroupRef<'_>, prefix: &str, out: &mut Vec<Item>)
             otp: entry.get_raw_otp_value(),
             custom: &custom,
             group_path: prefix,
+            uuid: Some(&entry.id().to_string()),
         }));
     }
 

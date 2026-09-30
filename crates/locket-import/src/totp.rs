@@ -395,7 +395,16 @@ pub fn import_file(
 
     for entry in &entries {
         let item = item_for(entry);
-        if crate::already_present(vault, &item.attributes) {
+        // The attributes name the account; the seed is what makes it a
+        // secret of its own. Two seeds under one name (two label-less URIs,
+        // two accounts an app lists alike) are both kept, and only the same
+        // seed again counts as already present. The seed is compared inside
+        // the vault rather than put in the attributes, which are plaintext.
+        let present = vault.data().all_items().any(|(_, existing)| {
+            existing.attributes == item.attributes
+                && existing.field_value(field_names::TOTP) == Some(entry.uri.as_str())
+        });
+        if present {
             summary.skipped_duplicate += 1;
             continue;
         }
@@ -593,6 +602,36 @@ mod tests {
         let summary = import_file(&mut v, &list, None).unwrap();
         assert_eq!(summary.imported, 1);
         assert_eq!(summary.skipped_unreadable, 2);
+    }
+
+    /// Two seeds with the same issuer and account — two label-less URIs, or
+    /// two accounts an app lists under one name — used to collide on their
+    /// attributes, and the second seed was reported "already present" and
+    /// lost. Re-importing the same file must still skip both.
+    #[test]
+    fn two_seeds_with_one_label_both_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("codes.txt");
+        std::fs::write(
+            &file,
+            format!(
+                "otpauth://totp/?secret={SEED}\n\
+                 otpauth://totp/?secret=GEZDGNBVGY3TQOJQ\n"
+            ),
+        )
+        .unwrap();
+        let mut v = Vault::create(
+            dir.path().join("v.vault"),
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+
+        let first = import_file(&mut v, &file, None).unwrap();
+        assert_eq!(first.imported, 2);
+        let second = import_file(&mut v, &file, None).unwrap();
+        assert_eq!(second.imported, 0);
+        assert_eq!(second.skipped_duplicate, 2);
     }
 
     #[test]

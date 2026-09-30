@@ -136,6 +136,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   imported but never offered by locket's agent, and passphrase-protected
   keys waited silently for a passphrase; both are now named in the import
   summary, with how to convert the former.
+- Two one-time-code seeds listed under the same name, or two KeePass entries
+  with the same title in the same group and no username, no longer collapse
+  into one on import. The second was reported as already present and its
+  secret was never stored; both now come across, and importing the same file
+  again still skips them.
 
 ### Security
 
