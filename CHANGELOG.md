@@ -37,6 +37,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Fixed
 
+- The panel applet's search reaches the same locket daemon its lock status
+  comes from. With locketd on its own bus name beside gnome-keyring, it
+  listed gnome-keyring's items under locket's status.
 - `locket-cli get` refuses a query that fits more than one item, as the
   commands that change things already did, and lists the candidates. It used
   to print the secret of whichever matching item came first.

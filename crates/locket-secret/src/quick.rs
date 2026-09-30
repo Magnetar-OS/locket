@@ -1,9 +1,9 @@
 //! Label-first lookup for the panel applet and anything else that wants to
 //! find one credential quickly.
 //!
-//! This is an ordinary Secret Service *client* — it talks to whatever holds
-//! `org.freedesktop.secrets`, exactly as `libsecret` would, and holds no key
-//! material of its own. Kept here rather than reimplemented per frontend so
+//! This is an ordinary Secret Service *client* — it talks to locketd's Secret
+//! Service, on whichever bus name the daemon holds, exactly as `libsecret`
+//! would, and holds no key material of its own. Kept here rather than reimplemented per frontend so
 //! there is one definition of the lookup; the browser's native host predates
 //! it and has its own, narrower rules.
 //!
@@ -103,19 +103,23 @@ fn subtitle_of(attributes: &std::collections::HashMap<String, String>) -> String
     String::new()
 }
 
+/// locketd's Secret Service, on the bus name its manager answers on.
+///
+/// The applet's lock state comes from `org.locket.Manager1`; the search must
+/// reach the same daemon. Taking whatever owns `org.freedesktop.secrets`
+/// found gnome-keyring when locketd ran on its own name beside it, and
+/// listed that keyring's items under locket's status.
 async fn service(connection: &zbus::Connection) -> Option<QuickServiceProxy<'static>> {
-    for name in crate::client::BUS_NAMES {
-        if let Ok(builder) = QuickServiceProxy::builder(connection).destination(*name)
-            && let Ok(builder) = builder.path("/org/freedesktop/secrets")
-            && let Ok(proxy) = builder.build().await
-            // Reachability is the question, not the answer: a name that is
-            // registered but unowned answers nothing.
-            && proxy.search_items(Default::default()).await.is_ok()
-        {
-            return Some(proxy);
-        }
-    }
-    None
+    let manager = crate::client::manager_on(connection).await?;
+    let name = manager.inner().destination().to_owned();
+    QuickServiceProxy::builder(connection)
+        .destination(name)
+        .ok()?
+        .path("/org/freedesktop/secrets")
+        .ok()?
+        .build()
+        .await
+        .ok()
 }
 
 /// Items whose label or recognisable attributes match `needle`, capped at
@@ -128,7 +132,11 @@ pub async fn search(needle: &str, limit: usize) -> Vec<Entry> {
     let Ok(connection) = zbus::Connection::session().await else {
         return Vec::new();
     };
-    let Some(service) = service(&connection).await else {
+    search_on(&connection, needle, limit).await
+}
+
+async fn search_on(connection: &zbus::Connection, needle: &str, limit: usize) -> Vec<Entry> {
+    let Some(service) = service(connection).await else {
         return Vec::new();
     };
     // An empty attribute set means "everything readable".
@@ -141,7 +149,7 @@ pub async fn search(needle: &str, limit: usize) -> Vec<Entry> {
         if found.len() >= limit {
             break;
         }
-        let Ok(builder) = QuickItemProxy::builder(&connection)
+        let Ok(builder) = QuickItemProxy::builder(connection)
             .destination(service.inner().destination().to_owned())
         else {
             continue;
@@ -194,6 +202,59 @@ pub async fn secret_of(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The applet shows locketd's lock state, from `org.locket.Manager1`, so
+    /// its search has to reach the same daemon. It searched whatever owned
+    /// `org.freedesktop.secrets` — gnome-keyring, when locketd runs on its
+    /// own name beside it — and listed another keyring's items under
+    /// locket's status.
+    #[tokio::test]
+    async fn search_reaches_the_daemon_the_status_comes_from() {
+        use crate::service::{ServiceConfig, ServiceState, register_objects};
+        use crate::testing::Daemon;
+        use locket_core::model::{Item, ItemKind};
+
+        let daemon = Daemon::start().await;
+        {
+            let mut state = daemon.state.lock().await;
+            let vault = state.vault.as_mut().unwrap();
+            vault.add_item_default(Item::new(ItemKind::Note, "in locket"));
+            vault.save().unwrap();
+        }
+        crate::service::sync_objects(daemon.server.object_server(), &daemon.state)
+            .await
+            .unwrap();
+        // locketd on its own name, as it runs beside gnome-keyring...
+        daemon
+            .server
+            .release_name(crate::WELL_KNOWN_NAME)
+            .await
+            .unwrap();
+        daemon.server.request_name(crate::DEV_NAME).await.unwrap();
+
+        // ...and another keyring on the freedesktop one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut other = locket_core::Vault::create(
+            &dir.path().join("other.vault"),
+            "other",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+        other.add_item_default(Item::new(ItemKind::Note, "in another keyring"));
+        let mut state = ServiceState::new(ServiceConfig::default());
+        state.vault = Some(other);
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(state));
+        let keyring = daemon.bus.connect().await;
+        register_objects(keyring.object_server(), &state)
+            .await
+            .unwrap();
+        keyring.request_name(crate::WELL_KNOWN_NAME).await.unwrap();
+
+        let client = daemon.bus.connect().await;
+        let found = search_on(&client, "", 10).await;
+        let labels: Vec<&str> = found.iter().map(|e| e.label.as_str()).collect();
+        assert_eq!(labels, ["in locket"]);
+    }
 
     fn attrs(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
         pairs

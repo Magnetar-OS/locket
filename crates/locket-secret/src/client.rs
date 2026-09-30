@@ -49,8 +49,16 @@ pub trait Manager {
 /// take the proxy's signal stream with it.
 pub async fn connect() -> Option<(Connection, ManagerProxy<'static>)> {
     let connection = Connection::session().await.ok()?;
+    let proxy = manager_on(&connection).await?;
+    Some((connection, proxy))
+}
+
+/// The daemon's manager on `connection`, on whichever of [`BUS_NAMES`] it
+/// answers. Anything that shows the daemon's state and then acts on its
+/// vault — the applet's quick search — must use this one name for both.
+pub(crate) async fn manager_on(connection: &Connection) -> Option<ManagerProxy<'static>> {
     for name in BUS_NAMES {
-        let Ok(builder) = ManagerProxy::builder(&connection).destination(*name) else {
+        let Ok(builder) = ManagerProxy::builder(connection).destination(*name) else {
             continue;
         };
         let Ok(builder) = builder.path(MANAGER_PATH) else {
@@ -63,7 +71,7 @@ pub async fn connect() -> Option<(Connection, ManagerProxy<'static>)> {
         // property to find out whether anybody is actually there.
         if proxy.locked().await.is_ok() {
             tracing::debug!("connected to locketd on {name}");
-            return Some((connection, proxy));
+            return Some(proxy);
         }
     }
     None
