@@ -386,22 +386,28 @@ pub fn is_env_file(name: &str) -> bool {
 /// Symlinked directories are not followed: a `node_modules` symlink into a
 /// shared store would otherwise turn a project scan into a filesystem crawl.
 pub fn scan(root: &Path) -> Result<Vec<EnvFile>> {
-    scan_tree(root).map(|tree| tree.files)
+    scan_reporting(root).map(|scanned| scanned.files)
 }
 
-/// What a scan found: the environment files, and the directories below the
-/// root it could not read.
-struct Tree {
-    files: Vec<EnvFile>,
-    unreadable: Vec<PathBuf>,
+/// What [`scan_reporting`] found: the environment files, and the
+/// directories below the root it could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scan {
+    pub files: Vec<EnvFile>,
+    /// Directories passed over because they could not be listed — a
+    /// container's data volume owned by another uid, say.
+    pub unreadable: Vec<PathBuf>,
 }
 
-fn scan_tree(root: &Path) -> Result<Tree> {
+/// [`scan`], also naming the directories it could not read, so a caller
+/// can say what it did not look inside. The root itself failing is still
+/// an error.
+pub fn scan_reporting(root: &Path) -> Result<Scan> {
     if !root.is_dir() {
         return Err(Error::NotFound(root.to_path_buf()));
     }
 
-    fn walk(root: &Path, dir: &Path, depth: usize, tree: &mut Tree) -> std::io::Result<()> {
+    fn walk(root: &Path, dir: &Path, depth: usize, tree: &mut Scan) -> std::io::Result<()> {
         // Deep enough for a monorepo's packages/*/apps/*, shallow enough that
         // a mistyped root does not scan the whole home directory.
         if depth > 6 {
@@ -453,7 +459,7 @@ fn scan_tree(root: &Path) -> Result<Tree> {
         Ok(())
     }
 
-    let mut tree = Tree {
+    let mut tree = Scan {
         files: Vec::new(),
         unreadable: Vec::new(),
     };
@@ -584,7 +590,7 @@ pub fn import_dir(
     grouping: Grouping,
     into_collection: Option<&str>,
 ) -> Result<ImportSummary> {
-    let Tree { files, unreadable } = scan_tree(root)?;
+    let Scan { files, unreadable } = scan_reporting(root)?;
     let target = crate::target_collection(vault, into_collection.unwrap_or("Environment"));
     let mut summary = ImportSummary::default();
 
@@ -802,6 +808,29 @@ EMPTY=
             "{:?}",
             summary.notes
         );
+    }
+
+    /// `scan` leaves unreadable directories out without a word; a dry run
+    /// needs to be able to say which ones it could not look inside.
+    #[test]
+    fn the_reporting_scan_names_what_it_could_not_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let src = tree();
+        let locked = src.path().join("project-a/pgdata");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: permissions do not stop us, nothing to test.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+        let scanned = scan_reporting(src.path());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let scanned = scanned.unwrap();
+        assert_eq!(scanned.files.len(), 2);
+        assert_eq!(scanned.unreadable, vec![locked]);
     }
 
     fn vault() -> (tempfile::TempDir, Vault) {
