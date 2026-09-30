@@ -65,7 +65,13 @@ const ALIASES: &[(Logical, &[&str])] = &[
     ),
     (Logical::Notes, &["notes", "note", "comment", "comments"]),
     (Logical::Group, &["folder", "group", "category", "grouping"]),
+    (Logical::Favorite, &["favorite", "favourite", "fav"]),
 ];
+
+/// Columns exporters write for their own bookkeeping — Bitwarden's `type`
+/// (`login` on every row of a login export) and `reprompt`. Kept as custom
+/// fields they put the same meaningless field on every item.
+const IGNORED: &[&str] = &["type", "reprompt"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Logical {
@@ -76,6 +82,7 @@ enum Logical {
     Totp,
     Notes,
     Group,
+    Favorite,
 }
 
 /// Which column index holds each logical field.
@@ -104,6 +111,12 @@ impl Mapping {
                     claimed[idx] = true;
                     break;
                 }
+            }
+        }
+
+        for (i, h) in header.iter().enumerate() {
+            if IGNORED.iter().any(|ignored| normalise(h) == *ignored) {
+                claimed[i] = true;
             }
         }
 
@@ -174,6 +187,11 @@ pub fn map_row(mapping: &Mapping, row: &[String]) -> Option<Item> {
     }
     if let Some(g) = mapping.get(row, Logical::Group) {
         item.tags = g.split('/').map(str::to_owned).collect();
+    }
+    if let Some(f) = mapping.get(row, Logical::Favorite) {
+        item.favorite = ["1", "true", "yes"]
+            .iter()
+            .any(|t| f.trim().eq_ignore_ascii_case(t));
     }
 
     // Unrecognised columns become plain fields rather than vanishing.

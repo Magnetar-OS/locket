@@ -141,6 +141,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   into one on import. The second was reported as already present and its
   secret was never stored; both now come across, and importing the same file
   again still skips them.
+- Importing locket's own CSV export, or a Bitwarden CSV, added a `type`
+  field (and `favorite`, `reprompt`) to every item and dropped the favourite
+  mark. Favourites now come back as favourites, and those bookkeeping
+  columns are not turned into fields.
 
 ### Security
 

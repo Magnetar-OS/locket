@@ -367,6 +367,35 @@ mod tests {
         assert_eq!(again.skipped_duplicate, 1);
     }
 
+    /// Our own CSV has to come back through our own CSV importer as it went
+    /// out: the `favorite` and `type` columns used to arrive as custom
+    /// fields on every item, and favourites lost their flag.
+    #[test]
+    fn our_own_csv_round_trips_without_junk_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v =
+            Vault::create(dir.path().join("v.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        let mut item = Item::new(ItemKind::Login, "GitHub")
+            .with_secret("hunter2")
+            .with_field(Field::text(field_names::USERNAME, "ada"));
+        item.favorite = true;
+        v.add_item_default(item);
+        let out = dir.path().join("export.csv");
+        to_csv(&v, &out).unwrap();
+
+        let mut target =
+            Vault::create(dir.path().join("t.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        crate::csv::import_file(&mut target, &out, None).unwrap();
+        let (_, back) = target
+            .data()
+            .all_items()
+            .find(|(_, i)| i.label == "GitHub")
+            .unwrap();
+        assert!(back.favorite, "the favourite flag was lost");
+        assert!(back.field("type").is_none(), "`type` became a field");
+        assert!(back.field("favorite").is_none(), "`favorite` became a field");
+    }
+
     #[test]
     fn kdbx_seals_and_reopens_with_everything_that_fits() {
         let dir = tempfile::tempdir().unwrap();
