@@ -647,9 +647,12 @@ impl Agent {
                 }
             }
 
+            // None is supported, and the protocol answers an unsupported one
+            // with a plain failure; SSH_AGENT_EXTENSION_FAILURE would claim
+            // the extension exists and failed.
             Request::Extension { name } => {
                 tracing::debug!("unsupported agent extension `{name}`");
-                protocol::extension_failure()
+                protocol::failure()
             }
 
             Request::Unknown(n) => {
@@ -782,6 +785,20 @@ mod tests {
     fn body_of(framed: &[u8]) -> (u8, Vec<u8>) {
         let (body, _) = protocol::take_message(framed).unwrap().unwrap();
         (body[0], body[1..].to_vec())
+    }
+
+    /// draft-ietf-sshm-ssh-agent-16, section 3.8: "An agent that does not
+    /// support extensions of the supplied type MUST reply with an empty
+    /// SSH_AGENT_FAILURE message." SSH_AGENT_EXTENSION_FAILURE is for an
+    /// extension the agent does support, failing.
+    #[test]
+    fn an_unsupported_extension_gets_a_plain_failure() {
+        let mut agent = Agent::with_keys(vec![test_key("one")]);
+        let mut w = Writer::new();
+        w.write_u8(protocol::SSH_AGENTC_EXTENSION)
+            .write_string(b"session-bind@openssh.com")
+            .write_string(b"opaque");
+        assert_eq!(agent.handle(w.as_slice()), protocol::failure());
     }
 
     #[test]
