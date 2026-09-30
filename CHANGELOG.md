@@ -82,6 +82,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - The SSH agent answers a signature request it cannot meet with a small RSA
   key, such as `rsa-sha2-512` on a 512-bit key, with a refusal. It used to
   drop the connection.
+- Adding a TPM unlock factor from the Security page now finds the machine's
+  TPM. It used to fail with "no TPM available" unless a TCTI environment
+  variable had been set by hand.
 
 ### Security
 

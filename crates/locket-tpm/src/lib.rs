@@ -31,6 +31,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::str::FromStr as _;
+
 use base64ct::{Base64, Encoding};
 use locket_core::{
     crypto::SymKey,
@@ -224,11 +226,27 @@ fn slot_auth(with_pin: bool, pin: Option<&str>) -> Result<Option<Auth>> {
 /// Open a context against the system TPM.
 ///
 /// Honours the standard TCTI environment variables so an `swtpm` simulator can
-/// be substituted for testing.
+/// be substituted for testing; with none set, it is the kernel's resource
+/// manager, `/dev/tpmrm0`.
 pub fn open_context() -> Result<Context> {
-    let tcti = TctiNameConf::from_environment_variable()
-        .map_err(|e| Error::NoTpm(format!("no usable TCTI: {e}")))?;
+    let tcti = tcti_from(|name| std::env::var(name).ok())?;
     Context::new(tcti).map_err(|e| Error::NoTpm(e.to_string()))
+}
+
+/// Which TPM to open, given a way to read an environment variable.
+///
+/// The variables are the ones `TctiNameConf::from_environment_variable` reads,
+/// in its order. That function fails outright when none is set — the normal
+/// state of a desktop session — so the default is chosen here: the kernel's
+/// resource manager, which the `tss` group can open and which, unlike
+/// `/dev/tpm0`, lets several processes share the chip.
+fn tcti_from(var: impl Fn(&str) -> Option<String>) -> Result<TctiNameConf> {
+    let named = ["TPM2TOOLS_TCTI", "TCTI", "TEST_TCTI"]
+        .into_iter()
+        .find_map(var)
+        .unwrap_or_else(|| "device:/dev/tpmrm0".to_owned());
+    TctiNameConf::from_str(&named)
+        .map_err(|e| Error::NoTpm(format!("no usable TCTI `{named}`: {e}")))
 }
 
 /// Seal a fresh random secret to this TPM.
@@ -374,6 +392,37 @@ mod tests {
 
     fn hardware_tests_enabled() -> bool {
         std::env::var("LOCKET_TPM_TESTS").is_ok_and(|v| v == "1")
+    }
+
+    /// tss-esapi's `from_environment_variable` fails when none of its
+    /// variables is set, which on a desktop session is always: enrolment
+    /// then reported "no TPM available" on a machine with a working one.
+    #[test]
+    fn with_no_tcti_variable_the_kernel_resource_manager_is_used() {
+        let rm = TctiNameConf::from_str("device:/dev/tpmrm0").unwrap();
+        assert_eq!(tcti_from(|_| None).unwrap(), rm);
+
+        // A variable still wins, read in tss-esapi's order.
+        let swtpm = "swtpm:host=localhost,port=2321";
+        let only = |set: &'static str| move |name: &str| (name == set).then(|| swtpm.to_owned());
+        for name in ["TPM2TOOLS_TCTI", "TCTI", "TEST_TCTI"] {
+            assert!(
+                matches!(tcti_from(only(name)).unwrap(), TctiNameConf::Swtpm(_)),
+                "{name} was not honoured"
+            );
+        }
+        let first = |name: &str| match name {
+            "TPM2TOOLS_TCTI" => Some("device:/dev/tpm0".to_owned()),
+            _ => Some(swtpm.to_owned()),
+        };
+        assert_eq!(
+            tcti_from(first).unwrap(),
+            TctiNameConf::from_str("device:/dev/tpm0").unwrap()
+        );
+        assert!(matches!(
+            tcti_from(|_| Some("nonsense".to_owned())),
+            Err(Error::NoTpm(_))
+        ));
     }
 
     #[test]

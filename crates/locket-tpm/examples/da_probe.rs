@@ -25,6 +25,19 @@
 //!   cargo run -p locket-tpm --example da_probe
 //! ```
 fn main() {
+    // `open_context` falls back to this machine's own TPM when no TCTI is
+    // named, and this program exists to lock a TPM out. Make the target an
+    // explicit choice.
+    if ["TPM2TOOLS_TCTI", "TCTI", "TEST_TCTI"]
+        .iter()
+        .all(|name| std::env::var_os(name).is_none())
+    {
+        eprintln!(
+            "da_probe puts the TPM it talks to into dictionary-attack lockout; \
+             name that TPM with TCTI (for example an swtpm simulator)"
+        );
+        std::process::exit(2);
+    }
     let (factor, _kek) = locket_tpm::enroll(Some("123456")).expect("enroll");
     println!("enrolled a PIN-protected slot");
     for attempt in 1..=6 {
