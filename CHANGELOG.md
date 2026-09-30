@@ -139,6 +139,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Importing a CSV with no header row showed its first line in the error
   message, password included. The error now says how many columns the first
   row has and that a header row is expected, without repeating its contents.
+- KDBX exports were sealed with a key derivation of only 1 MiB of memory, so
+  the exported file could be attacked with far less effort than the vault it
+  came from. New exports use the same Argon2 cost as a new vault (64 MiB).
+  Re-export anything you have already moved out this way.
 
 ### Documentation
 

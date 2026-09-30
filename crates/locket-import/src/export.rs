@@ -160,7 +160,7 @@ pub fn to_csv(vault: &Vault, path: &Path) -> Result<(usize, usize)> {
 /// One top-level group per collection; tags, TOTP seeds and custom fields
 /// carried; field protection mirrors locket's own masking.
 pub fn to_kdbx(vault: &Vault, path: &Path, passphrase: &str) -> Result<usize> {
-    use keepass::{Database, DatabaseKey};
+    use keepass::{Database, DatabaseKey, config::KdfConfig};
 
     if passphrase.is_empty() {
         return Err(Error::Vault(
@@ -170,6 +170,21 @@ pub fn to_kdbx(vault: &Vault, path: &Path, passphrase: &str) -> Result<usize> {
 
     let mut db = Database::new();
     db.root_mut().name = "locket".to_owned();
+    // The crate's default derivation is Argon2d over 1 MiB, far cheaper to
+    // guess against than the vault this came from. The file is meant to
+    // leave the machine, so it gets the vault's own default cost.
+    let cost = locket_core::crypto::KdfParams::default();
+    if let KdfConfig::Argon2 {
+        iterations,
+        memory,
+        parallelism,
+        ..
+    } = &mut db.config.kdf_config
+    {
+        *memory = u64::from(cost.m_cost) * 1024;
+        *iterations = u64::from(cost.t_cost);
+        *parallelism = cost.p_cost;
+    }
 
     let mut written = 0usize;
     for collection in &vault.data().collections {
@@ -275,6 +290,47 @@ mod tests {
         let text = std::fs::read_to_string(&out).unwrap();
         assert!(text.starts_with("folder,favorite,type,name,notes,login_uri"));
         assert!(text.contains("hunter2"));
+    }
+
+    /// The keepass crate's default key derivation is Argon2d over 1 MiB,
+    /// far cheaper to guess against than the vault the export came from.
+    #[test]
+    fn a_kdbx_export_costs_as_much_to_open_as_the_vault() {
+        use keepass::{Database, DatabaseKey, config::KdfConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let v = vault(&dir);
+        let out = dir.path().join("export.kdbx");
+        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+
+        let db = Database::open(
+            &mut std::fs::File::open(&out).unwrap(),
+            DatabaseKey::new().with_password("kdbx-pw"),
+        )
+        .unwrap();
+        let vault_cost = KdfParams::default();
+        match db.config.kdf_config {
+            KdfConfig::Argon2 {
+                memory,
+                iterations,
+                parallelism,
+                ..
+            }
+            | KdfConfig::Argon2id {
+                memory,
+                iterations,
+                parallelism,
+                ..
+            } => {
+                assert!(
+                    memory >= u64::from(vault_cost.m_cost) * 1024,
+                    "{memory} bytes"
+                );
+                assert!(iterations >= u64::from(vault_cost.t_cost));
+                assert_eq!(parallelism, vault_cost.p_cost);
+            }
+            other => panic!("not an Argon2 key derivation: {other:?}"),
+        }
     }
 
     #[test]
