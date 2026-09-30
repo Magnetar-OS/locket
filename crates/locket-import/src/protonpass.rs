@@ -11,7 +11,6 @@
 //! at Proton.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::Path;
 
 use locket_core::{Field, FieldKind, Item, ItemKind, Vault, model::field_names};
@@ -302,12 +301,12 @@ pub fn import_file(vault: &mut Vault, path: &Path, into: Option<&str>) -> Result
         .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_owned()))
         .find(|n| n.ends_with("data.json"))
         .ok_or_else(|| Error::Database("no data.json inside; not a Proton Pass export".into()))?;
-    let mut text = String::new();
-    archive
-        .by_name(&entry_name)
-        .map_err(|e| Error::Database(e.to_string()))?
-        .read_to_string(&mut text)
-        .map_err(|e| Error::Database(format!("could not read {entry_name}: {e}")))?;
+    let text = crate::read_archive_entry(
+        archive
+            .by_name(&entry_name)
+            .map_err(|e| Error::Database(e.to_string()))?,
+        &entry_name,
+    )?;
 
     let items = parse(&text)?;
 

@@ -11,7 +11,6 @@
 //! importing what the user already deleted would resurrect it here.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::Path;
 
 use locket_core::{Field, FieldKind, Item, ItemKind, Vault, model::field_names};
@@ -281,12 +280,12 @@ pub fn import_file(vault: &mut Vault, path: &Path, into: Option<&str>) -> Result
     })?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| Error::Database(format!("not a zip archive (a .1pux is one): {e}")))?;
-    let mut text = String::new();
-    archive
-        .by_name("export.data")
-        .map_err(|_| Error::Database("no export.data inside; not a 1PUX export".into()))?
-        .read_to_string(&mut text)
-        .map_err(|e| Error::Database(format!("could not read export.data: {e}")))?;
+    let text = crate::read_archive_entry(
+        archive
+            .by_name("export.data")
+            .map_err(|_| Error::Database("no export.data inside; not a 1PUX export".into()))?,
+        "export.data",
+    )?;
 
     let (items, documents) = parse(&text)?;
 
@@ -460,6 +459,40 @@ mod tests {
         let second = import_file(&mut vault, &path, None).unwrap();
         assert_eq!(second.imported, 0);
         assert_eq!(second.skipped_duplicate, 3);
+    }
+
+    /// `export.data` is read whole into memory, and deflate packs a run of
+    /// zeros a thousandfold: a small archive could claim any amount of RAM.
+    #[test]
+    fn an_oversized_export_is_refused_not_read() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bomb.1pux");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file("export.data", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            let chunk = vec![b' '; 1 << 20];
+            for _ in 0..(crate::MAX_ARCHIVE_ENTRY >> 20) + 1 {
+                writer.write_all(&chunk).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        assert!(std::fs::metadata(&path).unwrap().len() < 4 << 20);
+
+        let mut vault = locket_core::Vault::create(
+            dir.path().join("v.vault"),
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+        let err = import_file(&mut vault, &path, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("larger than"), "{err}");
     }
 
     #[test]

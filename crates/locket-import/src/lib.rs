@@ -34,6 +34,35 @@ pub mod totp;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// The most an importer reads of one entry in a zip archive, in bytes.
+///
+/// Far above any real export — 1Password's `export.data` and Proton's
+/// `data.json` for tens of thousands of items are tens of megabytes — and
+/// low enough that an archive whose entry inflates without end is refused
+/// instead of filling memory.
+pub(crate) const MAX_ARCHIVE_ENTRY: u64 = 128 << 20;
+
+/// Read one zip entry as text, refusing it past [`MAX_ARCHIVE_ENTRY`].
+///
+/// The limit is on what is read, not on the size the archive declares,
+/// which is only the archive's word for it.
+pub(crate) fn read_archive_entry(entry: impl std::io::Read, name: &str) -> Result<String> {
+    use std::io::Read as _;
+
+    let mut text = String::new();
+    entry
+        .take(MAX_ARCHIVE_ENTRY + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| Error::Database(format!("could not read {name}: {e}")))?;
+    if text.len() as u64 > MAX_ARCHIVE_ENTRY {
+        return Err(Error::Database(format!(
+            "{name} is larger than {} MiB; that is not an export this importer reads",
+            MAX_ARCHIVE_ENTRY >> 20
+        )));
+    }
+    Ok(text)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0} does not exist, or is not a directory")]
