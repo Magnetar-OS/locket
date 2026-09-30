@@ -34,7 +34,7 @@ impl Algorithm {
 }
 
 /// A parsed TOTP configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Totp {
     pub secret: Vec<u8>,
     pub algorithm: Algorithm,
@@ -42,6 +42,24 @@ pub struct Totp {
     pub period: u64,
     pub issuer: Option<String>,
     pub account: Option<String>,
+}
+
+/// Everything but the seed, which is the whole secret: anyone holding it can
+/// generate the codes.
+impl std::fmt::Debug for Totp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Totp")
+            .field(
+                "secret",
+                &format_args!("[redacted; {} bytes]", self.secret.len()),
+            )
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("period", &self.period)
+            .field("issuer", &self.issuer)
+            .field("account", &self.account)
+            .finish()
+    }
 }
 
 impl Default for Totp {
@@ -298,11 +316,13 @@ fn percent_decode(s: &str) -> Result<String> {
 /// Decode an RFC 4648 base32 secret, tolerating lowercase, spaces and missing
 /// padding — all of which appear on real enrolment pages.
 fn decode_base32(input: &str) -> Result<Vec<u8>> {
-    let cleaned: String = input
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .collect::<String>()
-        .to_ascii_uppercase();
+    let cleaned = zeroize::Zeroizing::new(
+        input
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '-')
+            .collect::<String>()
+            .to_ascii_uppercase(),
+    );
     // Padding carries no bits, and the unpadded alphabet rejects `=` outright,
     // so a correctly padded secret is decoded as if it had none.
     let cleaned = cleaned.trim_end_matches('=');
@@ -329,6 +349,16 @@ mod tests {
                 "empty seed {input:?} parsed into a Totp with no key"
             );
         }
+    }
+
+    // The seed is the whole secret: anyone holding it generates the codes.
+    // A derived `Debug` printed it byte for byte into whatever logged it.
+    #[test]
+    fn debug_output_does_not_contain_the_seed() {
+        let totp = Totp::parse("JBSWY3DPEHPK3PXP").unwrap();
+        let shown = format!("{totp:?}");
+        assert!(!shown.contains("72, 101, 108"), "{shown}");
+        assert!(shown.contains("redacted"), "{shown}");
     }
 
     #[test]

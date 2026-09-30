@@ -91,7 +91,8 @@ pub fn password(recipe: &PasswordRecipe) -> Result<SecretString> {
     }
 
     let pool: Vec<char> = sets.iter().flatten().copied().collect();
-    let mut out: Vec<char> = Vec::with_capacity(recipe.length);
+    // Wiped on drop: this is the password, one `char` at a time.
+    let mut out = zeroize::Zeroizing::new(Vec::<char>::with_capacity(recipe.length));
 
     // One from each class first, to satisfy composition rules...
     for set in &sets {
@@ -103,7 +104,7 @@ pub fn password(recipe: &PasswordRecipe) -> Result<SecretString> {
     }
 
     shuffle(&mut out)?;
-    Ok(SecretString::new(out.into_iter().collect::<String>()))
+    Ok(SecretString::new(out.iter().collect::<String>()))
 }
 
 /// Generate a Diceware-style passphrase from `wordlist`.

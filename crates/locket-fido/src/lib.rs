@@ -182,11 +182,14 @@ fn assert_hmac(
         .get_assertion_with_args(&builder.build())
         .map_err(|e| Error::Device(e.to_string()))?;
 
-    let output = assertions
-        .iter()
-        .find_map(|a| hmac_output_from(&a.extensions))
-        .ok_or(Error::NoHmacSecret)?;
-    derive_slot_key(&output)
+    // The raw output is as good as the slot key; wipe it once stretched.
+    let output = Zeroizing::new(
+        assertions
+            .iter()
+            .find_map(|a| hmac_output_from(&a.extensions))
+            .ok_or(Error::NoHmacSecret)?,
+    );
+    derive_slot_key(output.as_slice())
 }
 
 /// Recover a FIDO2 slot's key-encryption key. Requires the token and a touch.
@@ -276,12 +279,14 @@ pub fn assert(
 
 /// A [`SlotOpener`] backed by a security key.
 pub struct FidoOpener {
-    pin: Option<String>,
+    pin: Option<Zeroizing<String>>,
 }
 
 impl FidoOpener {
     pub fn new(pin: Option<String>) -> Self {
-        Self { pin }
+        Self {
+            pin: pin.map(Zeroizing::new),
+        }
     }
 }
 
@@ -290,7 +295,7 @@ impl SlotOpener for FidoOpener {
         if !matches!(factor, SlotFactor::Fido2 { .. }) {
             return Ok(None);
         }
-        match unlock(factor, self.pin.as_deref()) {
+        match unlock(factor, self.pin.as_deref().map(String::as_str)) {
             Ok(key) => Ok(Some(key)),
             // Report as "did not open" so a multi-slot vault can fall through
             // to another factor rather than failing outright.

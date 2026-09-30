@@ -314,12 +314,14 @@ pub fn unseal(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
 
 /// A [`SlotOpener`] that unseals TPM slots.
 pub struct TpmOpener {
-    pin: Option<String>,
+    pin: Option<Zeroizing<String>>,
 }
 
 impl TpmOpener {
     pub fn new(pin: Option<String>) -> Self {
-        Self { pin }
+        Self {
+            pin: pin.map(Zeroizing::new),
+        }
     }
 }
 
@@ -328,7 +330,7 @@ impl SlotOpener for TpmOpener {
         if !matches!(factor, SlotFactor::Tpm2 { .. }) {
             return Ok(None);
         }
-        match unseal(factor, self.pin.as_deref()) {
+        match unseal(factor, self.pin.as_deref().map(String::as_str)) {
             Ok(key) => Ok(Some(key)),
             // Report as "this factor did not open it" rather than a hard
             // error, so a multi-slot vault can fall through to another factor.

@@ -20,7 +20,7 @@ use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, Payload},
 };
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, Result, secret::SecretBytes};
 
@@ -114,9 +114,11 @@ pub struct SymKey([u8; KEY_LEN]);
 
 impl SymKey {
     pub fn random() -> Result<Self> {
-        let mut k = [0u8; KEY_LEN];
-        getrandom::fill(&mut k)?;
-        Ok(Self(k))
+        // The array is copied into the key; the buffer it was made in is
+        // wiped rather than left on the stack.
+        let mut k = Zeroizing::new([0u8; KEY_LEN]);
+        getrandom::fill(k.as_mut_slice())?;
+        Ok(Self(*k))
     }
 
     pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
@@ -138,12 +140,12 @@ impl SymKey {
 
     /// Derive a KEK from a passphrase.
     pub fn derive(passphrase: &str, salt: &[u8; SALT_LEN], params: KdfParams) -> Result<Self> {
-        let mut out = [0u8; KEY_LEN];
+        let mut out = Zeroizing::new([0u8; KEY_LEN]);
         params
             .to_argon2()?
-            .hash_password_into(passphrase.as_bytes(), salt, &mut out)
+            .hash_password_into(passphrase.as_bytes(), salt, out.as_mut_slice())
             .map_err(|e| Error::Kdf(e.to_string()))?;
-        Ok(Self(out))
+        Ok(Self(*out))
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {

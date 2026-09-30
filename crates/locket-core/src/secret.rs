@@ -76,7 +76,8 @@ impl Serialize for SecretBytes {
 impl<'de> Deserialize<'de> for SecretBytes {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use base64ct::Encoding as _;
-        let s = String::deserialize(d)?;
+        // The base64 form is the secret too; wipe it once decoded.
+        let s = zeroize::Zeroizing::new(String::deserialize(d)?);
         base64ct::Base64::decode_vec(&s)
             .map(SecretBytes)
             .map_err(|_| serde::de::Error::custom("malformed base64 in secret bytes"))
