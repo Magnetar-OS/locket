@@ -195,6 +195,8 @@ pub enum Message {
     // -- health --
     /// The report finished on its worker thread.
     HealthReady(Box<locket_core::health::HealthReport>),
+    /// The report's worker died; carries why.
+    HealthFailed(String),
     CheckBreaches,
     /// The breach check finished: per item, how often its secret appears in
     /// known breaches (zero-count items are omitted); or the error.
@@ -261,6 +263,7 @@ impl Message {
                 | Message::ClipboardChecked(_)
                 | Message::WindowUnfocused
                 | Message::HealthReady(_)
+                | Message::HealthFailed(_)
                 | Message::BreachesChecked(_)
                 | Message::AutoTyped(_)
                 | Message::AttachmentWritten(_)
@@ -669,12 +672,12 @@ impl App {
         };
         let data = vault.data().clone();
         cosmic::task::future(async move {
-            let report = tokio::task::spawn_blocking(move || {
-                locket_core::health::report(&data, locket_core::model::now())
-            })
-            .await
-            .unwrap_or_default();
-            Message::HealthReady(Box::new(report))
+            health_outcome(
+                tokio::task::spawn_blocking(move || {
+                    locket_core::health::report(&data, locket_core::model::now())
+                })
+                .await,
+            )
         })
     }
 
@@ -3314,6 +3317,13 @@ impl cosmic::Application for App {
                 }
             }
 
+            Message::HealthFailed(error) => {
+                if self.screen == Screen::Browsing {
+                    self.health = None;
+                    return self.toast(fl!("health-failed", error = error));
+                }
+            }
+
             Message::CheckBreaches => {
                 if self.checking_breaches {
                     return Task::none();
@@ -4164,6 +4174,19 @@ fn mime_for(name: &str) -> &'static str {
     }
 }
 
+/// The message a finished health worker sends.
+///
+/// A worker that died has looked at nothing, and an empty report in its
+/// place would read as "passwords look strong, unique and current".
+fn health_outcome<E: std::fmt::Display>(
+    report: Result<locket_core::health::HealthReport, E>,
+) -> Message {
+    match report {
+        Ok(report) => Message::HealthReady(Box::new(report)),
+        Err(e) => Message::HealthFailed(e.to_string()),
+    }
+}
+
 /// Export to `path`, which the save dialog may have pointed at an existing
 /// file.
 ///
@@ -4648,6 +4671,20 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "written with mode {mode:o}");
         assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+    }
+
+    /// An empty report reads as "Nothing to report: passwords look strong,
+    /// unique and current". A worker that died has not looked at anything.
+    #[test]
+    fn a_health_worker_that_died_is_not_reported_as_a_clean_vault() {
+        assert!(matches!(
+            health_outcome::<&str>(Err("the worker panicked")),
+            Message::HealthFailed(_)
+        ));
+        assert!(matches!(
+            health_outcome::<&str>(Ok(Default::default())),
+            Message::HealthReady(_)
+        ));
     }
 
     /// A failed export must not cost the person the file they chose to

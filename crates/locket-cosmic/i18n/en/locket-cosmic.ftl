@@ -352,6 +352,7 @@ health-breach-blurb =
 health-breached = In known breaches — seen { $count } time(s)
 health-no-breaches = No secret appears in known breaches.
 health-breach-failed = The breach check failed: { $error }
+health-failed = The health report could not be made: { $error }
 health-old-note =
     “Unchanged” is measured from the item's last edit, which is the closest
     thing the vault records to when the secret itself last changed.
