@@ -94,15 +94,17 @@ impl Totp {
 
         let mut totp = Totp::default();
 
-        // Label is `Issuer:Account`, percent-decoded by `Url` already.
-        let label = parsed.path().trim_start_matches('/');
+        // Label is `Issuer:Account`. `Url::path` returns it still
+        // percent-encoded, and the separator itself may arrive as `%3A`, so it
+        // is decoded before it is split.
+        let label = percent_decode(parsed.path().trim_start_matches('/'))?;
         if !label.is_empty() {
             match label.split_once(':') {
                 Some((issuer, account)) => {
                     totp.issuer = Some(issuer.trim().to_owned());
                     totp.account = Some(account.trim().to_owned());
                 }
-                None => totp.account = Some(label.to_owned()),
+                None => totp.account = Some(label),
             }
         }
 
@@ -266,6 +268,31 @@ fn encode_label(label: &str) -> String {
         }
     }
     out
+}
+
+/// Undo the percent-encoding [`url::Url::path`] leaves in place.
+///
+/// A `%` that is not followed by two hex digits stays as it is, which is how
+/// browsers read it too; the decoded bytes must be UTF-8 like the rest of the
+/// URI.
+fn percent_decode(s: &str) -> Result<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = s.get(i + 1..i + 3)
+            && hex.bytes().all(|b| b.is_ascii_hexdigit())
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| Error::Totp("the label is not valid UTF-8".into()))
 }
 
 /// Decode an RFC 4648 base32 secret, tolerating lowercase, spaces and missing
@@ -438,6 +465,49 @@ mod tests {
             Totp::parse(&totp.to_uri()).unwrap().issuer.as_deref(),
             Some("ACME/EU")
         );
+    }
+
+    // `Url::path` hands the path back still percent-encoded, so a label with
+    // a space or an escaped `@` has to be decoded here — and with no
+    // `issuer` parameter to fall back on, the label is all there is.
+    #[test]
+    fn a_label_only_uri_is_percent_decoded() {
+        let t = Totp::parse("otpauth://totp/My%20Bank:ada%40example.com?secret=JBSWY3DPEHPK3PXP")
+            .unwrap();
+        assert_eq!(t.issuer.as_deref(), Some("My Bank"));
+        assert_eq!(t.account.as_deref(), Some("ada@example.com"));
+
+        // The separator may itself arrive escaped, and a space after it is
+        // decoration, not part of the account.
+        let t = Totp::parse("otpauth://totp/ACME%3A%20alice?secret=JBSWY3DPEHPK3PXP").unwrap();
+        assert_eq!(t.issuer.as_deref(), Some("ACME"));
+        assert_eq!(t.account.as_deref(), Some("alice"));
+
+        // And what we print for a phone does not get escaped twice.
+        let uri = Totp::parse("otpauth://totp/My%20Bank:ada%40example.com?secret=JBSWY3DPEHPK3PXP")
+            .unwrap()
+            .to_uri();
+        assert!(!uri.contains("%25"), "{uri}");
+    }
+
+    #[test]
+    fn a_label_with_spaces_and_percents_round_trips() {
+        let original = Totp {
+            issuer: Some("100% Co".into()),
+            account: Some("Alice Smith".into()),
+            ..Totp::parse("JBSWY3DPEHPK3PXP").unwrap()
+        };
+        let parsed = Totp::parse(&original.to_uri()).unwrap();
+        assert_eq!(parsed.issuer, original.issuer);
+        assert_eq!(parsed.account, original.account);
+
+        // Without the `issuer` parameter to paper over the label.
+        let label_only = Totp {
+            issuer: None,
+            ..original.clone()
+        };
+        let parsed = Totp::parse(&label_only.to_uri()).unwrap();
+        assert_eq!(parsed.account.as_deref(), Some("Alice Smith"));
     }
 
     #[test]

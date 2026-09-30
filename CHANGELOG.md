@@ -66,6 +66,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - A one-time-code secret written with its trailing `=` padding is now
   accepted, whether typed in or imported. It used to be refused as invalid,
   and imports skipped it.
+- A one-time-code seed whose account name was written with escapes, such as
+  `My%20Bank:ada%40example.com`, now shows as "My Bank" and
+  "ada@example.com". Show QR code used to pass the escapes on to the phone,
+  doubled.
 
 ### Documentation
 
