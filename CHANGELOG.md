@@ -290,6 +290,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   the screen locks and when the machine suspends. It used to stay open on
   every secret after all three; it still keeps its own idle timer rather
   than following the daemon's.
+- A crash of the locket window no longer leaves a core dump holding the
+  vault's key and secrets on disk. The window turns core dumps off when it
+  starts.
 
 ### Documentation
 

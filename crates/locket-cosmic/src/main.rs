@@ -43,6 +43,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(ask(question));
     }
 
+    // Every mode but the confirmation dialog, which makes itself
+    // non-dumpable instead. Before anything reads a vault or a passphrase.
+    if let Err(e) = disable_core_dumps() {
+        tracing::warn!(
+            "could not turn off core dumps ({e}); a crash may write this window's memory to disk"
+        );
+    }
+
     let vault_path = match std::env::var_os("LOCKET_VAULT") {
         Some(p) => std::path::PathBuf::from(p),
         None => Vault::default_path()?,
@@ -76,6 +84,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // instead of pulling its window forward.
     cosmic::app::run_single_instance::<app::App>(settings, app::Flags::new(vault_path, prompt))?;
     Ok(())
+}
+
+/// Keep this process's memory out of core dumps.
+///
+/// An unlocked window holds the vault's key and every secret in it, and a
+/// crash would write all of that to disk. The soft limit is what the kernel
+/// and systemd-coredump both honour; the hard limit is left alone.
+///
+/// This is not `PR_SET_DUMPABLE(0)`, which the confirmation dialog and the
+/// daemon use: xdg-desktop-portal identifies each caller by opening
+/// `/proc/PID/root`, which a non-dumpable process does not let it do, and it
+/// then refuses the request — every file dialog here and auto-type would
+/// stop working. Attaching to the window, or reading its memory, is left to
+/// the kernel's Yama ptrace scope.
+fn disable_core_dumps() -> rustix::io::Result<()> {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let hard = getrlimit(Resource::Core).maximum;
+    setrlimit(
+        Resource::Core,
+        Rlimit {
+            current: Some(0),
+            maximum: hard,
+        },
+    )
 }
 
 /// Put one confirmation on screen and answer it on stdout. Returns the exit
@@ -126,5 +158,23 @@ fn ask(question: Result<locket_secret::frontend::Question, String>) -> i32 {
             tracing::error!("could not deliver the answer: {e}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A crash of an unlocked window must not leave the vault's key and its
+    /// secrets in a core file, whether the kernel writes it or hands it to
+    /// systemd-coredump.
+    #[test]
+    fn core_dumps_are_turned_off() {
+        use rustix::process::{Resource, getrlimit};
+        let before = getrlimit(Resource::Core);
+        disable_core_dumps().unwrap();
+        let after = getrlimit(Resource::Core);
+        assert_eq!(after.current, Some(0), "core dumps are still allowed");
+        assert_eq!(after.maximum, before.maximum, "the hard limit was changed");
     }
 }
