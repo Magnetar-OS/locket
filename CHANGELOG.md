@@ -57,6 +57,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   recently here. The other copy's edits are filed into each item's history
   and saved, and so are collection renames and trash that only the other
   copy had.
+- Merging a diverged copy now says so when an attachment is left behind
+  because both copies of an item had gained a different attachment. The
+  merge used to keep one side's attachments and drop the other's without a
+  word.
 
 ### Documentation
 

@@ -155,7 +155,7 @@ fn merge_live_item(
                 .items
                 .push(winner);
             report.updated += 1;
-        } else if Item::content_differs(ours, theirs) {
+        } else {
             // Ours is newer (or the fork tied): keep ours, file theirs.
             let id = theirs.id;
             if let Some(ours) = data
@@ -234,15 +234,18 @@ fn merge_trashed_item(data: &mut VaultData, t: TrashedItem, report: &mut MergeRe
 
 /// File the losing side of a conflicted edit into the winner's history.
 fn absorb_loser(winner: &mut Item, loser: &Item, report: &mut MergeReport) {
-    if !Item::content_differs(winner, loser) {
-        return;
-    }
+    // Checked before the content comparison: attachments are not content, so
+    // two sides that each only attached a file do not "differ", and the
+    // loser's file would otherwise go without being counted.
     if loser
         .attachments
         .iter()
         .any(|a| winner.attachment(a.id).is_none())
     {
         report.attachments_dropped += 1;
+    }
+    if !Item::content_differs(winner, loser) {
+        return;
     }
     winner.history.push(Revision {
         saved: now(),
@@ -567,6 +570,45 @@ mod tests {
             "a deletion time moved but the report says nothing changed: {report}"
         );
         assert_eq!(report.trash_updated, 1);
+    }
+
+    /// Adding an attachment is not an edit of the item's content, so two
+    /// sides that each attached a file differ in nothing `content_differs`
+    /// looks at. The winner's list is still kept whole, which drops the
+    /// loser's file — and that has to be counted whichever side wins.
+    #[test]
+    fn attachments_that_alone_differ_are_counted_when_dropped() {
+        let (base, id) = vault_with("Login", "s");
+        let mut a = fork(&base);
+        let mut b = fork(&base);
+        {
+            let item = &mut a.collections[0].items[0];
+            item.add_attachment("codes.txt", "text/plain", b"12345".to_vec())
+                .unwrap();
+            item.modified = 1_000;
+        }
+        {
+            let item = &mut b.collections[0].items[0];
+            item.add_attachment("backup.pdf", "application/pdf", b"%PDF".to_vec())
+                .unwrap();
+            item.modified = 2_000;
+        }
+
+        for (mut into, other) in [(fork(&a), fork(&b)), (fork(&b), fork(&a))] {
+            let report = merge(&mut into, other);
+            let (_, item) = into.find_item(id).unwrap();
+            let names: Vec<&str> = item.attachments.iter().map(|a| a.name.as_str()).collect();
+            assert_eq!(
+                names,
+                ["backup.pdf"],
+                "the winner's list was not kept whole"
+            );
+            assert_eq!(
+                report.attachments_dropped, 1,
+                "codes.txt vanished without being counted"
+            );
+            assert!(report.changed());
+        }
     }
 
     #[test]
