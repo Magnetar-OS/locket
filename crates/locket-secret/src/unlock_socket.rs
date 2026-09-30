@@ -90,7 +90,12 @@ pub async fn serve(
 /// to rewrite even when the daemon is locked.
 async fn rekey(state: &SharedState, vault_path: &Path, old: &str, new: &str) -> bool {
     let path = vault_path.to_path_buf();
-    let (old, new) = (old.to_owned(), new.to_owned());
+    // Moved into the blocking task as copies that wipe themselves, like the
+    // request they came from.
+    let (old, new) = (
+        zeroize::Zeroizing::new(old.to_owned()),
+        zeroize::Zeroizing::new(new.to_owned()),
+    );
 
     // Argon2id twice — once to open, once to re-wrap — so this belongs off the
     // executor's core threads like every other passphrase operation.
@@ -166,10 +171,12 @@ async fn handle(
         }
     };
 
-    let passphrase = match &request {
-        locket_ipc::Request::Unlock(p) => p.to_string(),
+    // Every copy of the passphrase below wipes itself when dropped, as the
+    // request it came from does.
+    let passphrase = match request {
+        locket_ipc::Request::Unlock(p) => p,
         locket_ipc::Request::Rekey { old, new } => {
-            let ok = rekey(&state, &vault_path, old, new).await;
+            let ok = rekey(&state, &vault_path, &old, &new).await;
             stream
                 .write_all(&[if ok {
                     locket_ipc::REPLY_UNLOCKED
@@ -180,15 +187,12 @@ async fn handle(
             return Ok(());
         }
     };
-    let passphrase = passphrase.as_str();
-
     // Already open: report success without re-deriving anything.
     if !state.lock().await.is_locked() {
         stream.write_all(&[locket_ipc::REPLY_UNLOCKED]).await?;
         return Ok(());
     }
 
-    let passphrase = passphrase.to_owned();
     let path = vault_path.clone();
     // Argon2id is slow by design; keep it off the executor's core threads.
     let opened = tokio::task::spawn_blocking(move || Vault::open(&path, &passphrase))

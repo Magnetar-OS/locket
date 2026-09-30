@@ -60,6 +60,8 @@ impl Manager {
         // Argon2id is deliberately slow; keep it off the executor's core
         // threads so the daemon stays responsive to other bus traffic.
         let path = self.vault_path.clone();
+        // Wiped when the task ends, whichever way the unlock went.
+        let passphrase = zeroize::Zeroizing::new(passphrase);
         let opened = tokio::task::spawn_blocking(move || Vault::open(&path, &passphrase))
             .await
             .map_err(|e| fdo::Error::Failed(format!("unlock task failed: {e}")))?;
