@@ -217,10 +217,14 @@ pub fn import_reader<R: std::io::Read>(
         .collect();
 
     let mapping = Mapping::from_header(&header);
+    // The header is not quoted back: in a file without one, the first row
+    // is a credential, password included.
     if !mapping.is_usable() {
         return Err(Error::Database(format!(
-            "this CSV has no recognisable password column (header: {})",
-            header.join(", ")
+            "this CSV has no recognisable password column in its first row \
+             ({} columns); a password export starts with a header row naming \
+             them",
+            header.len()
         )));
     }
 
@@ -404,6 +408,24 @@ mod tests {
             None,
         );
         assert!(err.is_err(), "a bank statement was accepted as passwords");
+    }
+
+    /// A file with no header row has a credential where the header should
+    /// be. The refusal used to quote that row back, password included, onto
+    /// the terminal or the error banner.
+    #[test]
+    fn the_header_error_does_not_echo_cell_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let err = import_reader(
+            &mut v,
+            "github.com,https://github.com,ada,hunter2\n".as_bytes(),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(err.contains("4 columns"), "{err}");
     }
 
     #[test]

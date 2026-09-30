@@ -136,6 +136,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   opening the item showed the private key in the clear and searching could
   match its contents. Newly imported keys are stored as private-key fields,
   masked until revealed. Keys imported earlier keep the old field kind.
+- Importing a CSV with no header row showed its first line in the error
+  message, password included. The error now says how many columns the first
+  row has and that a header row is expected, without repeating its contents.
 
 ### Documentation
 
