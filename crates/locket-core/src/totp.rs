@@ -276,7 +276,10 @@ fn decode_base32(input: &str) -> Result<Vec<u8>> {
         .filter(|c| !c.is_whitespace() && *c != '-')
         .collect::<String>()
         .to_ascii_uppercase();
-    base32::decode(base32::Alphabet::Rfc4648 { padding: false }, &cleaned)
+    // Padding carries no bits, and the unpadded alphabet rejects `=` outright,
+    // so a correctly padded secret is decoded as if it had none.
+    let cleaned = cleaned.trim_end_matches('=');
+    base32::decode(base32::Alphabet::Rfc4648 { padding: false }, cleaned)
         .ok_or_else(|| Error::Totp("secret is not valid base32".into()))
 }
 
@@ -384,6 +387,17 @@ mod tests {
         let t = Totp::parse("jbsw y3dp ehpk 3pxp").unwrap();
         assert_eq!(t.digits, 6);
         assert_eq!(t.code().unwrap().len(), 6);
+    }
+
+    // RFC 4648 pads to a multiple of eight characters, and some sites print
+    // the padding. "Missing padding" being tolerated does not make present
+    // padding an error.
+    #[test]
+    fn a_padded_secret_decodes_like_its_unpadded_form() {
+        assert_eq!(Totp::parse("JBSWY3DPEE======").unwrap().secret, b"Hello!");
+        assert_eq!(Totp::parse("JBSWY3DPEE").unwrap().secret, b"Hello!");
+        let uri = "otpauth://totp/x?secret=JBSWY3DPEE%3D%3D%3D%3D%3D%3D";
+        assert_eq!(Totp::parse(uri).unwrap().secret, b"Hello!");
     }
 
     #[test]

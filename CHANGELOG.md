@@ -63,6 +63,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   word.
 - A one-time-code seed set to ten digits now shows the right code. Such a
   seed used to show a wrong code about a third of the time.
+- A one-time-code secret written with its trailing `=` padding is now
+  accepted, whether typed in or imported. It used to be refused as invalid,
+  and imports skipped it.
 
 ### Documentation
 
