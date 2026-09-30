@@ -233,6 +233,9 @@ pub struct ServiceState {
     /// A lock that has happened and not been announced yet, with its reason.
     /// The upkeep task announces it; see [`spawn_upkeep`].
     unannounced_lock: Option<LockReason>,
+    /// Unfinished prompt objects, with the unique name of the client each
+    /// was made for, so a client leaving the bus takes its prompts with it.
+    prompt_owners: HashMap<OwnedObjectPath, String>,
 }
 
 impl ServiceState {
@@ -252,6 +255,7 @@ impl ServiceState {
             last_activity: AtomicU64::new(now()),
             session_locked: AtomicBool::new(false),
             unannounced_lock: None,
+            prompt_owners: HashMap::new(),
         }
     }
 
@@ -824,8 +828,9 @@ impl SecretService {
         &self,
         objects: Vec<OwnedObjectPath>,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), SecretError> {
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         if !state.is_locked() {
             return Ok((objects, null_path()));
         }
@@ -834,6 +839,9 @@ impl SecretService {
         // is what lets the unlock dialog be raised by *our* UI at a moment the
         // user is expecting it, rather than from a background D-Bus call.
         let path = state.next_prompt_path()?;
+        if let Some(owner) = caller(&header) {
+            state.prompt_owners.insert(path.clone(), owner);
+        }
         drop(state);
 
         server
@@ -843,6 +851,7 @@ impl SecretService {
                     state: self.state.clone(),
                     path: path.clone(),
                     objects,
+                    finished: Arc::default(),
                 },
             )
             .await?;
@@ -1484,6 +1493,25 @@ pub struct PromptIface {
     pub state: SharedState,
     pub path: OwnedObjectPath,
     pub objects: Vec<OwnedObjectPath>,
+    /// Set by whichever answers first — the dialog through `Prompt()`, or
+    /// `Dismiss()` — so the client hears `Completed` once.
+    pub finished: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PromptIface {
+    /// Claim the one `Completed` this prompt sends. `false` when it has
+    /// already been answered.
+    fn claim(finished: &std::sync::atomic::AtomicBool) -> bool {
+        !finished.swap(true, Ordering::SeqCst)
+    }
+
+    /// Take a finished prompt off the bus and forget its client.
+    async fn retire(state: &SharedState, server: &ObjectServer, path: &OwnedObjectPath) {
+        state.lock().await.prompt_owners.remove(path);
+        if let Err(e) = unpublish::<PromptIface>(server, path).await {
+            tracing::warn!("could not take down a finished prompt: {e}");
+        }
+    }
 }
 
 #[interface(name = "org.freedesktop.Secret.Prompt")]
@@ -1509,6 +1537,8 @@ impl PromptIface {
         let path = self.path.clone();
         let server = server.clone();
         let emitter = emitter.to_owned();
+        let state = self.state.clone();
+        let finished = self.finished.clone();
 
         tokio::spawn(async move {
             let granted = match sender {
@@ -1523,6 +1553,10 @@ impl PromptIface {
                 // No UI attached: refuse rather than silently failing open.
                 None => false,
             };
+            // Dismissed while the dialog was up: the client has its answer.
+            if !PromptIface::claim(&finished) {
+                return;
+            }
             let result = if granted { objects } else { Vec::new() };
             match OwnedValue::try_from(Value::from(result)) {
                 Ok(result) => {
@@ -1532,9 +1566,7 @@ impl PromptIface {
                 }
                 Err(e) => tracing::warn!("could not encode a prompt's outcome: {e}"),
             }
-            if let Err(e) = unpublish::<PromptIface>(&server, &path).await {
-                tracing::warn!("could not take down a finished prompt: {e}");
-            }
+            PromptIface::retire(&state, &server, &path).await;
         });
         Ok(())
     }
@@ -1544,10 +1576,12 @@ impl PromptIface {
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> Result<(), SecretError> {
-        let empty = OwnedValue::try_from(Value::from(Vec::<OwnedObjectPath>::new()))
-            .map_err(zbus::Error::from)?;
-        PromptIface::completed(&emitter, true, empty).await?;
-        unpublish::<PromptIface>(server, &self.path).await?;
+        if PromptIface::claim(&self.finished) {
+            let empty = OwnedValue::try_from(Value::from(Vec::<OwnedObjectPath>::new()))
+                .map_err(zbus::Error::from)?;
+            PromptIface::completed(&emitter, true, empty).await?;
+        }
+        PromptIface::retire(&self.state, server, &self.path).await;
         Ok(())
     }
 
@@ -1613,7 +1647,8 @@ pub fn spawn_upkeep(connection: &zbus::Connection, state: &SharedState) {
     });
 }
 
-/// Close each session when the client that opened it leaves the bus.
+/// Close each session, and take down each unfinished prompt, when the client
+/// that opened it leaves the bus.
 async fn reap_sessions(connection: &zbus::Connection, state: &SharedState) -> Result<()> {
     use futures_util::StreamExt as _;
 
@@ -1627,9 +1662,25 @@ async fn reap_sessions(connection: &zbus::Connection, state: &SharedState) -> Re
         if args.new_owner().is_some() || !args.name().starts_with(':') {
             continue;
         }
-        let mut guard = state.lock().await;
-        if !guard.sessions.close_for_owner(args.name()).is_empty() {
-            guard.tree.changed.notify_one();
+        let abandoned: Vec<OwnedObjectPath> = {
+            let mut guard = state.lock().await;
+            if !guard.sessions.close_for_owner(args.name()).is_empty() {
+                guard.tree.changed.notify_one();
+            }
+            let gone: Vec<OwnedObjectPath> = guard
+                .prompt_owners
+                .iter()
+                .filter(|(_, owner)| owner.as_str() == args.name().as_str())
+                .map(|(path, _)| path.clone())
+                .collect();
+            for path in &gone {
+                guard.prompt_owners.remove(path);
+            }
+            gone
+        };
+        // Nobody is left to call these, or to hear them complete.
+        for path in abandoned {
+            unpublish::<PromptIface>(connection.object_server(), &path).await?;
         }
     }
     Ok(())

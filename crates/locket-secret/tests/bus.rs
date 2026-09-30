@@ -907,3 +907,72 @@ async fn a_lock_is_announced_with_its_reason() {
     daemon.state.lock().await.close_vault();
     assert_eq!(next().await, "error");
 }
+
+/// `Unlock` on a locked vault publishes a prompt for the client to call. A
+/// client that went away without calling it — or without dismissing it —
+/// left the object published for the daemon's lifetime.
+#[tokio::test]
+async fn a_prompt_goes_with_the_client_that_asked_for_it() {
+    use zbus::zvariant::OwnedObjectPath;
+
+    let daemon = Daemon::start().await;
+    daemon
+        .lock_and_serve_prompts(|| Ok("nobody".to_owned()))
+        .await;
+    let leaving = daemon.client().await;
+    let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = leaving
+        .service()
+        .await
+        .call("Unlock", &(Vec::<OwnedObjectPath>::new(),))
+        .await
+        .unwrap();
+    let watcher = daemon.client().await;
+    assert!(watcher.exists(prompt.as_str()).await);
+
+    drop(leaving);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while watcher.exists(prompt.as_str()).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a departed client's prompt is still published"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// A prompt completes once. Dismissing one whose `Prompt()` was running
+/// answered the client, and the dialog ending later answered it again.
+#[tokio::test]
+async fn a_dismissed_prompt_completes_once() {
+    use futures_util::StreamExt as _;
+    use zbus::zvariant::OwnedObjectPath;
+
+    let daemon = Daemon::start().await;
+    daemon
+        .lock_and_serve_prompts(|| Ok("nobody".to_owned()))
+        .await;
+    let client = daemon.client().await;
+    let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = client
+        .service()
+        .await
+        .call("Unlock", &(Vec::<OwnedObjectPath>::new(),))
+        .await
+        .unwrap();
+    let prompt = client
+        .proxy(prompt.as_str(), "org.freedesktop.Secret.Prompt")
+        .await;
+    let mut completed = prompt.receive_signal("Completed").await.unwrap();
+    let () = prompt.call("Prompt", &("",)).await.unwrap();
+    let () = prompt.call("Dismiss", &()).await.unwrap();
+
+    // Past the dialog's own end, when the running Prompt() would answer.
+    let window = locket_secret::testing::PROMPT_TIMEOUT + std::time::Duration::from_secs(4);
+    let mut heard = 0;
+    let _ = tokio::time::timeout(window, async {
+        while completed.next().await.is_some() {
+            heard += 1;
+        }
+    })
+    .await;
+    assert_eq!(heard, 1, "the prompt completed {heard} times");
+}
