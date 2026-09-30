@@ -19,6 +19,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   Requests used to queue, each with two minutes of dialog of its own, raised
   one after another long after the applications had given up.
 
+### Fixed
+
+- A search answered the moment the vault unlocked could name items that were
+  not on the bus yet, so reading the secret it had just found failed.
+
 ## [2.0.0] - 2026-09-29
 
 ### Changed

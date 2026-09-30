@@ -714,6 +714,7 @@ impl SecretService {
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
+        #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<(Vec<OwnedObjectPath>, Vec<OwnedObjectPath>), SecretError> {
         // A locked locket vault cannot be enumerated at all: labels and
         // attributes live inside the sealed body, which is the point — nothing
@@ -725,6 +726,9 @@ impl SecretService {
         // rather than prompting. So ask for an unlock and wait — though not
         // past the caller's own deadline; see `ensure_unlocked`.
         ServiceState::ensure_unlocked(&self.state).await?;
+        // The paths returned below are read at once — `GetSecret`, `Label`.
+        // An unlock that landed a moment ago may still be publishing them.
+        sync_objects(server, &self.state).await?;
 
         let state = self.state.lock().await;
         let vault = state.vault()?;
@@ -957,8 +961,10 @@ impl CollectionIface {
     async fn search_items(
         &self,
         attributes: HashMap<String, String>,
+        #[zbus(object_server)] server: &ObjectServer,
     ) -> Result<Vec<OwnedObjectPath>, SecretError> {
         ServiceState::ensure_unlocked(&self.state).await?;
+        sync_objects(server, &self.state).await?;
 
         let state = self.state.lock().await;
         let vault = state.vault()?;
@@ -1693,6 +1699,48 @@ async fn unpublish<I: zbus::object_server::Interface>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The paths a search returns are read straight away — `GetSecret`,
+    /// `Label`. An unlock opens the vault first and publishes the items
+    /// after, and a search that had been waiting for it could answer in
+    /// between, with paths that had no object behind them yet. The window is
+    /// held open here by holding the tree's own lock.
+    #[tokio::test]
+    async fn a_search_answers_only_with_paths_that_are_published() {
+        use crate::testing::{Daemon, PASSPHRASE};
+
+        let daemon = Daemon::start().await;
+        let client = daemon.client().await;
+        {
+            let mut state = daemon.state.lock().await;
+            let vault = state.vault.as_mut().unwrap();
+            vault.add_item_default(Item::new(ItemKind::Note, "note"));
+            vault.save().unwrap();
+            state.lock_vault();
+        }
+        sync_objects(daemon.server.object_server(), &daemon.state)
+            .await
+            .unwrap();
+
+        let tree = daemon.state.lock().await.tree.clone();
+        let publishing = tree.published.lock().await;
+        let vault = Vault::open(daemon.vault_path(), PASSPHRASE).unwrap();
+        assert!(daemon.state.lock().await.install_unlocked(vault));
+
+        let search = tokio::spawn(async move {
+            let paths = client.search_all().await.unwrap();
+            (client.item_label(&paths[0]).await, paths.len())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        drop(publishing);
+
+        let (label, found) = search.await.unwrap();
+        assert_eq!(found, 1);
+        assert_eq!(
+            label.expect("the search returned a path before it was published"),
+            "note"
+        );
+    }
 
     #[test]
     fn collection_paths_roundtrip() {
