@@ -1288,8 +1288,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let mut vault = Vault::open(&path, &passphrase)?;
             let defaults = KdfParams::default();
+            let m_cost = match memory_mib {
+                // Checked: an overflow used to wrap to a small, valid cost in
+                // a release build and weaken the vault without a word.
+                Some(mib) => mib
+                    .checked_mul(1024)
+                    .ok_or("--memory-mib is too large")?,
+                None => defaults.m_cost,
+            };
             let params = KdfParams {
-                m_cost: memory_mib.map(|m| m * 1024).unwrap_or(defaults.m_cost),
+                m_cost,
                 t_cost: passes.unwrap_or(defaults.t_cost),
                 p_cost: parallelism.unwrap_or(defaults.p_cost),
             };

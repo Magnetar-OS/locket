@@ -40,6 +40,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - `locket-cli get` refuses a query that fits more than one item, as the
   commands that change things already did, and lists the candidates. It used
   to print the secret of whichever matching item came first.
+- `locket-cli passwd --memory-mib` refuses a value too large to express,
+  where a release build used to wrap it round to a small cost and weaken the
+  vault while reporting success.
 - A search answered the moment the vault unlocked could name items that were
   not on the bus yet, so reading the secret it had just found failed.
 - `pam_locket.so` contains a panic in any of its hooks and answers as it
