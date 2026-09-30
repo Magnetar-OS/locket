@@ -45,6 +45,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   vault while reporting success.
 - `locket-cli import-env --dry-run` lists a `.env` file it cannot read as
   unreadable, instead of as a file holding nothing.
+- Every `locket-cli import-…` command prints what it left out and why. Only
+  the 1Password and SSH imports did; an authenticator export with an entry
+  locket cannot generate said nothing about it.
 - `locket-cli history --restore N` restores revision N. With a full history
   it restored the one after it and lost the one asked for.
 - A search answered the moment the vault unlocked could name items that were

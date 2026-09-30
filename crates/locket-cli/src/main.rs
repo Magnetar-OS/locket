@@ -1147,7 +1147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary =
                 locket_import::pass::import_store(&mut vault, &store, &gpg, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", store.display());
+            report(&summary, &store);
         }
 
         Command::ImportKeepass {
@@ -1172,7 +1172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 into.as_deref(),
             )?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", database.display());
+            report(&summary, &database);
         }
 
         Command::ImportBitwarden { file, into } => {
@@ -1180,7 +1180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary =
                 locket_import::bitwarden::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", file.display());
+            report(&summary, &file);
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every secret it held.",
                 file.display()
@@ -1192,10 +1192,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary =
                 locket_import::onepassword::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", file.display());
-            for note in &summary.notes {
-                eprintln!("\n{note}");
-            }
+            report(&summary, &file);
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every secret it held.",
                 file.display()
@@ -1207,7 +1204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary =
                 locket_import::protonpass::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", file.display());
+            report(&summary, &file);
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every secret it held.",
                 file.display()
@@ -1218,7 +1215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary = locket_import::csv::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", file.display());
+            report(&summary, &file);
             // The export is every credential you own, in the clear.
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every password it held.",
@@ -1237,7 +1234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary =
                 locket_import::dotenv::import_dir(&mut vault, &dir, grouping, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", dir.display());
+            report(&summary, &dir);
             eprintln!(
                 "\nThe .env files are untouched. Delete them only once the projects read \
                  their configuration from locket."
@@ -1252,10 +1249,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary = locket_import::ssh::import_dir(&mut vault, &dir, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", dir.display());
-            for note in &summary.notes {
-                eprintln!("\n{note}");
-            }
+            report(&summary, &dir);
             eprintln!(
                 "\nYour key files are untouched. Point SSH_AUTH_SOCK at locket's agent \
                  and confirm `ssh-add -l` lists them before removing anything."
@@ -1273,7 +1267,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let summary =
                 locket_import::cloud::import_home(&mut vault, &home, &sqlite, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", home.display());
+            report(&summary, &home);
             eprintln!(
                 "\nThe source files still hold the same credentials in the clear. \
                  Rotate them, or remove them once the tools are reading from locket."
@@ -1284,7 +1278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut vault = Vault::open(&path, &passphrase)?;
             let summary = locket_import::totp::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
-            println!("imported {summary} from {}", file.display());
+            report(&summary, &file);
             eprintln!(
                 "\nNow delete {} — it is a plaintext copy of every seed it held.",
                 file.display()
@@ -1449,6 +1443,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Say what an import brought in, and what it left out and why.
+///
+/// The notes are where an importer names what it could not bring across —
+/// an authenticator entry of a kind locket cannot generate, a store that did
+/// not parse, a key the agent cannot serve — so every import prints them.
+fn report(summary: &locket_import::ImportSummary, source: &std::path::Path) {
+    println!("imported {summary} from {}", source.display());
+    for note in &summary.notes {
+        eprintln!("\n{note}");
+    }
+}
+
 /// Write the vault, then tell a running daemon that it changed.
 fn save(vault: &mut Vault) -> Result<(), Box<dyn std::error::Error>> {
     vault.save()?;
@@ -1600,7 +1606,8 @@ fn find_item(vault: &Vault, query: &str) -> Result<uuid::Uuid, Box<dyn std::erro
 /// CLI spelling of [`locket_import::export::Format`].
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 enum ExportFormat {
-    /// Lossless: every field, tag, expiry and attachment. Plaintext.
+    /// Every field, tag, expiry and attachment; not the edit history.
+    /// Plaintext.
     Json,
     /// The flat file every manager imports. Loses custom structure. Plaintext.
     Csv,

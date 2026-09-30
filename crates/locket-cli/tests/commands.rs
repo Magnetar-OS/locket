@@ -128,3 +128,29 @@ fn restoring_from_a_full_history_restores_the_revision_asked_for() {
     let note = cli(&vault, &["get", "rotated", "--field", "note"]);
     assert_eq!(text(&note.stdout).trim(), "v1");
 }
+
+/// What an import could not bring across is in its notes, and the command
+/// line printed the notes of two importers only. An authenticator export
+/// with an entry locket cannot generate reported success and said nothing
+/// about the entry left behind.
+#[test]
+fn an_import_names_what_it_left_out() {
+    let (dir, vault) = vault_with(&[]);
+    let export = dir.path().join("aegis.json");
+    std::fs::write(
+        &export,
+        r#"{"db":{"entries":[
+            {"type":"totp","name":"ada","issuer":"GitHub","info":{"secret":"JBSWY3DPEHPK3PXP"}},
+            {"type":"hotp","name":"counter","issuer":"Bank","info":{"secret":"JBSWY3DPEHPK3PXP","counter":1}}
+        ]}}"#,
+    )
+    .unwrap();
+
+    let imported = cli(&vault, &["import-totp", export.to_str().unwrap()]);
+    assert!(imported.status.success(), "{}", text(&imported.stderr));
+    assert!(
+        text(&imported.stderr).contains("Bank"),
+        "the entry left behind was not named: {}",
+        text(&imported.stderr)
+    );
+}
