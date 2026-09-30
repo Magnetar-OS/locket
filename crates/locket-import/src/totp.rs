@@ -153,22 +153,54 @@ fn decode(s: &str) -> String {
 // Formats
 // ---------------------------------------------------------------------------
 
+/// What a file held: the seeds that parse, and a name for each entry that
+/// could not be imported.
+///
+/// The names are what the summary reports, so they carry the issuer and
+/// account and never the seed.
+#[derive(Default)]
+struct Parsed {
+    entries: Vec<Entry>,
+    skipped: Vec<String>,
+}
+
+/// How a skipped entry is named in the summary.
+fn skipped_name(issuer: Option<&str>, account: &str) -> String {
+    match issuer.filter(|i| !i.is_empty()) {
+        Some(issuer) if !account.is_empty() => format!("{issuer} ({account})"),
+        Some(issuer) => issuer.to_owned(),
+        None if !account.is_empty() => account.to_owned(),
+        None => "an unnamed entry".to_owned(),
+    }
+}
+
 /// A file of `otpauth://` URIs, one per line. Blank lines and `#` comments
 /// are ignored, so an exported list with notes in it still works.
 pub fn parse_uri_list(text: &str) -> Vec<Entry> {
-    text.lines()
+    read_uri_list(text).entries
+}
+
+fn read_uri_list(text: &str) -> Parsed {
+    let mut parsed = Parsed::default();
+    for uri in text
+        .lines()
         .map(str::trim)
         .filter(|l| l.starts_with("otpauth://"))
-        .filter(|l| Totp::parse(l).is_ok())
-        .map(|uri| {
-            let (issuer, account) = describe(uri);
-            Entry {
+    {
+        let (issuer, account) = describe(uri);
+        if Totp::parse(uri).is_ok() {
+            parsed.entries.push(Entry {
                 issuer,
                 account,
                 uri: uri.to_owned(),
-            }
-        })
-        .collect()
+            });
+        } else {
+            parsed
+                .skipped
+                .push(skipped_name(issuer.as_deref(), &account));
+        }
+    }
+    parsed
 }
 
 /// Aegis plain-text JSON export: `{"db":{"entries":[...]}}`.
@@ -176,6 +208,10 @@ pub fn parse_uri_list(text: &str) -> Vec<Entry> {
 /// An encrypted export has a string `db` rather than an object, which is how
 /// this tells the two apart without guessing from the file name.
 pub fn parse_aegis(text: &str) -> Result<Vec<Entry>> {
+    read_aegis(text).map(|p| p.entries)
+}
+
+fn read_aegis(text: &str) -> Result<Parsed> {
     let json: serde_json::Value =
         serde_json::from_str(text).map_err(|e| Error::Database(e.to_string()))?;
 
@@ -192,76 +228,90 @@ pub fn parse_aegis(text: &str) -> Result<Vec<Entry>> {
         .and_then(|e| e.as_array())
         .ok_or_else(|| Error::Database("no `db.entries` array".to_owned()))?;
 
-    Ok(entries
-        .iter()
-        .filter(|e| {
-            // HOTP and Steam entries use the same file but are not TOTP.
-            e.get("type")
-                .and_then(|t| t.as_str())
-                .is_none_or(|t| t.eq_ignore_ascii_case("totp"))
-        })
-        .filter_map(|e| {
-            let info = e.get("info")?;
-            let secret = info.get("secret")?.as_str()?;
-            let account = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let issuer = e.get("issuer").and_then(|v| v.as_str());
-            let uri = build_uri(
-                issuer,
-                account,
-                secret,
-                info.get("algo").and_then(|v| v.as_str()),
-                info.get("digits")
-                    .and_then(|v| v.as_u64())
-                    .map(|d| d as u32),
-                info.get("period").and_then(|v| v.as_u64()),
-            );
-            Totp::parse(&uri).ok()?;
-            Some(Entry {
+    let mut parsed = Parsed::default();
+    for e in entries {
+        let account = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let issuer = e.get("issuer").and_then(|v| v.as_str());
+        // HOTP and Steam entries use the same file but are not TOTP.
+        let is_totp = e
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_none_or(|t| t.eq_ignore_ascii_case("totp"));
+        let info = e.get("info");
+        let uri = info
+            .and_then(|info| info.get("secret")?.as_str())
+            .filter(|_| is_totp)
+            .map(|secret| {
+                build_uri(
+                    issuer,
+                    account,
+                    secret,
+                    info.and_then(|i| i.get("algo")?.as_str()),
+                    info.and_then(|i| i.get("digits")?.as_u64())
+                        .map(|d| d as u32),
+                    info.and_then(|i| i.get("period")?.as_u64()),
+                )
+            })
+            .filter(|uri| Totp::parse(uri).is_ok());
+        match uri {
+            Some(uri) => parsed.entries.push(Entry {
                 issuer: issuer.map(str::to_owned),
                 account: account.to_owned(),
                 uri,
-            })
-        })
-        .collect())
+            }),
+            None => parsed.skipped.push(skipped_name(issuer, account)),
+        }
+    }
+    Ok(parsed)
 }
 
 /// andOTP plain-text JSON export: a bare array of entries.
 pub fn parse_andotp(text: &str) -> Result<Vec<Entry>> {
+    read_andotp(text).map(|p| p.entries)
+}
+
+fn read_andotp(text: &str) -> Result<Parsed> {
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(text).map_err(|e| Error::Database(e.to_string()))?;
 
-    Ok(entries
-        .iter()
-        .filter(|e| {
-            e.get("type")
-                .and_then(|t| t.as_str())
-                .is_none_or(|t| t.eq_ignore_ascii_case("totp"))
-        })
-        .filter_map(|e| {
-            let secret = e.get("secret")?.as_str()?;
-            // andOTP's `label` is often already "Issuer - account".
-            let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("");
-            let issuer = e.get("issuer").and_then(|v| v.as_str());
-            let account = match (issuer, label.split_once(" - ")) {
-                (Some(_), Some((_, account))) => account,
-                _ => label,
-            };
-            let uri = build_uri(
-                issuer,
-                account,
-                secret,
-                e.get("algorithm").and_then(|v| v.as_str()),
-                e.get("digits").and_then(|v| v.as_u64()).map(|d| d as u32),
-                e.get("period").and_then(|v| v.as_u64()),
-            );
-            Totp::parse(&uri).ok()?;
-            Some(Entry {
+    let mut parsed = Parsed::default();
+    for e in &entries {
+        // andOTP's `label` is often already "Issuer - account".
+        let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("");
+        let issuer = e.get("issuer").and_then(|v| v.as_str());
+        let account = match (issuer, label.split_once(" - ")) {
+            (Some(_), Some((_, account))) => account,
+            _ => label,
+        };
+        let is_totp = e
+            .get("type")
+            .and_then(|t| t.as_str())
+            .is_none_or(|t| t.eq_ignore_ascii_case("totp"));
+        let uri = e
+            .get("secret")
+            .and_then(|v| v.as_str())
+            .filter(|_| is_totp)
+            .map(|secret| {
+                build_uri(
+                    issuer,
+                    account,
+                    secret,
+                    e.get("algorithm").and_then(|v| v.as_str()),
+                    e.get("digits").and_then(|v| v.as_u64()).map(|d| d as u32),
+                    e.get("period").and_then(|v| v.as_u64()),
+                )
+            })
+            .filter(|uri| Totp::parse(uri).is_ok());
+        match uri {
+            Some(uri) => parsed.entries.push(Entry {
                 issuer: issuer.map(str::to_owned),
                 account: account.to_owned(),
                 uri,
-            })
-        })
-        .collect())
+            }),
+            None => parsed.skipped.push(skipped_name(issuer, account)),
+        }
+    }
+    Ok(parsed)
 }
 
 /// Read a file in whichever of the supported shapes it turns out to be.
@@ -270,20 +320,24 @@ pub fn parse_andotp(text: &str) -> Result<Vec<Entry>> {
 /// andOTP export are both `.json`, and a URI list has no conventional suffix
 /// at all.
 pub fn parse_any(text: &str) -> Result<Vec<Entry>> {
+    read_any(text).map(|p| p.entries)
+}
+
+fn read_any(text: &str) -> Result<Parsed> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('{') {
-        return parse_aegis(text);
+        return read_aegis(text);
     }
     if trimmed.starts_with('[') {
-        return parse_andotp(text);
+        return read_andotp(text);
     }
-    let entries = parse_uri_list(text);
-    if entries.is_empty() {
+    let parsed = read_uri_list(text);
+    if parsed.entries.is_empty() && parsed.skipped.is_empty() {
         return Err(Error::Database(
             "no otpauth:// URIs, and not an Aegis or andOTP export".to_owned(),
         ));
     }
-    Ok(entries)
+    Ok(parsed)
 }
 
 pub fn item_for(entry: &Entry) -> Item {
@@ -319,10 +373,25 @@ pub fn import_file(
         path: path.to_path_buf(),
         source: e,
     })?;
-    let entries = parse_any(&text)?;
+    let Parsed { entries, skipped } = read_any(&text)?;
 
     let target = crate::target_collection(vault, into_collection.unwrap_or("2FA"));
     let mut summary = ImportSummary::default();
+
+    if !skipped.is_empty() {
+        summary.skipped_unreadable += skipped.len();
+        summary.notes.push(format!(
+            "{} entr{} not imported: {}. Only TOTP seeds are stored; HOTP and \
+             Steam codes, and seeds that do not parse, are left in the export.",
+            skipped.len(),
+            if skipped.len() == 1 {
+                "y was"
+            } else {
+                "ies were"
+            },
+            skipped.join(", ")
+        ));
+    }
 
     for entry in &entries {
         let item = item_for(entry);
@@ -472,6 +541,58 @@ mod tests {
         assert_eq!(field.kind, FieldKind::Totp);
         let totp = Totp::parse(field.value.expose()).expect("stored seed does not parse");
         assert_eq!(totp.code().unwrap().len(), 6);
+    }
+
+    /// An entry left out — HOTP, Steam, a seed that is not base32 — has to
+    /// show up in the summary. A silent drop reads as "everything moved",
+    /// and the next thing people do is wipe the phone.
+    #[test]
+    fn entries_that_cannot_be_imported_are_counted_not_vanished() {
+        let dir = tempfile::tempdir().unwrap();
+        let vpath = dir.path().join("v.vault");
+        let mut v = Vault::create(
+            &vpath,
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+
+        let aegis = dir.path().join("aegis.json");
+        std::fs::write(
+            &aegis,
+            format!(
+                r#"{{"db":{{"entries":[
+                    {{"type":"totp","name":"ada","issuer":"GitHub","info":{{"secret":"{SEED}"}}}},
+                    {{"type":"hotp","name":"counter","issuer":"Bank","info":{{"secret":"{SEED}","counter":1}}}},
+                    {{"type":"totp","name":"broken","issuer":"Shop","info":{{"secret":"not-base32-!!!"}}}}
+                ]}}}}"#
+            ),
+        )
+        .unwrap();
+        let summary = import_file(&mut v, &aegis, None).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.skipped_unreadable, 2);
+        assert_eq!(summary.notes.len(), 1);
+        assert!(summary.notes[0].contains("Bank"), "{}", summary.notes[0]);
+        assert!(summary.notes[0].contains("Shop"), "{}", summary.notes[0]);
+        assert!(
+            !summary.notes[0].contains(SEED),
+            "a seed leaked into the note"
+        );
+
+        let list = dir.path().join("codes.txt");
+        std::fs::write(
+            &list,
+            format!(
+                "otpauth://totp/Mail:ada?secret={SEED}\n\
+                 otpauth://hotp/Bank:ada?secret={SEED}&counter=1\n\
+                 otpauth://totp/Shop:ada?secret=not-base32-!!!\n"
+            ),
+        )
+        .unwrap();
+        let summary = import_file(&mut v, &list, None).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.skipped_unreadable, 2);
     }
 
     #[test]

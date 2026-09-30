@@ -97,6 +97,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Importing a list of `otpauth://` URIs crashed when a label held a `%`
   followed by a non-ASCII character, such as `10%優惠`; in the app this also
   locked the vault. Such labels now import as written.
+- Importing an authenticator export no longer drops entries without a word.
+  HOTP and Steam codes, and seeds that do not parse, used to vanish while
+  the summary said nothing was unreadable; they are now counted as
+  unreadable and named in a note, so you know which codes are still only on
+  the phone.
 
 ### Security
 
