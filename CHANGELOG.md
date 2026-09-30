@@ -94,6 +94,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   older lossy import: it added a correct copy beside the damaged one, and
   applications could still be handed the damaged one. The re-import now
   overwrites the damaged item in place.
+- Importing a list of `otpauth://` URIs crashed when a label held a `%`
+  followed by a non-ASCII character, such as `10%優惠`; in the app this also
+  locked the vault. Such labels now import as written.
 
 ### Security
 

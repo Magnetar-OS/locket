@@ -131,9 +131,13 @@ fn decode(s: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        // The two hex digits are read as bytes: slicing `s` there would cut
+        // through a multi-byte character when the `%` is not an escape.
         if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let Some(b) = bytes
+                .get(i + 1..i + 3)
+                .and_then(|hex| std::str::from_utf8(hex).ok())
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
         {
             out.push(b);
             i += 3;
@@ -368,6 +372,17 @@ mod tests {
         ));
         assert_eq!(entries[0].issuer.as_deref(), Some("Big Corp"));
         assert_eq!(entries[0].account, "ada@example.com");
+    }
+
+    /// A `%` that does not start an escape, followed by a character wider
+    /// than one byte, used to slice through the middle of that character.
+    #[test]
+    fn a_percent_before_a_multibyte_char_does_not_panic() {
+        assert_eq!(decode("10%優惠"), "10%優惠");
+        assert_eq!(decode("%aé"), "%aé");
+        assert_eq!(decode("100%€"), "100%€");
+        assert_eq!(decode("Big%20Corp"), "Big Corp");
+        assert_eq!(decode("a%41"), "aA");
     }
 
     #[test]
