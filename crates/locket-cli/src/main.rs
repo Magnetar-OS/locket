@@ -580,20 +580,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Command::Get { query, field } => {
             let vault = Vault::open(&path, &passphrase)?;
-            let needle = query.to_lowercase();
-            let item = vault
-                .data()
-                .all_items()
-                .map(|(_, i)| i)
-                .find(|i| i.label.to_lowercase() == needle || i.id.to_string() == needle)
-                .or_else(|| {
-                    vault
-                        .data()
-                        .all_items()
-                        .map(|(_, i)| i)
-                        .find(|i| i.matches(&query))
-                })
-                .ok_or_else(|| format!("no item matching `{query}`"))?;
+            // Resolved like every other command: a query that fits more than
+            // one item is refused, not settled by whichever comes first — a
+            // script would otherwise be handed another item's secret.
+            let id = find_item(&vault, &query)?;
+            let item = vault.item(id).ok_or("item vanished")?;
 
             match field {
                 Some(name) => {
@@ -1541,7 +1532,8 @@ fn write_new_0600(path: &std::path::Path, data: &[u8]) -> Result<(), Box<dyn std
 ///
 /// Exact matches first, so an item called `github` is reachable even when
 /// three others merely mention it. An ambiguous substring is an error rather
-/// than a guess: the commands using this delete and overwrite things.
+/// than a guess: the commands using this delete and overwrite things, or
+/// print a secret for a script to use.
 fn find_item(vault: &Vault, query: &str) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
     let needle = query.to_lowercase();
 
