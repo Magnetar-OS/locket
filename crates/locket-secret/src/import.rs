@@ -81,7 +81,9 @@ pub struct ImportSummary {
     pub replaced: usize,
     /// Already present in the target, matched by attribute set.
     pub skipped_duplicate: usize,
-    /// Could not be read — locked, or the service refused.
+    /// Could not be read — locked, or the service refused. A collection that
+    /// was locked or could not be listed counts once, however many items it
+    /// holds.
     pub skipped_unreadable: usize,
 }
 
@@ -256,7 +258,19 @@ pub async fn import_from(
     replace: bool,
 ) -> Result<ImportSummary> {
     let connection = zbus::Connection::session().await?;
-    let service = SourceServiceProxy::builder(&connection)
+    import_over(&connection, vault, bus_name, into_collection, replace).await
+}
+
+/// [`import_from`] over a given connection, so the tests can point it at a
+/// private bus rather than the session's.
+async fn import_over(
+    connection: &zbus::Connection,
+    vault: &mut Vault,
+    bus_name: &str,
+    into_collection: Option<&str>,
+    replace: bool,
+) -> Result<ImportSummary> {
+    let service = SourceServiceProxy::builder(connection)
         .destination(bus_name.to_owned())
         .map_err(Error::Dbus)?
         .path("/org/freedesktop/secrets")
@@ -276,7 +290,7 @@ pub async fn import_from(
     let mut summary = ImportSummary::default();
 
     for collection_path in service.collections().await? {
-        let collection = SourceCollectionProxy::builder(&connection)
+        let collection = SourceCollectionProxy::builder(connection)
             .destination(bus_name.to_owned())
             .map_err(Error::Dbus)?
             .path(collection_path.clone())
@@ -288,13 +302,23 @@ pub async fn import_from(
             .label()
             .await
             .unwrap_or_else(|_| "Imported".into());
+        // A collection we cannot read is counted once, as one unreadable
+        // entry: its items are not listed while it is locked, so how many it
+        // holds is unknown. Passing it over quietly made the summary claim
+        // nothing was left behind.
         if collection.locked().await.unwrap_or(false) {
             tracing::warn!("skipping locked collection `{label}`");
+            summary.skipped_unreadable += 1;
             continue;
         }
 
-        let Ok(item_paths) = collection.items().await else {
-            continue;
+        let item_paths = match collection.items().await {
+            Ok(paths) => paths,
+            Err(e) => {
+                tracing::warn!("could not list collection `{label}`: {e}");
+                summary.skipped_unreadable += 1;
+                continue;
+            }
         };
         if item_paths.is_empty() {
             continue;
@@ -314,7 +338,7 @@ pub async fn import_from(
         };
 
         for item_path in item_paths {
-            let item_proxy = SourceItemProxy::builder(&connection)
+            let item_proxy = SourceItemProxy::builder(connection)
                 .destination(bus_name.to_owned())
                 .map_err(Error::Dbus)?
                 .path(item_path.clone())
@@ -322,7 +346,17 @@ pub async fn import_from(
                 .build()
                 .await?;
 
-            let attributes = item_proxy.attributes().await.unwrap_or_default();
+            // Without its attributes an item is unreachable to the
+            // application that stored it and never matches on a re-run, so a
+            // failed read is unreadable, not an item with none.
+            let attributes = match item_proxy.attributes().await {
+                Ok(attributes) => attributes,
+                Err(e) => {
+                    tracing::warn!("could not read the attributes of {item_path}: {e}");
+                    summary.skipped_unreadable += 1;
+                    continue;
+                }
+            };
             let label = item_proxy.label().await.unwrap_or_default();
             let schema = item_proxy.type_().await.ok().filter(|s| !s.is_empty());
 
@@ -529,6 +563,36 @@ mod tests {
         );
         vault.item_mut(id).unwrap().set_secret_bytes(&[0xff, 0xfe]);
         assert_eq!(matching_item(&vault, &text.attributes), Some(id));
+    }
+
+    /// A locked collection in the source used to be passed over with a log
+    /// line and nothing in the summary, which then read "0 unreadable" as if
+    /// the keyring had been emptied into the vault.
+    #[tokio::test]
+    async fn a_locked_source_collection_is_counted_not_passed_over() {
+        let daemon = crate::testing::Daemon::start().await;
+        let collections = {
+            let mut state = daemon.state.lock().await;
+            let vault = state.vault.as_mut().unwrap();
+            vault.add_item_default(Item::new(ItemKind::Note, "n").with_secret("s"));
+            vault.save().unwrap();
+            let collections = vault.data().collections.len();
+            state.lock_vault(crate::service::LockReason::Request);
+            collections
+        };
+        crate::service::sync_objects(daemon.server.object_server(), &daemon.state)
+            .await
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut target =
+            Vault::create(dir.path().join("t.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        let connection = daemon.bus.connect().await;
+        let summary = import_over(&connection, &mut target, &daemon.name(), None, false)
+            .await
+            .unwrap();
+        assert_eq!(summary.imported, 0);
+        assert_eq!(summary.skipped_unreadable, collections);
     }
 
     /// The recovery path: an item whose attributes match but whose stored

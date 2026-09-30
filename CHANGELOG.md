@@ -120,6 +120,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - A `pass` entry holding binary data was imported with its bytes replaced by
   placeholder characters and counted as a success. It is now reported as
   unreadable and left in the store as it is.
+- Importing from another keyring said nothing about collections it could not
+  read: a locked collection was skipped while the summary reported "0
+  unreadable". Each locked or unreadable collection is now counted as
+  unreadable, and an item whose attributes cannot be read is skipped rather
+  than imported without them.
 
 ### Security
 
