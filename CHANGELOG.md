@@ -59,6 +59,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   vault while reporting success.
 - `locket-cli import-env --dry-run` lists a `.env` file it cannot read as
   unreadable, instead of as a file holding nothing.
+- `locket-cli import-env --dry-run` names the directories it could not read
+  and skipped.
 - Every `locket-cli import-…` command prints what it left out and why. Only
   the 1Password and SSH imports did; an authenticator export with an entry
   locket cannot generate said nothing about it.

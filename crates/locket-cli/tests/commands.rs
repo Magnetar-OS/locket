@@ -154,3 +154,33 @@ fn an_import_names_what_it_left_out() {
         text(&imported.stderr)
     );
 }
+
+/// The scan skips a directory it cannot read rather than failing on it, and
+/// the dry run said nothing about the skip, so a tree looked fully covered.
+#[test]
+fn a_dry_run_names_an_unreadable_directory() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let closed = dir.path().join("pgdata");
+    std::fs::create_dir(&closed).unwrap();
+    std::fs::write(closed.join(".env"), "API_TOKEN=abc123def456ghi789\n").unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&closed).is_ok();
+
+    let scanned = cli(
+        &dir.path().join("unused.vault"),
+        &["import-env", dir.path().to_str().unwrap(), "--dry-run"],
+    );
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if readable {
+        // Running as root: nothing is unreadable to show.
+        return;
+    }
+    assert!(scanned.status.success(), "{}", text(&scanned.stderr));
+    let out = text(&scanned.stdout);
+    assert!(
+        out.contains("pgdata") && out.contains("unreadable"),
+        "{out}"
+    );
+}

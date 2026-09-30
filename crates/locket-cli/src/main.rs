@@ -491,7 +491,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dir, dry_run: true, ..
     } = &args.command
     {
-        let files = locket_import::dotenv::scan(dir)?;
+        let scan = locket_import::dotenv::scan_reporting(dir)?;
+        let files = scan.files;
+        // The scan passes over a directory it cannot read, as the import
+        // does; say which, so the listing is not mistaken for the whole tree.
+        for path in &scan.unreadable {
+            println!("{:<56} unreadable directory, skipped", path.display());
+        }
         let (mut vars, mut secrets) = (0usize, 0usize);
         for f in &files {
             // A file the import would fail on is shown as such, not as one
