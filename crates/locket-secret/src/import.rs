@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use locket_core::{
     Vault,
-    model::{Collection, Item, ItemKind},
+    model::{Collection, Item, ItemKind, attr},
 };
 use zbus::zvariant::OwnedObjectPath;
 
@@ -219,17 +219,30 @@ fn infer_kind(
 ///
 /// Attribute identity is what the Secret Service itself uses for
 /// replace-on-store, so it is the right notion of "the same secret".
+///
+/// Locket's own encoding marker is left out of the comparison: it says how
+/// the secret is stored, not which secret it is. An item damaged by the old
+/// lossy import has no marker while the binary secret that repairs it does,
+/// and counting the marker made `--replace` add a second copy instead.
 fn matching_item(
     vault: &Vault,
     attributes: &std::collections::BTreeMap<String, String>,
 ) -> Option<uuid::Uuid> {
-    if attributes.is_empty() {
+    let identity = |attrs: &std::collections::BTreeMap<String, String>| {
+        attrs
+            .iter()
+            .filter(|(k, _)| k.as_str() != attr::SECRET_ENCODING)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let wanted = identity(attributes);
+    if wanted.is_empty() {
         return None;
     }
     vault
         .data()
         .all_items()
-        .find(|(_, i)| &i.attributes == attributes)
+        .find(|(_, i)| identity(&i.attributes) == wanted)
         .map(|(_, i)| i.id)
 }
 
@@ -475,6 +488,47 @@ mod tests {
             s.to_string(),
             "5 item(s) from 2 collection(s); 3 replaced, 1 already present, 0 unreadable"
         );
+    }
+
+    /// The case `--replace` exists for: the vault holds what a lossy import
+    /// made of a binary secret, and the source still has the real bytes. The
+    /// incoming item carries the encoding marker and the damaged one does
+    /// not; that must not make them two different secrets.
+    #[test]
+    fn a_mangled_item_is_matched_by_the_binary_secret_that_repairs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+
+        let mut mangled = Item::new(ItemKind::Application, "Application key for X");
+        mangled
+            .attributes
+            .insert("app_id".into(), "com.example.App".into());
+        mangled.set_secret_bytes("\u{FFFD} mangled".as_bytes());
+        let id = mangled.id;
+        vault.add_item_default(mangled);
+
+        let incoming = map_item(
+            "Application key for X".into(),
+            attrs(&[("app_id", "com.example.App")]),
+            None,
+            &[0xff, 0xfe, 0x00, 0x80],
+            "application/octet-stream".into(),
+        );
+        assert!(incoming.secret_is_binary());
+        assert_eq!(matching_item(&vault, &incoming.attributes), Some(id));
+
+        // And the other way round: a binary item in the vault is still the
+        // same secret when the source now hands back text.
+        let text = map_item(
+            "Application key for X".into(),
+            attrs(&[("app_id", "com.example.App")]),
+            None,
+            b"text",
+            "text/plain".into(),
+        );
+        vault.item_mut(id).unwrap().set_secret_bytes(&[0xff, 0xfe]);
+        assert_eq!(matching_item(&vault, &text.attributes), Some(id));
     }
 
     /// The recovery path: an item whose attributes match but whose stored

@@ -89,6 +89,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   Bitwarden JSON export", because Bitwarden writes `"collectionIds": null`
   on every item and the importer only accepted a list there. Such exports
   now import.
+- Re-importing from gnome-keyring with `--replace`, or through
+  `locket-reimport-keyring`, did not repair binary secrets damaged by the
+  older lossy import: it added a correct copy beside the damaged one, and
+  applications could still be handed the damaged one. The re-import now
+  overwrites the damaged item in place.
 
 ### Security
 
