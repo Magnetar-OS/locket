@@ -70,6 +70,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   `My%20Bank:ada%40example.com`, now shows as "My Bank" and
   "ada@example.com". Show QR code used to pass the escapes on to the phone,
   doubled.
+- Merging the same diverged copy more than once no longer fills an item's
+  history with copies of the same old version, pushing out the revisions it
+  held before.
 
 ### Security
 

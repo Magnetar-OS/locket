@@ -247,9 +247,20 @@ fn absorb_loser(winner: &mut Item, loser: &Item, report: &mut MergeReport) {
     if !Item::content_differs(winner, loser) {
         return;
     }
+    // Already recoverable — typically because this same copy was merged
+    // before. Filing it again would only push real revisions out of the
+    // bounded history.
+    let snapshot = loser.snapshot();
+    if winner
+        .history
+        .iter()
+        .any(|r| !Item::content_differs(&r.item, &snapshot))
+    {
+        return;
+    }
     winner.history.push(Revision {
         saved: now(),
-        item: loser.snapshot(),
+        item: snapshot,
     });
     winner.trim_history();
     report.filed += 1;
@@ -609,6 +620,40 @@ mod tests {
             );
             assert!(report.changed());
         }
+    }
+
+    /// The GUI offers a `.sync-conflict` sibling again on every unlock until
+    /// it is deleted, so merging the same stale copy twice is the normal
+    /// case. Each merge used to file the same losing state again, until the
+    /// copies had pushed every real revision out of the bounded history.
+    #[test]
+    fn merging_the_same_fork_twice_files_the_loser_once() {
+        let (base, id) = vault_with("Login", "original");
+        let mut a = fork(&base);
+        let mut b = fork(&base);
+        {
+            let item = &mut a.collections[0].items[0];
+            item.secret = "from A".into();
+            item.modified = 2_000;
+        }
+        {
+            let item = &mut b.collections[0].items[0];
+            item.secret = "from B".into();
+            item.modified = 1_000;
+        }
+
+        merge(&mut a, fork(&b));
+        let again = merge(&mut a, fork(&b));
+        let (_, item) = a.find_item(id).unwrap();
+        assert_eq!(
+            item.history.len(),
+            1,
+            "the same losing state was filed twice"
+        );
+        assert!(
+            !again.changed(),
+            "a repeated merge reported changes: {again}"
+        );
     }
 
     #[test]
