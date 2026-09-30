@@ -234,6 +234,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   export has succeeded. A failed export used to leave you with neither.
 - Copying from the panel applet clears the clipboard after the time chosen
   in locket's Settings, including never, instead of always after 30 seconds.
+- Importing a 1Password export now brings SSH keys across as SSH keys the
+  agent can use, where they used to arrive as empty logins, and servers no
+  longer turn into SSH keys. Card expiry dates, addresses, email addresses
+  and birth dates before 1970 are kept instead of dropped.
 
 ### Security
 

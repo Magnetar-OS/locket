@@ -108,16 +108,65 @@ struct SectionField {
 }
 
 /// 1Password's category UUIDs, mapped onto locket's kinds. Anything not
-/// listed — servers, routers, software licences — is credential-shaped and
-/// lands as a login rather than being dropped.
+/// listed — servers (110), routers, software licences — is credential-shaped
+/// and lands as a login rather than being dropped.
 fn kind_for(category: Option<&str>) -> ItemKind {
     match category {
         Some("002") => ItemKind::Card,
         Some("003") => ItemKind::Note,
         Some("004") => ItemKind::Identity,
-        Some("110") => ItemKind::SshKey,
+        Some("114") => ItemKind::SshKey,
         _ => ItemKind::Login,
     }
+}
+
+/// A 1PUX `date`, which is seconds from the epoch and negative before 1970 —
+/// a birth date usually is.
+///
+/// [`format_date`](locket_core::model::format_date) takes an unsigned
+/// timestamp. The Gregorian calendar repeats exactly every 400 years, so an
+/// earlier date is moved forward by whole 400-year cycles, formatted, and has
+/// its year moved back by the same number of cycles.
+fn format_signed_date(ts: i64) -> Option<String> {
+    const CYCLE_SECS: u64 = 146_097 * 86_400;
+    let cycles = if ts < 0 {
+        ts.unsigned_abs().div_ceil(CYCLE_SECS)
+    } else {
+        0
+    };
+    let shifted =
+        u64::try_from(i128::from(ts) + i128::from(cycles) * i128::from(CYCLE_SECS)).ok()?;
+    let formatted = locket_core::model::format_date(shifted);
+    let (year, rest) = formatted.split_once('-')?;
+    let year = year.parse::<i128>().ok()? - 400 * i128::from(cycles);
+    Some(format!("{year:04}-{rest}"))
+}
+
+/// A 1PUX address object as one line, the way it would be written.
+fn format_address(address: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let part = |key: &str| {
+        address
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let state_zip = [part("state"), part("zip")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let line = [
+        part("street"),
+        part("city"),
+        Some(state_zip.as_str()).filter(|v| !v.is_empty()),
+        part("country"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
+    (!line.is_empty()).then_some(line)
 }
 
 /// Parse the `export.data` JSON, without touching a vault or a zip.
@@ -240,9 +289,29 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> (Item, usize) {
                 ("phone", serde_json::Value::String(s)) => {
                     Some(Field::new(name, FieldKind::Phone, s.clone()))
                 }
-                ("date", serde_json::Value::Number(n)) => n.as_u64().map(|ts| {
-                    Field::new(name, FieldKind::Date, locket_core::model::format_date(ts))
-                }),
+                ("email", serde_json::Value::Object(email)) => email
+                    .get("email_address")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .map(|address| Field::new(name, FieldKind::Email, address)),
+                ("date", serde_json::Value::Number(n)) => n
+                    .as_i64()
+                    .and_then(format_signed_date)
+                    .map(|date| Field::new(name, FieldKind::Date, date)),
+                // A card's expiry, as the number YYYYMM.
+                ("monthYear", serde_json::Value::Number(n)) => n
+                    .as_u64()
+                    .map(|ym| Field::text(name, format!("{:02}/{}", ym % 100, ym / 100))),
+                ("address", serde_json::Value::Object(address)) => {
+                    format_address(address).map(|line| Field::text(name, line))
+                }
+                // The key goes where locket's agent reads it, whatever the
+                // section calls it.
+                ("sshKey", serde_json::Value::Object(key)) => key
+                    .get("privateKey")
+                    .and_then(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .map(|pem| Field::new(field_names::PRIVATE_KEY, FieldKind::PrivateKey, pem)),
                 ("file", _) => {
                     // The bytes are elsewhere in the archive; count it so the
                     // summary can say documents were left behind.
@@ -424,6 +493,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(documents, 1);
+    }
+
+    /// Hand-written items in the 1PUX shapes for an SSH key (category 114),
+    /// a server (110) and the typed section values: a card's expiry as
+    /// `monthYear`, an address object, an email object and a date before
+    /// 1970. All of them used to be dropped or mis-kinded.
+    #[test]
+    fn typed_values_and_ssh_keys_arrive_whole() {
+        let (items, _) = parse(
+            r#"{"accounts": [{"vaults": [{"items": [
+                {"uuid": "k", "categoryUuid": "114", "overview": {"title": "Deploy key"},
+                 "details": {"sections": [{"fields": [
+                    {"title": "private key", "id": "private_key",
+                     "value": {"sshKey": {"privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+                                          "metadata": {"publicKey": "ssh-ed25519 AAAA", "fingerprint": "SHA256:x", "keyType": "ed25519"}}}}
+                 ]}]}},
+                {"uuid": "s", "categoryUuid": "110", "overview": {"title": "Build box"},
+                 "details": {"password": "pw"}},
+                {"uuid": "c", "categoryUuid": "002", "overview": {"title": "Visa"},
+                 "details": {"sections": [{"fields": [
+                    {"title": "expiry date", "id": "expiry", "value": {"monthYear": 202704}}
+                 ]}]}},
+                {"uuid": "i", "categoryUuid": "004", "overview": {"title": "Me"},
+                 "details": {"sections": [{"fields": [
+                    {"title": "address", "id": "address",
+                     "value": {"address": {"street": "1 Main St", "city": "Springfield",
+                                           "state": "IL", "zip": "62704", "country": "us"}}},
+                    {"title": "email", "id": "email",
+                     "value": {"email": {"email_address": "ada@example.com", "provider": null}}},
+                    {"title": "birth date", "id": "birthdate", "value": {"date": -1000000000}}
+                 ]}]}}
+            ]}]}]}"#,
+        )
+        .unwrap();
+
+        let key = items.iter().find(|i| i.label == "Deploy key").unwrap();
+        assert_eq!(key.kind, ItemKind::SshKey);
+        let private = key
+            .field(field_names::PRIVATE_KEY)
+            .expect("the private key was dropped");
+        assert_eq!(private.kind, FieldKind::PrivateKey);
+        assert!(private.value.expose().starts_with("-----BEGIN OPENSSH"));
+
+        let server = items.iter().find(|i| i.label == "Build box").unwrap();
+        assert_eq!(server.kind, ItemKind::Login, "a server became an SSH key");
+
+        let card = items.iter().find(|i| i.label == "Visa").unwrap();
+        assert_eq!(card.field_value("expiry date"), Some("04/2027"));
+
+        let me = items.iter().find(|i| i.label == "Me").unwrap();
+        assert_eq!(
+            me.field_value("address"),
+            Some("1 Main St, Springfield, IL 62704, us")
+        );
+        let email = me.field("email").expect("the email was dropped");
+        assert_eq!(email.kind, FieldKind::Email);
+        assert_eq!(email.value.expose(), "ada@example.com");
+        assert_eq!(me.field_value("birth date"), Some("1938-04-24"));
+
+        assert_eq!(format_signed_date(0).as_deref(), Some("1970-01-01"));
+        assert_eq!(format_signed_date(-1).as_deref(), Some("1969-12-31"));
+        assert!(
+            format_signed_date(i64::MIN).is_some(),
+            "the extreme overflowed"
+        );
     }
 
     #[test]
