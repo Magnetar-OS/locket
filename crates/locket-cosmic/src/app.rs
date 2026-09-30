@@ -685,6 +685,11 @@ impl App {
     fn conceal(&mut self) {
         self.revealed.clear();
         self.qr = None;
+        // The editor shows secrets too: a generated password, a field just
+        // added. Losing focus is the screen-share case, and it covers those.
+        if let Some(editor) = self.editor.as_mut() {
+            editor.conceal();
+        }
     }
 
     fn category(&self) -> Category {
@@ -2293,7 +2298,7 @@ impl cosmic::Application for App {
                 // values; re-conceal rather than leave a secret revealed under
                 // a setting that now says not to.
                 if self.settings.conceal_on_blur {
-                    self.revealed.clear();
+                    self.conceal();
                 }
                 if auto_lock_changed {
                     return self.push_auto_lock();

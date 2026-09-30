@@ -174,6 +174,14 @@ impl Editor {
         }
     }
 
+    /// Mask every value the form has revealed.
+    pub fn conceal(&mut self) {
+        self.secret_revealed = false;
+        for field in &mut self.fields {
+            field.revealed = false;
+        }
+    }
+
     pub fn kind(&self) -> ItemKind {
         ItemKind::ALL
             .get(self.kind_index)
@@ -596,6 +604,25 @@ mod tests {
         e.update(EditorMessage::Kind(99));
         // A nonsense kind index falls back to a sane default.
         assert_eq!(e.kind(), ItemKind::Login);
+    }
+
+    /// A generated password is shown so it can be checked, and a new field
+    /// starts revealed; both go back under dots with everything else when
+    /// the window loses focus.
+    #[test]
+    fn concealing_masks_the_secret_and_every_field() {
+        let mut e = Editor::new(ItemKind::Login);
+        e.update(EditorMessage::Generate);
+        e.update(EditorMessage::AddField);
+        assert!(e.secret_revealed && e.fields.iter().any(|f| f.revealed));
+
+        e.conceal();
+
+        assert!(!e.secret_revealed, "the secret stayed on screen");
+        assert!(
+            e.fields.iter().all(|f| !f.revealed),
+            "a field stayed on screen"
+        );
     }
 
     #[test]

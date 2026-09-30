@@ -218,6 +218,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - A daemon restarted while the window is open gets the idle timeout chosen
   in Settings again, instead of running on its own default until the window
   is reopened.
+- With "Hide revealed secrets when the window loses focus" on, a generated
+  or revealed password in the item editor is hidden too, and turning the
+  setting on hides a QR code that is showing.
 
 ### Security
 
