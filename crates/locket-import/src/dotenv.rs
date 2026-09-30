@@ -226,10 +226,12 @@ fn unescape(s: &str) -> String {
 ///
 /// Only a `#` preceded by whitespace counts, so a value that legitimately
 /// contains one — a URL fragment, a colour, a generated password — survives.
+///
+/// The character before the `#` is decoded as a character: read as a lone
+/// byte, the tail of `à` (0xA0) looks like a no-break space.
 fn strip_inline_comment(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    for (i, &c) in bytes.iter().enumerate() {
-        if c == b'#' && i > 0 && (bytes[i - 1] as char).is_whitespace() {
+    for (i, c) in s.char_indices() {
+        if c == '#' && s[..i].chars().next_back().is_some_and(char::is_whitespace) {
             return &s[..i];
         }
     }
@@ -644,6 +646,16 @@ EMPTY=
 
         let long = format!("A=\"stray\n{}", "K=1\n".repeat(2000));
         assert_eq!(parse(&long).len(), 2001);
+    }
+
+    /// The comment rule looked at the byte before `#` as if it were a whole
+    /// character, and the last byte of `à` (0xA0) reads as a no-break space.
+    #[test]
+    fn a_hash_after_a_non_ascii_letter_is_not_a_comment() {
+        assert_eq!(parse("PASSWORD=pà#ss\n")[0].value, "pà#ss");
+        assert_eq!(parse("KEY=Р#1\n")[0].value, "Р#1");
+        assert_eq!(parse("KEY=v #c\n")[0].value, "v");
+        assert_eq!(parse("KEY=v\u{a0}#c\n")[0].value, "v");
     }
 
     #[test]

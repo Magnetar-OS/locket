@@ -109,6 +109,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   every variable after that line: they used to be folded into A's value, and
   large files with such a line took very long to scan. The stray line now
   imports as written and the rest of the file imports normally.
+- Unquoted `.env` values with a `#` right after certain non-ASCII letters
+  were cut short: `PASSWORD=pà#ss` imported as `pà`. Only a `#` after real
+  whitespace starts a comment now.
 
 ### Security
 
