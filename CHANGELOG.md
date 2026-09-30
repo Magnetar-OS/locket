@@ -164,6 +164,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   card's expiry was dropped when only the month or the year was set. SSH
   keys now import as SSH keys the agent can use, every website is kept, and
   a partial expiry is kept as it is.
+- Importing a list of `otpauth://` URIs turned a `+` in the account name
+  into a space, so `ada+work@example.com` arrived as `ada work@example.com`.
+  Plus-addressed accounts now keep their plus.
 
 ### Security
 

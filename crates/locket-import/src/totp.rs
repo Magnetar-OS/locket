@@ -109,11 +109,11 @@ fn describe(uri: &str) -> (Option<String>, String) {
         .map(|(_, rest)| rest)
         .unwrap_or("");
     let (label, query) = path.split_once('?').unwrap_or((path, ""));
-    let label = decode(label);
+    let label = decode(label, false);
 
     let issuer_param = query.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;
-        (k.eq_ignore_ascii_case("issuer")).then(|| decode(v))
+        (k.eq_ignore_ascii_case("issuer")).then(|| decode(v, true))
     });
 
     match label.split_once(':') {
@@ -126,7 +126,9 @@ fn describe(uri: &str) -> (Option<String>, String) {
     }
 }
 
-fn decode(s: &str) -> String {
+/// Percent-decode `s`. `+` stands for a space only in a query value
+/// (`plus_is_space`); in the label it is a plus, as in `ada+work@example.com`.
+fn decode(s: &str, plus_is_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -143,7 +145,11 @@ fn decode(s: &str) -> String {
             i += 3;
             continue;
         }
-        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        out.push(if plus_is_space && bytes[i] == b'+' {
+            b' '
+        } else {
+            bytes[i]
+        });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -456,11 +462,22 @@ mod tests {
     /// than one byte, used to slice through the middle of that character.
     #[test]
     fn a_percent_before_a_multibyte_char_does_not_panic() {
-        assert_eq!(decode("10%優惠"), "10%優惠");
-        assert_eq!(decode("%aé"), "%aé");
-        assert_eq!(decode("100%€"), "100%€");
-        assert_eq!(decode("Big%20Corp"), "Big Corp");
-        assert_eq!(decode("a%41"), "aA");
+        assert_eq!(decode("10%優惠", false), "10%優惠");
+        assert_eq!(decode("%aé", false), "%aé");
+        assert_eq!(decode("100%€", false), "100%€");
+        assert_eq!(decode("Big%20Corp", false), "Big Corp");
+        assert_eq!(decode("a%41", false), "aA");
+    }
+
+    /// `+` means a space only in a query string. In the label it is a plus,
+    /// and plus-addressed accounts — `ada+work@example.com` — are common.
+    #[test]
+    fn a_plus_in_the_label_survives() {
+        let entries = parse_uri_list(&format!(
+            "otpauth://totp/GitHub:ada+work@example.com?secret={SEED}&issuer=Big+Corp\n"
+        ));
+        assert_eq!(entries[0].account, "ada+work@example.com");
+        assert_eq!(entries[0].issuer.as_deref(), Some("Big Corp"));
     }
 
     #[test]
