@@ -29,7 +29,7 @@ use ctap_hid_fido2::{
     FidoKeyHid, FidoKeyHidFactory, LibCfg,
     fidokey::{
         GetAssertionArgsBuilder, MakeCredentialArgsBuilder,
-        get_assertion::get_assertion_params::Extension as AssertionExt,
+        get_assertion::get_assertion_params::{Extension as AssertionExt, GetAssertionArgs},
         make_credential::make_credential_params::Extension as CredentialExt,
     },
 };
@@ -171,15 +171,9 @@ fn assert_hmac(
     pin: Option<&str>,
 ) -> Result<SymKey> {
     let challenge = random_challenge()?;
-    let mut builder = GetAssertionArgsBuilder::new(DEFAULT_RP_ID, &challenge)
-        .credential_id(credential_id)
-        .extensions(&[AssertionExt::HmacSecret(Some(*salt))]);
-    if let Some(pin) = pin {
-        builder = builder.pin(pin);
-    }
-
+    let args = hmac_assertion_args(&challenge, credential_id, salt, pin);
     let assertions = device
-        .get_assertion_with_args(&builder.build())
+        .get_assertion_with_args(&args)
         .map_err(|e| Error::Device(e.to_string()))?;
 
     // The raw output is as good as the slot key; wipe it once stretched.
@@ -190,6 +184,26 @@ fn assert_hmac(
             .ok_or(Error::NoHmacSecret)?,
     );
     derive_slot_key(output.as_slice())
+}
+
+/// The `getAssertion` that asks a slot's credential for its `hmac-secret`.
+fn hmac_assertion_args<'a>(
+    challenge: &[u8],
+    credential_id: &[u8],
+    salt: &[u8; SALT_LEN],
+    pin: Option<&'a str>,
+) -> GetAssertionArgs<'a> {
+    let builder = GetAssertionArgsBuilder::new(DEFAULT_RP_ID, challenge)
+        .credential_id(credential_id)
+        .extensions(&[AssertionExt::HmacSecret(Some(*salt))]);
+    // The builder starts out demanding user verification. Without a PIN that
+    // means the token's own biometric, which most tokens do not have, so it
+    // has to be cleared explicitly — as `assert` does.
+    match pin {
+        Some(pin) => builder.pin(pin),
+        None => builder.without_pin_and_uv(),
+    }
+    .build()
 }
 
 /// Recover a FIDO2 slot's key-encryption key. Requires the token and a touch.
@@ -389,6 +403,25 @@ mod tests {
         );
         assert_eq!(hmac_output_from(&[]), None);
         assert_eq!(hmac_output_from(&[AssertionExt::HmacSecret(None)]), None);
+    }
+
+    /// ctap-hid-fido2's `GetAssertionArgs` defaults to `uv: Some(true)`, and
+    /// only `pin()` or `without_pin_and_uv()` clear it. Without a PIN the
+    /// request asked the token for built-in user verification, which a token
+    /// with no fingerprint reader refuses: a PIN-less slot could not be
+    /// enrolled or opened. The same file's `assert` already clears it.
+    #[test]
+    fn a_pinless_hmac_assertion_does_not_demand_user_verification() {
+        let (challenge, credential, salt) = ([1u8; 32], [2u8; 16], [3u8; SALT_LEN]);
+
+        let without = hmac_assertion_args(&challenge, &credential, &salt, None);
+        assert_eq!(without.uv, None, "a PIN-less assertion demanded UV");
+        assert!(without.pin.is_none());
+        assert!(without.up, "a touch is still required");
+
+        let with = hmac_assertion_args(&challenge, &credential, &salt, Some("1234"));
+        assert_eq!(with.pin, Some("1234"));
+        assert_eq!(with.credential_ids, vec![credential.to_vec()]);
     }
 
     #[test]
