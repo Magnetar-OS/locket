@@ -129,32 +129,21 @@ pub fn parse(text: &str) -> Vec<Var> {
         }
 
         let rest = rest.trim_start();
-        let value = match rest.chars().next() {
+        let quoted = match rest.chars().next() {
+            // A quoted value may span lines, so multi-line PEM keys survive
+            // intact — but only when a closing quote turns up. Without one,
+            // the quote is a stray character and the value is this line.
             Some(q @ ('"' | '\'')) => {
-                // A quoted value may span lines; keep consuming until the
-                // closing quote so multi-line PEM keys survive intact.
-                let mut body = rest[q.len_utf8()..].to_owned();
-                let mut closed = close_quote(&body, q).is_some();
-                while !closed {
-                    match lines.next() {
-                        Some(next) => {
-                            body.push('\n');
-                            body.push_str(next);
-                            closed = close_quote(&body, q).is_some();
-                        }
-                        None => break,
+                quoted_body(&rest[q.len_utf8()..], q, lines.clone()).map(|(raw, used)| {
+                    for _ in 0..used {
+                        lines.next();
                     }
-                }
-                let end = close_quote(&body, q).unwrap_or(body.len());
-                let raw_value = &body[..end];
-                if q == '"' {
-                    unescape(raw_value)
-                } else {
-                    raw_value.to_owned()
-                }
+                    if q == '"' { unescape(&raw) } else { raw }
+                })
             }
-            _ => strip_inline_comment(rest).trim_end().to_owned(),
+            _ => None,
         };
+        let value = quoted.unwrap_or_else(|| strip_inline_comment(rest).trim_end().to_owned());
 
         out.push(Var {
             key: key.to_owned(),
@@ -164,9 +153,41 @@ pub fn parse(text: &str) -> Vec<Var> {
     out
 }
 
-/// Byte offset of the unescaped closing quote, if the value is terminated.
-fn close_quote(body: &str, quote: char) -> Option<usize> {
-    let bytes = body.as_bytes();
+/// How far past its first line a quoted value may run. A PEM key or a short
+/// certificate chain fits with room to spare; the bound keeps a file full of
+/// stray quotes from being scanned to its end once per quote.
+const MAX_QUOTED_LINES: usize = 512;
+
+/// The raw body of a quoted value that opens in `first` and may continue over
+/// `following` lines, and how many of those lines it took. `None` when no
+/// closing quote turns up within [`MAX_QUOTED_LINES`].
+///
+/// Each line is scanned once, so a long value costs its length, not its
+/// length times its line count.
+fn quoted_body<'a>(
+    first: &str,
+    quote: char,
+    following: impl Iterator<Item = &'a str>,
+) -> Option<(String, usize)> {
+    if let Some(end) = close_quote(first, quote) {
+        return Some((first[..end].to_owned(), 0));
+    }
+    let mut body = first.to_owned();
+    for (n, line) in following.take(MAX_QUOTED_LINES).enumerate() {
+        body.push('\n');
+        if let Some(end) = close_quote(line, quote) {
+            body.push_str(&line[..end]);
+            return Some((body, n + 1));
+        }
+        body.push_str(line);
+    }
+    None
+}
+
+/// Byte offset of the unescaped closing quote within one line, if there is
+/// one. A backslash at the very end of a line escapes only the line break.
+fn close_quote(line: &str, quote: char) -> Option<usize> {
+    let bytes = line.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
@@ -609,6 +630,20 @@ EMPTY=
         assert_eq!(vars.len(), 2, "the multi-line value swallowed the next key");
         assert!(vars[0].value.contains("\nabc\n"));
         assert_eq!(vars[1].key, "NEXT");
+    }
+
+    /// A stray quote with nothing to close it used to swallow every line
+    /// after it into one value, rescanning the whole value at each line.
+    #[test]
+    fn an_unterminated_quote_does_not_eat_the_following_variables() {
+        let vars = parse("A=\"oops\nB=1\nC='x\nD=2\n");
+        let keys: Vec<_> = vars.iter().map(|v| v.key.as_str()).collect();
+        assert_eq!(keys, ["A", "B", "C", "D"]);
+        assert_eq!(vars[1].value, "1");
+        assert_eq!(vars[3].value, "2");
+
+        let long = format!("A=\"stray\n{}", "K=1\n".repeat(2000));
+        assert_eq!(parse(&long).len(), 2001);
     }
 
     #[test]

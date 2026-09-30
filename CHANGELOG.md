@@ -105,6 +105,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Importing SSH keys whose file names contain a dot, such as `deploy.old`,
   could attach the public key and comment of a different key (`deploy.pub`).
   Each key now gets its own `.pub` file, the way OpenSSH names them.
+- A `.env` file with an unmatched quote, such as `A="oops`, no longer loses
+  every variable after that line: they used to be folded into A's value, and
+  large files with such a line took very long to scan. The stray line now
+  imports as written and the rest of the file imports normally.
 
 ### Security
 
