@@ -202,6 +202,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   popup, and the copy message says so.
 - Copying a second secret shortly after a first no longer clears the second
   one early, on the first one's timer.
+- Trash older than the retention window is removed from the vault file when
+  the application unlocks it, not only from what the window shows. Without
+  the daemon running, those items stayed in the file until you next changed
+  something.
 
 ### Security
 

@@ -618,6 +618,22 @@ impl App {
         saved
     }
 
+    /// Write what opening the vault changed in memory, now that it is open
+    /// in this window.
+    fn settle_opened(&mut self) -> Task<Message> {
+        let Some(vault) = self.vault.as_mut() else {
+            return Task::none();
+        };
+        match persist_opening(vault) {
+            Ok(true) => Self::daemon_catch_up(),
+            Ok(false) => Task::none(),
+            // Another process wrote the file since we read it. The poll
+            // reloads that copy, and this purge runs again on the next open.
+            Err(locket_core::Error::ChangedOnDisk { .. }) => Task::none(),
+            Err(e) => self.toast(fl!("error-save-failed", error = e.to_string())),
+        }
+    }
+
     /// Tell the daemon the vault file changed, so it re-reads it.
     ///
     /// Needed after every write this window makes, not only the ones through
@@ -963,6 +979,7 @@ impl App {
                     self.screen = Screen::Browsing;
                     self.error = None;
                     tasks.push(self.update_title());
+                    tasks.push(self.settle_opened());
                 }
                 return Task::batch(tasks);
             }
@@ -2095,7 +2112,7 @@ impl cosmic::Application for App {
                         if conflict.is_some() {
                             self.sync_conflict = conflict;
                         }
-                        return Task::batch([closed, title]);
+                        return Task::batch([closed, title, self.settle_opened()]);
                     }
                     None => {
                         self.screen = Screen::Locked;
@@ -3989,6 +4006,20 @@ fn dismissal(only_window: bool) -> Vec<Dismissal> {
     steps
 }
 
+/// Save what opening changed in memory. Returns whether anything was written.
+///
+/// Opening purges trash past the vault's retention window and upgrades an
+/// older format, both in memory. Left there, the file kept the purged items —
+/// and a reload brought them back — until some unrelated edit happened to
+/// save, so "30 days" held only as long as nobody looked at the file.
+fn persist_opening(vault: &mut Vault) -> locket_core::Result<bool> {
+    if !vault.is_dirty() {
+        return Ok(false);
+    }
+    vault.save()?;
+    Ok(true)
+}
+
 /// Take back a vault that a worker had for the duration of its job.
 ///
 /// Only into a window that is still open. The lock button stays live while a
@@ -4421,6 +4452,31 @@ mod tests {
         // Told, and saving again: that is a decision, and it goes through.
         assert_eq!(apply_edit(&mut vault, target, *item, Some(changed)), Ok(()));
         assert_eq!(vault.item(id).unwrap().label, "Site (work)");
+    }
+
+    /// The trash's retention window is enforced when the vault is opened.
+    /// Purged only in memory, the items stayed in the file — and came back on
+    /// the next reload — until some unrelated edit happened to save.
+    #[test]
+    fn trash_purged_on_opening_is_written_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let mut vault = vault(&dir);
+        let id = vault.add_item_default(Item::new(ItemKind::Login, "Old"));
+        vault.trash_item(id).unwrap();
+        vault.data_mut().trash[0].deleted = 1;
+        vault.save().unwrap();
+        drop(vault);
+
+        let mut opened = Vault::open(&path, "pw").unwrap();
+        assert!(opened.data().trash.is_empty() && opened.is_dirty());
+        assert!(persist_opening(&mut opened).unwrap());
+
+        let reopened = Vault::open(&path, "pw").unwrap();
+        assert!(
+            !reopened.is_dirty(),
+            "the purge never reached the file, so it ran again"
+        );
     }
 
     /// Import, enrolment, a passphrase change and a kdbx export hold the
