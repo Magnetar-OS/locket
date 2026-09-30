@@ -154,6 +154,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   account, or with none: with two accounts on one host, the active account's
   token was filed under the other one. Each token is now filed under the
   account gh keeps it for.
+- Importing cloud CLI credentials now reports what it could not bring in. An
+  Azure or Docker file that could not be read, and Google Cloud
+  service-account keys (which are not imported), used to be passed over
+  without a word; they are now counted as unreadable and named in the
+  summary.
 
 ### Security
 

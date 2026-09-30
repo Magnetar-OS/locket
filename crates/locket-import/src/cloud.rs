@@ -472,28 +472,44 @@ pub fn npm_items(text: &str) -> Vec<Item> {
 // Import
 // ---------------------------------------------------------------------------
 
-/// Build the items one store contributes, reading it from disk.
-fn items_for(found: &Found, sqlite_bin: &str) -> Result<Vec<Item>> {
+/// Build the items one store contributes, reading it from disk, and name
+/// the credentials it holds that are not imported.
+///
+/// A JSON store that does not parse is an error, not an empty store: the
+/// shape-tolerant readers below return nothing for it, which would make a
+/// cache written by some other version look like no credentials at all.
+fn items_for(found: &Found, sqlite_bin: &str) -> Result<(Vec<Item>, Vec<String>)> {
     if found.store == Store::GoogleCloud {
-        return Ok(gcloud_rows(&found.path, sqlite_bin)?
-            .into_iter()
-            .filter_map(|(account, value)| gcloud_item(&account, &value))
-            .collect());
+        let mut items = Vec::new();
+        let mut skipped = Vec::new();
+        for (account, value) in gcloud_rows(&found.path, sqlite_bin)? {
+            // No refresh token: a service-account key, which is not stored.
+            match gcloud_item(&account, &value) {
+                Some(item) => items.push(item),
+                None => skipped.push(account),
+            }
+        }
+        return Ok((items, skipped));
     }
 
     let text = std::fs::read_to_string(&found.path).map_err(|e| Error::Io {
         path: found.path.clone(),
         source: e,
     })?;
+    if matches!(found.store, Store::Azure | Store::Docker) {
+        serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|e| Error::Database(format!("{} is not JSON: {e}", found.path.display())))?;
+    }
 
-    Ok(match found.store {
+    let items = match found.store {
         Store::Aws => aws_items(&text),
         Store::Azure => azure_items(&text),
         Store::GitHubCli => gh_items(&text),
         Store::Docker => docker_items(&text),
         Store::Npm => npm_items(&text),
         Store::GoogleCloud => unreachable!("handled above"),
-    })
+    };
+    Ok((items, Vec::new()))
 }
 
 /// Import every credential store found under `home`. Does not save.
@@ -511,14 +527,27 @@ pub fn import_home(
     let mut summary = ImportSummary::default();
 
     for found in scan(home) {
-        let items = match items_for(&found, sqlite_bin) {
-            Ok(items) => items,
+        let (items, skipped) = match items_for(&found, sqlite_bin) {
+            Ok(read) => read,
             Err(e) => {
                 tracing::warn!("skipping {}: {e}", found.store.label());
                 summary.skipped_unreadable += 1;
+                summary
+                    .notes
+                    .push(format!("{} could not be read: {e}", found.store.label()));
                 continue;
             }
         };
+        if !skipped.is_empty() {
+            summary.skipped_unreadable += skipped.len();
+            summary.notes.push(format!(
+                "{}: {} credential(s) without a refresh token, such as \
+                 service-account keys, were not imported: {}",
+                found.store.label(),
+                skipped.len(),
+                skipped.join(", ")
+            ));
+        }
         for item in items {
             if crate::already_present(vault, &item.attributes) {
                 summary.skipped_duplicate += 1;
@@ -788,6 +817,47 @@ mod tests {
             import_home(&mut v, home.path(), "definitely-not-a-real-binary", None).unwrap();
         assert_eq!(summary.imported, 2, "the other stores did not import");
         assert_eq!(summary.skipped_unreadable, 1);
+    }
+
+    /// A store in a shape we cannot read, and a gcloud credential with no
+    /// refresh token (a service-account key), used to contribute nothing
+    /// without the summary saying so.
+    #[test]
+    fn unreadable_stores_and_skipped_credentials_are_counted() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".azure")).unwrap();
+        std::fs::write(home.path().join(".azure/msal_token_cache.json"), "not json").unwrap();
+        std::fs::create_dir_all(home.path().join(".docker")).unwrap();
+        std::fs::write(home.path().join(".docker/config.json"), "{").unwrap();
+        std::fs::create_dir_all(home.path().join(".config/gcloud")).unwrap();
+        std::fs::write(home.path().join(".config/gcloud/credentials.db"), b"db").unwrap();
+        // Stands in for sqlite3: prints one user credential and one
+        // service-account key, whatever it is asked.
+        let fake = home.path().join("fake-sqlite3");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\ncat <<'EOF'\n\
+             [{\"account_id\":\"ada@example.com\",\"value\":\"{\\\"refresh_token\\\":\\\"1//r\\\"}\"},\n\
+             {\"account_id\":\"ci@proj.iam.gserviceaccount.com\",\"value\":\"{\\\"type\\\":\\\"service_account\\\"}\"}]\n\
+             EOF\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (_d, mut v) = vault();
+        let summary = import_home(&mut v, home.path(), fake.to_str().unwrap(), None).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert_eq!(summary.skipped_unreadable, 3);
+        assert!(
+            summary
+                .notes
+                .iter()
+                .any(|n| n.contains("ci@proj.iam.gserviceaccount.com")),
+            "{:?}",
+            summary.notes
+        );
     }
 
     #[test]
