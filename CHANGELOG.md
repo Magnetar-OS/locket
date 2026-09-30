@@ -125,6 +125,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   unreadable". Each locked or unreadable collection is now counted as
   unreadable, and an item whose attributes cannot be read is skipped rather
   than imported without them.
+- Importing a 1Password export now counts Document items in its note about
+  files left inside the `.1pux` archive. They were missed before, so the
+  import could say nothing was left behind when documents were.
 
 ### Security
 

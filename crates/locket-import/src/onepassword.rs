@@ -81,6 +81,10 @@ struct Details {
     sections: Vec<Section>,
     /// The Password category keeps its one secret here.
     password: Option<String>,
+    /// A Document item's file, which lives in the archive's `files` folder.
+    /// Only its presence matters here: it is counted as left behind.
+    #[serde(rename = "documentAttributes")]
+    document: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -183,6 +187,9 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> (Item, usize) {
     let Some(details) = &e.details else {
         return (item, 0);
     };
+    if details.document.is_some() {
+        documents += 1;
+    }
 
     for f in &details.login_fields {
         let Some(value) = f.value.as_deref().filter(|v| !v.is_empty()) else {
@@ -400,6 +407,24 @@ mod tests {
         assert_eq!(note.kind, ItemKind::Note);
         assert_eq!(note.secret.expose(), "the body");
         assert!(note.tags.contains(&"archived".to_owned()));
+    }
+
+    /// A Document item carries its file in `details.documentAttributes`,
+    /// not in a section field, so it went uncounted and the summary never
+    /// said the file was still in the archive.
+    #[test]
+    fn a_document_item_counts_as_a_document_left_behind() {
+        let (_, documents) = parse(
+            r#"{"accounts": [{"vaults": [{"items": [{
+                "uuid": "d1", "state": "active", "categoryUuid": "006",
+                "overview": {"title": "Passport scan"},
+                "details": {"documentAttributes": {
+                    "fileName": "passport.pdf", "documentId": "abc", "decryptedSize": 1024
+                }}
+            }]}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(documents, 1);
     }
 
     #[test]
