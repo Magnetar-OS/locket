@@ -145,6 +145,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   field (and `favorite`, `reprompt`) to every item and dropped the favourite
   mark. Favourites now come back as favourites, and those bookkeeping
   columns are not turned into fields.
+- KeePass exports and imports lose less. An item with a custom field named
+  `Password` (or `Title`, `URL`, and so on) exported that field in place of
+  its real password; the field now gets a name of its own. Importing a
+  `.kdbx` keeps each entry's tags, and no longer brings back entries from
+  KeePass's Recycle Bin.
 
 ### Security
 

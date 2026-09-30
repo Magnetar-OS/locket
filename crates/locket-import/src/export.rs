@@ -218,11 +218,19 @@ pub fn to_kdbx(vault: &Vault, path: &Path, passphrase: &str) -> Result<usize> {
                 if standard.contains(&field.name.as_str()) {
                     continue;
                 }
+                // A custom field named like one of kdbx's own would replace
+                // that value — `Password` overwrote the item's secret — so
+                // it is written under a name of its own.
+                let name = if crate::keepass::STANDARD_FIELDS.contains(&field.name.as_str()) {
+                    format!("{} (custom)", field.name)
+                } else {
+                    field.name.clone()
+                };
                 // Mirror locket's own masking onto kdbx's protection flag.
                 if field.kind.is_sensitive() {
-                    entry.set_protected(field.name.clone(), field.value.expose());
+                    entry.set_protected(name, field.value.expose());
                 } else {
-                    entry.set_unprotected(field.name.clone(), field.value.expose());
+                    entry.set_unprotected(name, field.value.expose());
                 }
             }
             entry.tags = item.tags.clone();
@@ -393,7 +401,43 @@ mod tests {
             .unwrap();
         assert!(back.favorite, "the favourite flag was lost");
         assert!(back.field("type").is_none(), "`type` became a field");
-        assert!(back.field("favorite").is_none(), "`favorite` became a field");
+        assert!(
+            back.field("favorite").is_none(),
+            "`favorite` became a field"
+        );
+    }
+
+    /// A custom field named like one of kdbx's own (`Password`, `Title`, …)
+    /// overwrote that value in the export, and the importer never read
+    /// kdbx tags back, so a round trip lost both.
+    #[test]
+    fn a_kdbx_round_trip_keeps_the_secret_and_the_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v =
+            Vault::create(dir.path().join("v.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        let mut item = Item::new(ItemKind::Login, "GitHub")
+            .with_secret("real")
+            .with_field(Field::text("Password", "other"));
+        item.tags = vec!["work".into()];
+        v.add_item_default(item);
+        let out = dir.path().join("export.kdbx");
+        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+
+        let mut target =
+            Vault::create(dir.path().join("t.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        crate::keepass::import_kdbx(&mut target, &out, "kdbx-pw", None, None).unwrap();
+        let (_, back) = target.data().all_items().next().unwrap();
+        assert_eq!(back.label, "GitHub");
+        assert_eq!(
+            back.secret.expose(),
+            "real",
+            "a custom field overwrote the password"
+        );
+        assert!(
+            back.fields.iter().any(|f| f.value.expose() == "other"),
+            "the custom field was lost"
+        );
+        assert!(back.tags.contains(&"work".to_owned()), "{:?}", back.tags);
     }
 
     #[test]

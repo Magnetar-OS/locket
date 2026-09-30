@@ -21,7 +21,8 @@ use crate::{Error, ImportSummary, Result};
 const UUID_ATTRIBUTE: &str = "keepass:uuid";
 
 /// Field names kdbx defines itself; everything else is a custom field.
-const STANDARD_FIELDS: &[&str] = &["Title", "UserName", "Password", "URL", "Notes", "otp"];
+pub(crate) const STANDARD_FIELDS: &[&str] =
+    &["Title", "UserName", "Password", "URL", "Notes", "otp"];
 
 /// One kdbx entry's fields, as read from the database.
 #[derive(Debug, Default, Clone)]
@@ -40,6 +41,8 @@ pub struct KdbxEntry<'a> {
     /// The entry's own UUID. KeePass allows two entries with one title in
     /// one group, so the path alone does not tell them apart.
     pub uuid: Option<&'a str>,
+    /// The entry's own tags, added to the ones its group path gives.
+    pub tags: &'a [String],
 }
 
 /// Map one kdbx entry onto a locket item.
@@ -54,12 +57,18 @@ pub fn map_entry(entry: KdbxEntry<'_>) -> Item {
         custom,
         group_path,
         uuid,
+        tags,
     } = entry;
     let title = title.filter(|t| !t.is_empty()).unwrap_or("Untitled");
     let mut item = Item::new(ItemKind::Login, title).with_secret(password.unwrap_or_default());
 
     if !group_path.is_empty() {
         item.tags = group_path.split('/').map(str::to_owned).collect();
+    }
+    for tag in tags {
+        if !item.tags.contains(tag) {
+            item.tags.push(tag.clone());
+        }
     }
 
     if let Some(u) = username.filter(|s| !s.is_empty()) {
@@ -147,7 +156,7 @@ pub fn import_kdbx(
     let target = crate::target_collection(vault, into_collection.unwrap_or("KeePass"));
     let mut summary = ImportSummary::default();
     let mut items = Vec::new();
-    collect(&db.root(), "", &mut items);
+    collect(&db.root(), "", db.meta.recyclebin_uuid, &mut items);
 
     for item in items {
         // Entries imported before the UUID was recorded carry every other
@@ -175,7 +184,15 @@ pub fn import_kdbx(
 }
 
 /// Walk the group tree depth-first, flattening entries.
-fn collect(group: &keepass::db::GroupRef<'_>, prefix: &str, out: &mut Vec<Item>) {
+///
+/// The recycle bin is left out: what is in it, the user already deleted,
+/// and importing it would bring it back as live logins.
+fn collect(
+    group: &keepass::db::GroupRef<'_>,
+    prefix: &str,
+    recycle_bin: Option<uuid::Uuid>,
+    out: &mut Vec<Item>,
+) {
     for entry in group.entries() {
         let custom: Vec<(String, String, bool)> = entry
             .fields
@@ -193,17 +210,21 @@ fn collect(group: &keepass::db::GroupRef<'_>, prefix: &str, out: &mut Vec<Item>)
             custom: &custom,
             group_path: prefix,
             uuid: Some(&entry.id().to_string()),
+            tags: &entry.tags,
         }));
     }
 
     for child in group.groups() {
+        if Some(child.id().uuid()) == recycle_bin {
+            continue;
+        }
         let name = child.name.clone();
         let next = if prefix.is_empty() {
             name
         } else {
             format!("{prefix}/{name}")
         };
-        collect(&child, &next, out);
+        collect(&child, &next, recycle_bin, out);
     }
 }
 
@@ -312,6 +333,46 @@ mod tests {
         });
         assert_eq!(item.label, "Untitled");
         assert_eq!(item.attributes.get("keepass:path").unwrap(), "Untitled");
+    }
+
+    /// KeePass keeps deleted entries in a recycle bin group. Importing them
+    /// brought back as live logins what the user had already thrown away.
+    #[test]
+    fn the_recycle_bin_stays_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bin.kdbx");
+        let mut db = Database::new();
+        let bin = {
+            let mut root = db.root_mut();
+            let mut bin = root.add_group();
+            bin.name = "Recycle Bin".into();
+            let mut deleted = bin.add_entry();
+            deleted.set_unprotected("Title", "Deleted");
+            deleted.set_protected("Password", "old");
+            bin.id()
+        };
+        db.meta.recyclebin_uuid = Some(bin.uuid());
+        {
+            let mut root = db.root_mut();
+            let mut live = root.add_entry();
+            live.set_unprotected("Title", "Live");
+            live.set_protected("Password", "new");
+        }
+        db.save(
+            &mut std::fs::File::create(&path).unwrap(),
+            DatabaseKey::new().with_password("pw"),
+        )
+        .unwrap();
+
+        let mut vault = Vault::create(
+            dir.path().join("v.vault"),
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+        let summary = import_kdbx(&mut vault, &path, "pw", None, None).unwrap();
+        assert_eq!(summary.imported, 1);
+        assert!(vault.data().all_items().all(|(_, i)| i.label == "Live"));
     }
 
     #[test]
