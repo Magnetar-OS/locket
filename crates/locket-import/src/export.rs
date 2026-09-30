@@ -3,8 +3,10 @@
 //! A password manager you cannot leave is a trap, so leaving is as supported
 //! as arriving, in three shapes:
 //!
-//! - **JSON** (`locket-export-v1`): everything, losslessly — arbitrary
-//!   fields, tags, expiry, attachments as base64. Plaintext.
+//! - **JSON** (`locket-export-v1`): every item's secret, attributes, fields,
+//!   tags, favourite flag, expiry and attachments (as base64). Not written:
+//!   the secret's content type, the created and modified times, and revision
+//!   history. Plaintext, and nothing in locket reads it back in.
 //! - **CSV**: the lowest common denominator every manager imports. Columns
 //!   follow Bitwarden's naming, which the CSV *importers* of other managers
 //!   (ours included) all recognise. Loses custom structure; says so.

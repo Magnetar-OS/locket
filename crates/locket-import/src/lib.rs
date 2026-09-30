@@ -3,11 +3,14 @@
 //! Each importer maps a foreign format onto locket's item model and hands the
 //! result to a vault. They share two rules:
 //!
-//! * **Read-only against the source.** Nothing here writes to a password-store
-//!   or a `.kdbx`; a failed import must leave you exactly where you started.
+//! * **Read-only against the source.** No importer writes to the store it
+//!   reads — a password-store, a `.kdbx`, an export file; a failed import must
+//!   leave you exactly where you started. (Writing a new `.kdbx` is
+//!   [`export`]'s job, never an importer's.)
 //! * **Idempotent against the target.** An item whose attribute set already
 //!   exists is skipped, so re-running after adding a few secrets does not
-//!   duplicate anything.
+//!   duplicate anything. A TOTP seed also has to match, since two seeds can
+//!   share an issuer and account.
 //!
 //! Importing from a running Secret Service (gnome-keyring, KWallet) lives in
 //! `locket-secret` instead, because it needs D-Bus rather than a file format.

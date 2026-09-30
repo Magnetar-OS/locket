@@ -5,7 +5,7 @@
 //! file — first line is the password, later lines are `key: value` pairs, an
 //! `otpauth://` URI is the TOTP seed — is `pass`'s own, not a format, so the
 //! parser here is tolerant: anything it does not recognise ends up in notes
-//! rather than being dropped.
+//! rather than being dropped. A key given twice keeps its last value.
 //!
 //! Decryption shells out to `gpg` rather than linking an OpenPGP library. The
 //! secrets are encrypted to *the user's own key*, which lives in their
