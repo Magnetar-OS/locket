@@ -37,6 +37,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Fixed
 
+- `locket-cli health --json` reports each item's own breach count. Two
+  items with the same label were both given the first one's.
 - An application that cancels an unlock prompt while locket's dialog is up
   is told the outcome once, not twice, and a prompt left behind by an
   application that quit is taken down instead of staying on the bus for the

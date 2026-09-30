@@ -940,7 +940,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // The breach check runs over every scoreable text secret, not
             // only the flagged ones: a strong unique password can still be in
             // a breach, and that is precisely the case worth finding.
-            let mut breached: Vec<(String, u64)> = Vec::new();
+            let mut breached = Breaches::default();
             if check_breaches {
                 let client = locket_hibp::client()?;
                 let runtime = tokio::runtime::Runtime::new()?;
@@ -951,7 +951,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         match locket_hibp::pwned_count(&client, item.secret.expose()).await {
                             Ok(0) => {}
-                            Ok(count) => breached.push((item.label.clone(), count)),
+                            Ok(count) => breached.0.push((item.id, item.label.clone(), count)),
                             Err(e) => {
                                 eprintln!("breach check failed on {}: {e}", item.label);
                             }
@@ -973,10 +973,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "old": e.old,
                             "expired": e.expired,
                             "expiring": e.expiring,
-                            "breached": breached
-                                .iter()
-                                .find(|(l, _)| *l == e.label)
-                                .map(|(_, n)| n),
+                            "breached": breached.count_for(e.id),
                         })
                     );
                 }
@@ -1014,16 +1011,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if check_breaches {
-                if breached.is_empty() {
+                if breached.0.is_empty() {
                     println!("\nno secret appears in known breaches");
                 } else {
                     println!("\nin known breaches:");
-                    for (label, count) in &breached {
+                    for (_, label, count) in &breached.0 {
                         println!("  {label:<28} seen {count} time(s)");
                     }
                 }
             }
-            if !report.is_clean() || !breached.is_empty() {
+            if !report.is_clean() || !breached.0.is_empty() {
                 std::process::exit(1);
             }
         }
@@ -1443,6 +1440,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Items found in known breaches: id, label, and how often each was seen.
+#[derive(Default)]
+struct Breaches(Vec<(uuid::Uuid, String, u64)>);
+
+impl Breaches {
+    /// How often the item `id` was seen in breaches, if at all.
+    ///
+    /// By id: two items can share a label, and matching on it gave both the
+    /// first one's count.
+    fn count_for(&self, id: uuid::Uuid) -> Option<u64> {
+        self.0.iter().find(|(i, _, _)| *i == id).map(|(_, _, n)| *n)
+    }
+}
+
 /// Say what an import brought in, and what it left out and why.
 ///
 /// The notes are where an importer names what it could not bring across —
@@ -1645,5 +1656,24 @@ impl From<EnvGrouping> for locket_import::dotenv::Grouping {
             EnvGrouping::Service => Self::PerService,
             EnvGrouping::Variable => Self::PerVariable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two items can share a label. The JSON report matched breach counts
+    /// by label, so each was given the first one's count.
+    #[test]
+    fn a_breach_count_belongs_to_its_own_item() {
+        let (first, second) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        let breaches = Breaches(vec![
+            (first, "GitHub".into(), 3),
+            (second, "GitHub".into(), 70),
+        ]);
+        assert_eq!(breaches.count_for(first), Some(3));
+        assert_eq!(breaches.count_for(second), Some(70));
+        assert_eq!(breaches.count_for(uuid::Uuid::new_v4()), None);
     }
 }
