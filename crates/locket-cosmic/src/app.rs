@@ -233,6 +233,39 @@ pub enum Message {
     PassphraseRotated(Arc<Mutex<Option<Vault>>>, Option<String>),
 }
 
+impl Message {
+    /// Whether this message is the person doing something, which is what the
+    /// idle timer measures the absence of.
+    ///
+    /// Everything listed arrives on its own: a timer, a poll, another process,
+    /// or work finishing that was started earlier. The vault-file poll is the
+    /// one that matters most — it fires every few seconds for as long as the
+    /// vault is open, so counting it would mean the window never went idle.
+    fn is_user_activity(&self) -> bool {
+        !matches!(
+            self,
+            Message::Tick
+                | Message::IdleCheck
+                | Message::Daemon(_)
+                | Message::DaemonUnlocked(_)
+                | Message::CloseToast(_)
+                | Message::ReloadVaultFile
+                | Message::SettingsChanged(_)
+                | Message::ClearClipboard
+                | Message::ClipboardChecked(_)
+                | Message::WindowUnfocused
+                | Message::HealthReady(_)
+                | Message::BreachesChecked(_)
+                | Message::AutoTyped(_)
+                | Message::AttachmentWritten(_)
+                | Message::ImportFinished(..)
+                | Message::ExportFinished(..)
+                | Message::SecurityEnrolled(..)
+                | Message::PassphraseRotated(..)
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Locked,
@@ -1887,13 +1920,9 @@ impl cosmic::Application for App {
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
-        // Anything that is not the clock ticking counts as the user being
-        // here. Without this the idle timer would fire mid-session, because
-        // `Tick` and `IdleCheck` arrive every second regardless.
-        if !matches!(
-            message,
-            Message::Tick | Message::IdleCheck | Message::Daemon(_) | Message::CloseToast(_)
-        ) {
+        // Without this the idle timer would fire mid-session, because `Tick`
+        // and `IdleCheck` arrive every second regardless.
+        if message.is_user_activity() {
             self.last_activity = std::time::Instant::now();
         }
 
@@ -3934,3 +3963,40 @@ pub const FIELD_ORDER: &[&str] = &[
     field_names::URL,
     field_names::NOTES,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window polls the vault file every few seconds while it is open. If
+    /// that counted as somebody being there, the idle lock could never fire.
+    #[test]
+    fn background_messages_do_not_count_as_activity() {
+        for background in [
+            Message::Tick,
+            Message::IdleCheck,
+            Message::ReloadVaultFile,
+            Message::ClearClipboard,
+            Message::ClipboardChecked(None),
+            Message::SettingsChanged(Settings::default()),
+            Message::WindowUnfocused,
+            Message::AutoTyped(Ok(String::new())),
+            Message::BreachesChecked(Ok(Vec::new())),
+        ] {
+            assert!(
+                !background.is_user_activity(),
+                "{background:?} reset the idle timer"
+            );
+        }
+        for deliberate in [
+            Message::SearchChanged("git".into()),
+            Message::Select(Uuid::nil()),
+            Message::NewItem,
+        ] {
+            assert!(
+                deliberate.is_user_activity(),
+                "{deliberate:?} did not count as somebody being here"
+            );
+        }
+    }
+}

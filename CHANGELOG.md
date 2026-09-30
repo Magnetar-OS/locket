@@ -170,6 +170,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Importing a list of `otpauth://` URIs turned a `+` in the account name
   into a space, so `ada+work@example.com` arrived as `ada work@example.com`.
   Plus-addressed accounts now keep their plus.
+- The window now locks itself after the idle time chosen in Settings. It
+  never did: a check for changes to the vault file, made every few seconds
+  while the vault is open, counted as you using the window.
 
 ### Security
 
