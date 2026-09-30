@@ -40,6 +40,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 - How Linux-PAM treats `PAM_ABORT` from an `optional` module is written down
   with the measurement behind it.
+- Unlocking the screen does not unlock the vault, and the README, the threat
+  model and the PAM notes now say so: applications ask again after a screen
+  lock, and locket's own dialog is what reopens it.
 
 ## [2.0.0] - 2026-09-29
 

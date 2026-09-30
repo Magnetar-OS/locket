@@ -683,6 +683,10 @@ auto-unlock. That includes a panic: each hook contains its own, and answers as
 it would with nothing to do. There is deliberately no `sudo` entry; authorising
 privilege escalation is a different module with a much higher bar.
 
+It unlocks at login only. The screen locker does not open a session, so
+unlocking the screen leaves the vault locked; see
+[When the vault locks](#when-the-vault-locks).
+
 The `password` line is what survives `passwd`. Change your login password
 without it and the vault keeps the old passphrase: auto-unlock quietly stops
 working and nothing anywhere explains why. With it, PAM hands the daemon both
@@ -997,6 +1001,17 @@ than a button:
   `--no-lock-on-idle-session` turns that off.
 
 In every case the SSH agent's identities go with it.
+
+**Unlocking the screen does not unlock the vault.** The lock screen checks
+your password through its own PAM stack, and `pam_locket` hands the daemon a
+password only when a *session opens* — at login. So after the screen locks, the
+machine suspends, or the idle timer fires, the vault stays locked until you
+unlock it: the first application that asks for a secret raises the unlock
+dialog, or you unlock from the window or the panel applet. Applications that
+were reading secrets before will ask again. That is deliberate. A vault that
+reopened with the screen would be open for every process on the session the
+moment the screen was, whether or not anything needed it; asking when
+something does need it keeps the key out of memory until then.
 
 ## Two processes, one file
 

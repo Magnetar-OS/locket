@@ -45,6 +45,15 @@ with a module that returns `PAM_ABORT` from every hook: beside
 `pam_permit.so`, `optional` authenticates and opens the session; `required`
 fails both with "Critical error - immediate abort". Keep the line `optional`.
 
+## Not the screen locker
+
+The module hands the daemon a password when a session *opens*. A screen locker
+checks the password without opening one, so unlocking the screen does not
+unlock the vault: it stays locked until something asks for a secret and you
+answer locket's own dialog. The module has no hook that unlocks on
+authentication alone, on purpose — see "When the vault locks" in the main
+README.
+
 `sm_chauthtok` does nothing on PAM's first (`PAM_PRELIM_CHECK`) pass, and on
 the second sends the old and new passwords to the daemon. The daemon proves
 the old one opens the vault before re-wrapping the key under the new one, so a

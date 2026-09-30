@@ -108,7 +108,14 @@ What is still true in this position:
   the daemon itself at its next start just as well — or one that can inject
   input into the compositor.
 - **Locking is the defence**, which is why it happens on idle, on session
-  lock, on the compositor raising `LockedHint`, and on suspend.
+  lock, on the compositor raising `LockedHint`, and on suspend. **Unlocking
+  the screen does not undo it.** The lock screen's password never reaches
+  locket — `pam_locket` acts when a session opens, and a screen locker opens
+  none — so after any of these the vault stays locked until the person
+  answers locket's own unlock dialog, raised by the first application that
+  needs a secret. The cost is that applications ask again after every screen
+  lock; what it buys is that a process in this position finds a locked vault
+  (position B) for as long as nothing has needed it.
 - **The control interface is not a boundary.** `org.locket.Manager1`
   authenticates no caller: a process running as you can turn the idle lock
   off (`SetAutoLock(0)`), lock the vault, refuse a pending unlock
