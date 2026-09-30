@@ -260,6 +260,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Locking the screen, suspending or an idle lock no longer waits for a
   security key to be touched when an SSH signature is pending on it. The
   vault locks straight away and the pending signature is refused.
+- SSH keys imported before this release are now treated as private keys:
+  masked in the detail view, left out of search, and protected in a KeePass
+  export. They had been stored as plain notes.
 
 ### Security
 

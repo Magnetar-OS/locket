@@ -267,6 +267,21 @@ impl Stamp {
     }
 }
 
+/// Parse a decrypted body, reading what older builds wrote the way this one
+/// writes it (see [`VaultData::upgrade_legacy_fields`]).
+///
+/// Done here, on every load, rather than as a one-off upgrade that marks the
+/// vault dirty: the change is idempotent and every reader of the body comes
+/// through this function, so the file converges on the next ordinary save.
+/// Forcing a write on unlock just for this would add a save — and a chance of
+/// colliding with the other process writing the same file — that no reader
+/// needs.
+fn parse_body(plaintext: &[u8]) -> Result<VaultData> {
+    let mut data: VaultData = serde_json::from_slice(plaintext)?;
+    data.upgrade_legacy_fields();
+    Ok(data)
+}
+
 /// Take the advisory lock guarding a vault file.
 ///
 /// The lock lives on a sibling `.lock` file rather than the vault itself,
@@ -462,7 +477,7 @@ impl Vault {
                 &file.body.ciphertext_bytes("body.ciphertext")?,
                 &file.body_aad()?,
             )?;
-            let data: VaultData = serde_json::from_slice(&plaintext)?;
+            let data = parse_body(&plaintext)?;
 
             file.format = FORMAT_VERSION;
             file.slots = vec![slot];
@@ -506,7 +521,7 @@ impl Vault {
             &file.body.ciphertext_bytes("body.ciphertext")?,
             &file.body_aad()?,
         )?;
-        let mut data: VaultData = serde_json::from_slice(&plaintext)?;
+        let mut data = parse_body(&plaintext)?;
         // Unlock is where the trash retention window is enforced: every
         // frontend opens through here, so "30 days" means 30 days no matter
         // which process gets to the vault first.
@@ -780,7 +795,7 @@ impl Vault {
             &file.body.ciphertext_bytes("body.ciphertext")?,
             &file.body_aad()?,
         )?;
-        self.data = serde_json::from_slice(&plaintext)?;
+        self.data = parse_body(&plaintext)?;
         self.file = file;
         self.stamp = Stamp::of(&self.path);
         self.dirty = false;
@@ -892,7 +907,7 @@ impl Vault {
             &file.body.ciphertext_bytes("body.ciphertext")?,
             &file.body_aad()?,
         )?;
-        Ok(serde_json::from_slice(&plaintext)?)
+        parse_body(&plaintext)
     }
 
     /// Files beside this vault that look like a synchroniser's fork of it —
@@ -927,7 +942,7 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Field, Item, ItemKind, field_names};
+    use crate::model::{Field, FieldKind, Item, ItemKind, field_names};
     use crate::slots::{RawKeyOpener, base64_encode};
 
     fn tmp() -> (tempfile::TempDir, PathBuf) {
@@ -1542,6 +1557,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(by_device.data().item_count(), 1);
+    }
+
+    /// Before audit I-08 the SSH importer stored the key under
+    /// `private-key` with the Note kind, which is shown in the clear,
+    /// searched and exported unprotected. Vaults it wrote must read the key
+    /// as what it is — in the item, its history and the trash — and only on
+    /// SSH key items: another item's field of that name is somebody's own
+    /// choice of kind.
+    #[test]
+    fn an_ssh_key_imported_as_a_note_reads_as_a_private_key() {
+        let (_d, path) = tmp();
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE\n-----END OPENSSH PRIVATE KEY-----\n";
+        let old_way = |label: &str| {
+            Item::new(ItemKind::SshKey, label).with_field(Field::new(
+                field_names::PRIVATE_KEY,
+                FieldKind::Note,
+                pem,
+            ))
+        };
+
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let mut key = old_way("id_ed25519");
+        key.history.push(crate::model::Revision {
+            saved: 1,
+            item: old_way("id_ed25519").snapshot(),
+        });
+        let key_id = v.add_item_default(key);
+        let gone = v.add_item_default(old_way("old key"));
+        v.trash_item(gone);
+        let note = v.add_item_default(Item::new(ItemKind::Note, "Not a key").with_field(
+            Field::new(field_names::PRIVATE_KEY, FieldKind::Note, "left alone"),
+        ));
+        v.save().unwrap();
+        drop(v);
+
+        let v = Vault::open(&path, "pw").unwrap();
+        let kind = |item: &Item| item.field(field_names::PRIVATE_KEY).unwrap().kind;
+        let key = v.item(key_id).unwrap();
+        assert_eq!(kind(key), FieldKind::PrivateKey);
+        assert!(
+            !key.matches("b3BlbnNzaC1rZXktdjE"),
+            "the key body is searchable"
+        );
+        assert_eq!(kind(&key.history[0].item), FieldKind::PrivateKey);
+        assert_eq!(
+            kind(&v.data().trashed(gone).unwrap().item),
+            FieldKind::PrivateKey
+        );
+        assert_eq!(kind(v.item(note).unwrap()), FieldKind::Note);
     }
 
     /// Format 2's AAD must never change: it is the only thing standing between

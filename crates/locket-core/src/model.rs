@@ -689,6 +689,28 @@ impl Item {
             .sum()
     }
 
+    /// Read what older builds wrote the way this one writes it.
+    ///
+    /// Before audit I-08 the SSH importer stored the key in an `SshKey`
+    /// item's `private-key` field with the Note kind, which is shown in the
+    /// clear, searched, and exported to KDBX unprotected. Every other producer
+    /// of that field uses `PrivateKey`. Only SSH key items are touched: on any
+    /// other item a field of that name has the kind somebody chose for it.
+    /// Revisions are read the same way, so restoring one cannot bring the
+    /// note back.
+    pub(crate) fn upgrade_legacy_fields(&mut self) {
+        if self.kind == ItemKind::SshKey {
+            for field in &mut self.fields {
+                if field.name == field_names::PRIVATE_KEY && field.kind == FieldKind::Note {
+                    field.kind = FieldKind::PrivateKey;
+                }
+            }
+        }
+        for revision in &mut self.history {
+            revision.item.upgrade_legacy_fields();
+        }
+    }
+
     /// Drop every recorded revision.
     ///
     /// The point of history is that a replaced value is recoverable — which
@@ -965,6 +987,15 @@ impl VaultData {
     pub fn purge_item(&mut self, id: Uuid) -> Option<Item> {
         let pos = self.trash.iter().position(|t| t.item.id == id)?;
         Some(self.trash.remove(pos).item)
+    }
+
+    /// [`Item::upgrade_legacy_fields`] for every item, live or trashed.
+    pub(crate) fn upgrade_legacy_fields(&mut self) {
+        self.collections
+            .iter_mut()
+            .flat_map(|c| c.items.iter_mut())
+            .chain(self.trash.iter_mut().map(|t| &mut t.item))
+            .for_each(Item::upgrade_legacy_fields);
     }
 
     /// Drop everything that has been in the trash longer than the vault's
