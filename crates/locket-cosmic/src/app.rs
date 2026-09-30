@@ -3190,24 +3190,22 @@ impl cosmic::Application for App {
                     self.export = ExportFlow::default();
                     return Task::none(); // cancelled at the save dialog
                 };
-                // The save dialog already asked about replacing; the module's
-                // own refuse-to-overwrite would second-guess an answered
-                // question.
-                let _ = std::fs::remove_file(&path);
-
                 match format {
                     ExportFormat::Json | ExportFormat::Csv => {
                         self.export = ExportFlow::default();
                         let Some(vault) = self.vault.as_ref() else {
                             return Task::none();
                         };
-                        let outcome = match format {
-                            ExportFormat::Json => {
-                                locket_import::export::to_json(vault, &path).map(|n| (n, 0))
+                        let outcome = export_replacing(&path, |to| {
+                            match format {
+                                ExportFormat::Json => {
+                                    locket_import::export::to_json(vault, to).map(|n| (n, 0))
+                                }
+                                ExportFormat::Csv => locket_import::export::to_csv(vault, to),
+                                ExportFormat::Kdbx => unreachable!("handled below"),
                             }
-                            ExportFormat::Csv => locket_import::export::to_csv(vault, &path),
-                            ExportFormat::Kdbx => unreachable!("handled below"),
-                        };
+                            .map_err(|e| e.to_string())
+                        });
                         return match outcome {
                             Ok((count, lossy)) => {
                                 let mut tasks = vec![self.toast(fl!(
@@ -3222,7 +3220,7 @@ impl cosmic::Application for App {
                                 }
                                 Task::batch(tasks)
                             }
-                            Err(e) => self.toast(fl!("toast-export-failed", error = e.to_string())),
+                            Err(e) => self.toast(fl!("toast-export-failed", error = e)),
                         };
                     }
                     ExportFormat::Kdbx => {
@@ -3235,10 +3233,11 @@ impl cosmic::Application for App {
                         };
                         return cosmic::task::future(async move {
                             let outcome = tokio::task::spawn_blocking(move || {
-                                let result =
-                                    locket_import::export::to_kdbx(&vault, &path, &passphrase)
-                                        .map(|count| (count, path.display().to_string()))
-                                        .map_err(|e| e.to_string());
+                                let result = export_replacing(&path, |to| {
+                                    locket_import::export::to_kdbx(&vault, to, &passphrase)
+                                        .map_err(|e| e.to_string())
+                                })
+                                .map(|count| (count, path.display().to_string()));
                                 (vault, result)
                             })
                             .await;
@@ -4165,6 +4164,42 @@ fn mime_for(name: &str) -> &'static str {
     }
 }
 
+/// Export to `path`, which the save dialog may have pointed at an existing
+/// file.
+///
+/// The save dialog already asked about replacing, so the exporters' own
+/// refuse-to-overwrite would second-guess an answered question — but deleting
+/// the old file first lost it whenever the export then failed. The export is
+/// written beside it and renamed over it only once complete.
+fn export_replacing<T>(
+    path: &std::path::Path,
+    write: impl FnOnce(&std::path::Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    let part = path.with_file_name(name);
+    // Left over from an export that crashed, never anything the person chose.
+    match std::fs::remove_file(&part) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    let written = match write(&part) {
+        Ok(written) => written,
+        Err(e) => {
+            // Half an export is still every secret it got to, in the clear.
+            if let Err(cleanup) = std::fs::remove_file(&part)
+                && cleanup.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(format!("{e}; {}: {cleanup}", part.display()));
+            }
+            return Err(e);
+        }
+    };
+    std::fs::rename(&part, path).map_err(|e| e.to_string())?;
+    Ok(written)
+}
+
 /// Read a file picked to attach, refusing one over the attachment limit
 /// before reading it — the vault would refuse it anyway, after the whole
 /// file had been pulled into memory.
@@ -4613,6 +4648,34 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "written with mode {mode:o}");
         assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+    }
+
+    /// A failed export must not cost the person the file they chose to
+    /// replace: that file is gone only once the new one is in place.
+    #[test]
+    fn a_failed_export_leaves_the_file_it_would_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup.kdbx");
+        std::fs::write(&path, b"last week's backup").unwrap();
+
+        let failed: Result<(), String> = export_replacing(&path, |to| {
+            std::fs::write(to, b"half an export").unwrap();
+            Err("the disk filled up".into())
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"last week's backup");
+
+        export_replacing(&path, |to| {
+            assert!(!to.exists(), "an exporter was handed an existing file");
+            std::fs::write(to, b"this week's").map_err(|e| e.to_string())
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"this week's");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "debris left beside it"
+        );
     }
 
     /// An attachment is at most 10 MiB; a larger file is refused before it

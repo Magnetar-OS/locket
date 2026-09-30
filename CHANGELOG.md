@@ -221,6 +221,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - With "Hide revealed secrets when the window loses focus" on, a generated
   or revealed password in the item editor is hidden too, and turning the
   setting on hides a QR code that is showing.
+- Exporting over an existing file no longer deletes that file before the
+  export has succeeded. A failed export used to leave you with neither.
 
 ### Security
 
