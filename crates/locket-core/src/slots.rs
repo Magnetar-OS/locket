@@ -125,6 +125,26 @@ pub struct Slot {
     /// The DEK, sealed under this slot's KEK.
     pub wrapped_key: crate::vault::SealedBlob,
     pub created: crate::model::Timestamp,
+    /// The slot as the vault file holds it, which is what it was sealed over.
+    ///
+    /// Both this slot's AAD and the body's are computed over these bytes, not
+    /// over a re-serialisation of the fields above. A field added to `Slot` or
+    /// `SlotFactor` later — with `#[serde(default)]`, so older files still
+    /// parse — would otherwise appear in the re-serialisation of a slot that
+    /// was sealed without it, change both AADs, and lock the vault out of its
+    /// own key. Set when a slot is read from a file or created; `None` only
+    /// for a slot parsed by hand, which then falls back to the fields.
+    #[serde(skip)]
+    pub(crate) written: Option<WrittenSlot>,
+}
+
+/// A slot's bytes as written, compacted: see [`Slot::written`].
+#[derive(Debug, Clone)]
+pub(crate) struct WrittenSlot {
+    /// The whole slot object.
+    slot: String,
+    /// Its `factor` member.
+    factor: String,
 }
 
 impl Slot {
@@ -132,9 +152,38 @@ impl Slot {
     ///
     /// Covers the slot's identity and factor metadata but not the wrapped key
     /// itself, so tampering with (say) the Argon2 cost or the PCR set breaks
-    /// authentication rather than weakening the slot.
-    pub(crate) fn aad(&self, magic: &str, format: u16) -> Vec<u8> {
-        serde_json::to_vec(&(magic, format, self.id, &self.label, &self.factor)).unwrap_or_default()
+    /// authentication rather than weakening the slot. The factor is taken as
+    /// written; the result is the compact JSON of
+    /// `(magic, format, id, label, factor)`, as it always has been.
+    pub(crate) fn aad(&self, magic: &str, format: u16) -> Result<Vec<u8>> {
+        let factor = match &self.written {
+            Some(written) => written.factor.clone(),
+            None => serde_json::to_string(&self.factor)?,
+        };
+        Ok(format!(
+            "[{},{format},{},{},{factor}]",
+            serde_json::to_string(magic)?,
+            serde_json::to_string(&self.id)?,
+            serde_json::to_string(&self.label)?,
+        )
+        .into_bytes())
+    }
+
+    /// This slot's JSON as the vault file holds it, compacted.
+    pub(crate) fn written_json(&self) -> Result<String> {
+        match &self.written {
+            Some(written) => Ok(written.slot.clone()),
+            None => Ok(serde_json::to_string(self)?),
+        }
+    }
+
+    /// Fix the bytes a newly sealed slot is written as, and so sealed over.
+    fn record_written(&mut self) -> Result<()> {
+        self.written = Some(WrittenSlot {
+            factor: serde_json::to_string(&self.factor)?,
+            slot: serde_json::to_string(&*self)?,
+        });
+        Ok(())
     }
 
     /// Unwrap the DEK given this slot's key-encryption key.
@@ -144,7 +193,7 @@ impl Slot {
             &self
                 .wrapped_key
                 .ciphertext_bytes("slot.wrapped_key.ciphertext")?,
-            &self.aad(magic, format),
+            &self.aad(magic, format)?,
         )
     }
 
@@ -170,11 +219,13 @@ impl Slot {
                 ciphertext: String::new(),
             },
             created: crate::model::now(),
+            written: None,
         };
 
         let kek = SymKey::derive(passphrase, &salt, params)?;
-        let (nonce, ct) = kek.wrap(dek, &slot.aad(magic, format))?;
+        let (nonce, ct) = kek.wrap(dek, &slot.aad(magic, format)?)?;
         slot.wrapped_key = crate::vault::SealedBlob::new(nonce, ct);
+        slot.record_written()?;
         Ok(slot)
     }
 
@@ -196,9 +247,11 @@ impl Slot {
                 ciphertext: String::new(),
             },
             created: crate::model::now(),
+            written: None,
         };
-        let (nonce, ct) = kek.wrap(dek, &slot.aad(magic, format))?;
+        let (nonce, ct) = kek.wrap(dek, &slot.aad(magic, format)?)?;
         slot.wrapped_key = crate::vault::SealedBlob::new(nonce, ct);
+        slot.record_written()?;
         Ok(slot)
     }
 }
@@ -268,6 +321,192 @@ impl SlotOpener for RawKeyOpener {
 
     fn describe(&self) -> &str {
         self.kind.label()
+    }
+}
+
+/// The slot table as a vault file's own bytes hold it.
+///
+/// Called on text that has just parsed as a vault file, so it is valid JSON;
+/// this only has to find the top-level `slots` array and, in each element, its
+/// `factor` member, and strip the whitespace between tokens. Anything it
+/// cannot find is an error rather than a guess: these bytes are what the
+/// slots were sealed over.
+pub(crate) fn written_slots(file: &[u8]) -> Result<Vec<WrittenSlot>> {
+    let Some((start, _)) = json::member(file, 0, b"slots")? else {
+        return Ok(Vec::new());
+    };
+    json::elements(file, start)?
+        .into_iter()
+        .map(|(start, end)| {
+            let slot = &file[start..end];
+            let (factor_start, factor_end) = json::member(slot, 0, b"factor")?
+                .ok_or_else(|| json::malformed("a slot has no factor"))?;
+            Ok(WrittenSlot {
+                slot: json::compact(slot)?,
+                factor: json::compact(&slot[factor_start..factor_end])?,
+            })
+        })
+        .collect()
+}
+
+/// Just enough JSON walking for [`written_slots`], over text already known to
+/// be valid.
+mod json {
+    use crate::{Error, Result};
+
+    pub(super) fn malformed(what: &str) -> Error {
+        Error::Other(format!(
+            "the vault file's slot table could not be read: {what}"
+        ))
+    }
+
+    fn is_space(b: u8) -> bool {
+        matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+    }
+
+    fn skip_space(t: &[u8], mut i: usize) -> usize {
+        while t.get(i).copied().is_some_and(is_space) {
+            i += 1;
+        }
+        i
+    }
+
+    /// One past the closing quote of the string opening at `i`.
+    fn string_end(t: &[u8], i: usize) -> Result<usize> {
+        let mut j = i + 1;
+        while let Some(&b) = t.get(j) {
+            match b {
+                b'\\' => j += 2,
+                b'"' => return Ok(j + 1),
+                _ => j += 1,
+            }
+        }
+        Err(malformed("unterminated string"))
+    }
+
+    /// One past the end of the value starting at `i`.
+    fn value_end(t: &[u8], i: usize) -> Result<usize> {
+        match t.get(i) {
+            Some(b'"') => string_end(t, i),
+            Some(b'{' | b'[') => {
+                let mut depth = 0usize;
+                let mut j = i;
+                while let Some(&b) = t.get(j) {
+                    match b {
+                        b'"' => {
+                            j = string_end(t, j)?;
+                            continue;
+                        }
+                        b'{' | b'[' => depth += 1,
+                        b'}' | b']' => {
+                            depth = depth
+                                .checked_sub(1)
+                                .ok_or_else(|| malformed("unbalanced brackets"))?;
+                            if depth == 0 {
+                                return Ok(j + 1);
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                Err(malformed("unterminated object or array"))
+            }
+            Some(_) => {
+                let mut j = i;
+                while t
+                    .get(j)
+                    .is_some_and(|&b| !is_space(b) && !matches!(b, b',' | b'}' | b']'))
+                {
+                    j += 1;
+                }
+                Ok(j)
+            }
+            None => Err(malformed("a value is missing")),
+        }
+    }
+
+    /// Where the value of member `key` of the object at `i` lies, if it has
+    /// one. Keys are compared as written, which for a file locket wrote is
+    /// the plain name.
+    pub(super) fn member(t: &[u8], i: usize, key: &[u8]) -> Result<Option<(usize, usize)>> {
+        let mut j = skip_space(t, i);
+        if t.get(j) != Some(&b'{') {
+            return Err(malformed("expected an object"));
+        }
+        j = skip_space(t, j + 1);
+        if t.get(j) == Some(&b'}') {
+            return Ok(None);
+        }
+        loop {
+            if t.get(j) != Some(&b'"') {
+                return Err(malformed("expected a member name"));
+            }
+            let name_end = string_end(t, j)?;
+            let name = &t[j + 1..name_end - 1];
+            j = skip_space(t, name_end);
+            if t.get(j) != Some(&b':') {
+                return Err(malformed("expected `:`"));
+            }
+            let start = skip_space(t, j + 1);
+            let end = value_end(t, start)?;
+            if name == key {
+                return Ok(Some((start, end)));
+            }
+            j = skip_space(t, end);
+            match t.get(j) {
+                Some(b',') => j = skip_space(t, j + 1),
+                Some(b'}') => return Ok(None),
+                _ => return Err(malformed("expected `,` or `}`")),
+            }
+        }
+    }
+
+    /// The span of each element of the array at `i`.
+    pub(super) fn elements(t: &[u8], i: usize) -> Result<Vec<(usize, usize)>> {
+        if t.get(i) != Some(&b'[') {
+            return Err(malformed("expected an array"));
+        }
+        let mut out = Vec::new();
+        let mut j = skip_space(t, i + 1);
+        if t.get(j) == Some(&b']') {
+            return Ok(out);
+        }
+        loop {
+            let end = value_end(t, j)?;
+            out.push((j, end));
+            j = skip_space(t, end);
+            match t.get(j) {
+                Some(b',') => j = skip_space(t, j + 1),
+                Some(b']') => return Ok(out),
+                _ => return Err(malformed("expected `,` or `]`")),
+            }
+        }
+    }
+
+    /// The text with the whitespace between tokens removed — what serde_json
+    /// writes compactly for what it wrote pretty-printed.
+    pub(super) fn compact(t: &[u8]) -> Result<String> {
+        let mut out = Vec::with_capacity(t.len());
+        let (mut in_string, mut escaped) = (false, false);
+        for &b in t {
+            if in_string {
+                out.push(b);
+                if escaped {
+                    escaped = false;
+                } else if b == b'\\' {
+                    escaped = true;
+                } else if b == b'"' {
+                    in_string = false;
+                }
+            } else if b == b'"' {
+                in_string = true;
+                out.push(b);
+            } else if !is_space(b) {
+                out.push(b);
+            }
+        }
+        String::from_utf8(out).map_err(|_| malformed("not UTF-8"))
     }
 }
 

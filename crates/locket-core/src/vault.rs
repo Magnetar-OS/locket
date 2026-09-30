@@ -158,21 +158,67 @@ impl VaultFile {
 
     /// Associated data for the body: the whole slot table, so a slot cannot be
     /// added, removed or edited without invalidating the body.
-    fn body_aad(&self) -> Vec<u8> {
-        match self.format {
+    ///
+    /// The table is taken as written (see [`Slot::written`]), inside the same
+    /// compact JSON tuple the body has always been sealed over.
+    fn body_aad(&self) -> Result<Vec<u8>> {
+        Ok(match self.format {
             0 | 1 => {
                 // Format 1's original computation, preserved byte for byte so
                 // existing vaults still authenticate.
-                serde_json::to_vec(&(&self.magic, self.format, &self.kdf, &self.wrapped_key))
-                    .unwrap_or_default()
+                serde_json::to_vec(&(&self.magic, self.format, &self.kdf, &self.wrapped_key))?
             }
-            2 => serde_json::to_vec(&(&self.magic, self.format, &self.slots)).unwrap_or_default(),
+            2 => format!(
+                "[{},{},{}]",
+                serde_json::to_string(&self.magic)?,
+                self.format,
+                self.written_slot_table()?
+            )
+            .into_bytes(),
             // Format 3 binds the plaintext collection index into the body's
             // AEAD, so relabelling a collection on disk breaks authentication
             // rather than silently succeeding.
-            _ => serde_json::to_vec(&(&self.magic, self.format, &self.slots, &self.collections))
-                .unwrap_or_default(),
+            _ => format!(
+                "[{},{},{},{}]",
+                serde_json::to_string(&self.magic)?,
+                self.format,
+                self.written_slot_table()?,
+                serde_json::to_string(&self.collections)?
+            )
+            .into_bytes(),
+        })
+    }
+
+    /// The slot table as a compact JSON array of the slots as written.
+    fn written_slot_table(&self) -> Result<String> {
+        let slots = self
+            .slots
+            .iter()
+            .map(Slot::written_json)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(format!("[{}]", slots.join(",")))
+    }
+
+    /// The file as written to disk.
+    ///
+    /// Everything but the slots is serialised as usual; the slots go in as
+    /// the bytes they were sealed over, so saving never rewrites a slot an
+    /// older build wrote into a shape its AAD does not match.
+    fn disk_bytes(&mut self) -> Result<Vec<u8>> {
+        if self.slots.is_empty() {
+            return Ok(serde_json::to_vec_pretty(self)?);
         }
+        let table = self.written_slot_table()?;
+        // Serialised without the slots (an empty table is skipped), and the
+        // table spliced in as the first member.
+        let slots = std::mem::take(&mut self.slots);
+        let rest = serde_json::to_string_pretty(self);
+        self.slots = slots;
+        let rest = rest?;
+        let members = rest.strip_prefix("{\n").ok_or_else(|| {
+            Error::Other("the vault file did not serialise as a JSON object".into())
+        })?;
+        Ok(format!("{{\n  \"slots\": {table},\n{members}").into_bytes())
     }
 
     /// Format 1's key AAD.
@@ -362,7 +408,7 @@ impl Vault {
 
     fn read_file(path: &Path) -> Result<VaultFile> {
         let raw = std::fs::read(path).map_err(|e| Error::io(path, e))?;
-        let file: VaultFile = serde_json::from_slice(&raw).map_err(|e| {
+        let mut file: VaultFile = serde_json::from_slice(&raw).map_err(|e| {
             // A file that is not JSON at all is much more likely to be "wrong
             // path" than "corrupt vault", so report it as such.
             if raw.starts_with(b"{") {
@@ -374,6 +420,19 @@ impl Vault {
             }
         })?;
         file.validate(path)?;
+        // Keep each slot's own bytes: they, not a re-serialisation, are what
+        // it and the body were sealed over.
+        let written = crate::slots::written_slots(&raw)?;
+        if written.len() != file.slots.len() {
+            return Err(Error::Other(format!(
+                "the vault file's slot table could not be read: found {} of {} slots",
+                written.len(),
+                file.slots.len()
+            )));
+        }
+        for (slot, written) in file.slots.iter_mut().zip(written) {
+            slot.written = Some(written);
+        }
         Ok(file)
     }
 
@@ -401,7 +460,7 @@ impl Vault {
             let plaintext = dek.open(
                 &file.body.nonce_bytes("body.nonce")?,
                 &file.body.ciphertext_bytes("body.ciphertext")?,
-                &file.body_aad(),
+                &file.body_aad()?,
             )?;
             let data: VaultData = serde_json::from_slice(&plaintext)?;
 
@@ -445,7 +504,7 @@ impl Vault {
         let plaintext = dek.open(
             &file.body.nonce_bytes("body.nonce")?,
             &file.body.ciphertext_bytes("body.ciphertext")?,
-            &file.body_aad(),
+            &file.body_aad()?,
         )?;
         let mut data: VaultData = serde_json::from_slice(&plaintext)?;
         // Unlock is where the trash retention window is enforced: every
@@ -674,10 +733,10 @@ impl Vault {
         self.file.format = FORMAT_VERSION;
 
         let plaintext = serde_json::to_vec(&self.data)?;
-        let (body_nonce, body_ct) = self.dek.seal(&plaintext, &self.file.body_aad())?;
+        let (body_nonce, body_ct) = self.dek.seal(&plaintext, &self.file.body_aad()?)?;
         self.file.body = SealedBlob::new(body_nonce, body_ct);
 
-        let serialized = serde_json::to_vec_pretty(&self.file)?;
+        let serialized = self.file.disk_bytes()?;
 
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
@@ -719,7 +778,7 @@ impl Vault {
         let plaintext = self.dek.open(
             &file.body.nonce_bytes("body.nonce")?,
             &file.body.ciphertext_bytes("body.ciphertext")?,
-            &file.body_aad(),
+            &file.body_aad()?,
         )?;
         self.data = serde_json::from_slice(&plaintext)?;
         self.file = file;
@@ -831,7 +890,7 @@ impl Vault {
         let plaintext = self.dek.open(
             &file.body.nonce_bytes("body.nonce")?,
             &file.body.ciphertext_bytes("body.ciphertext")?,
-            &file.body_aad(),
+            &file.body_aad()?,
         )?;
         Ok(serde_json::from_slice(&plaintext)?)
     }
@@ -1368,6 +1427,123 @@ mod tests {
         );
     }
 
+    /// A TPM slot as a build from before `TpmParent` existed wrote it: no
+    /// `parent` key. The slot's AAD and the body's were computed over those
+    /// bytes, and re-serialising the parsed slot adds `"parent":"rsa2048"` —
+    /// which changed both AADs and locked the whole vault, passphrase
+    /// included, out of its own key. Whatever the struct gains later, what was
+    /// sealed is what is on disk.
+    #[test]
+    fn a_tpm_slot_written_without_the_parent_field_still_unwraps() {
+        let (_d, path) = tmp();
+        let dek = SymKey::random().unwrap();
+        let passphrase = Slot::new_passphrase(
+            "Passphrase",
+            "pw",
+            KdfParams::insecure_fast(),
+            &dek,
+            MAGIC,
+            FORMAT_VERSION,
+        )
+        .unwrap();
+        let passphrase = serde_json::to_string(&passphrase).unwrap();
+
+        let kek = SymKey::random().unwrap();
+        let id = Uuid::new_v4();
+        let factor = r#"{"type":"tpm2","sealed":"YmxvYg==","pcrs":[],"with_pin":true}"#;
+        let slot_aad = format!(r#"["{MAGIC}",{FORMAT_VERSION},"{id}","TPM 2.0",{factor}]"#);
+        let (n, ct) = kek.wrap(&dek, slot_aad.as_bytes()).unwrap();
+        let wrapped = serde_json::to_string(&SealedBlob::new(n, ct)).unwrap();
+        let tpm = format!(
+            r#"{{"id":"{id}","label":"TPM 2.0","factor":{factor},"wrapped_key":{wrapped},"created":1}}"#
+        );
+
+        let data = VaultData::default();
+        let index: Vec<CollectionIndex> = data
+            .collections
+            .iter()
+            .map(|c| CollectionIndex {
+                id: c.id,
+                label: c.label.clone(),
+                alias: c.alias.clone(),
+            })
+            .collect();
+        let index = serde_json::to_string(&index).unwrap();
+        let body_aad = format!(r#"["{MAGIC}",{FORMAT_VERSION},[{passphrase},{tpm}],{index}]"#);
+        let (bn, bct) = dek
+            .seal(&serde_json::to_vec(&data).unwrap(), body_aad.as_bytes())
+            .unwrap();
+        let body = serde_json::to_string(&SealedBlob::new(bn, bct)).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"magic":"{MAGIC}","format":{FORMAT_VERSION},"slots":[{passphrase},{tpm}],"collections":{index},"body":{body}}}"#
+            ),
+        )
+        .unwrap();
+
+        let tpm_opener = || RawKeyOpener {
+            kind: SlotKind::Tpm2,
+            key: kek.clone(),
+        };
+        let mut v = Vault::open(&path, "pw")
+            .expect("the passphrase no longer opens a vault holding an older TPM slot");
+        Vault::open_with(&path, &tpm_opener()).expect("the older TPM slot no longer unwraps");
+
+        // And this build writing the file back must not rewrite the slot.
+        v.add_item_default(Item::new(ItemKind::Note, "written by this build"));
+        v.save().unwrap();
+        let reopened = Vault::open_with(&path, &tpm_opener())
+            .expect("saving rewrote the older TPM slot out of its own AAD");
+        assert_eq!(reopened.data().item_count(), 1);
+        Vault::open(&path, "pw").unwrap();
+    }
+
+    /// The slots now travel as their written bytes from read to write; every
+    /// way a slot table is rewritten has to leave a vault that opens.
+    #[test]
+    fn slots_survive_save_open_and_a_passphrase_change() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "first", KdfParams::insecure_fast()).unwrap();
+        v.add_item_default(Item::new(ItemKind::Note, "kept"));
+        v.save().unwrap();
+
+        let mut v = Vault::open(&path, "first").unwrap();
+        v.change_passphrase("second", KdfParams::insecure_fast())
+            .unwrap();
+        drop(v);
+
+        let mut v = Vault::open(&path, "second").unwrap();
+        assert!(Vault::open(&path, "first").is_err());
+        let kek = SymKey::random().unwrap();
+        v.add_slot(
+            "TPM 2.0",
+            SlotFactor::Tpm2 {
+                sealed: base64_encode(b"blob"),
+                parent: Default::default(),
+                pcrs: Vec::new(),
+                with_pin: true,
+            },
+            &kek,
+        )
+        .unwrap();
+        v.save().unwrap();
+        drop(v);
+
+        let reopened = Vault::open(&path, "second").unwrap();
+        assert_eq!(reopened.data().item_count(), 1);
+        assert_eq!(reopened.slots().len(), 2);
+        let by_device = Vault::open_with(
+            &path,
+            &RawKeyOpener {
+                kind: SlotKind::Tpm2,
+                key: kek,
+            },
+        )
+        .unwrap();
+        assert_eq!(by_device.data().item_count(), 1);
+    }
+
     /// Format 2's AAD must never change: it is the only thing standing between
     /// an existing on-disk vault and an authentication failure. Adding the
     /// collection index in format 3 was safe precisely because it went into a
@@ -1382,7 +1558,7 @@ mod tests {
         file.format = 2;
         let expected = serde_json::to_vec(&(&file.magic, 2u16, &file.slots)).unwrap();
         assert_eq!(
-            file.body_aad(),
+            file.body_aad().unwrap(),
             expected,
             "format 2's AAD changed; every existing vault would fail to open"
         );
@@ -1431,7 +1607,10 @@ mod tests {
             },
         };
         let (bn, bct) = dek
-            .seal(&serde_json::to_vec(&data).unwrap(), &file.body_aad())
+            .seal(
+                &serde_json::to_vec(&data).unwrap(),
+                &file.body_aad().unwrap(),
+            )
             .unwrap();
         file.body = SealedBlob::new(bn, bct);
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
@@ -1681,7 +1860,10 @@ mod tests {
             .items
             .push(Item::new(ItemKind::Login, "Legacy").with_secret("old-secret"));
         let (bn, bct) = dek
-            .seal(&serde_json::to_vec(&data).unwrap(), &file.body_aad())
+            .seal(
+                &serde_json::to_vec(&data).unwrap(),
+                &file.body_aad().unwrap(),
+            )
             .unwrap();
         file.body = SealedBlob::new(bn, bct);
         std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
