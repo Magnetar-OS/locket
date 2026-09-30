@@ -235,7 +235,7 @@ mod tests {
         // ...and another keyring on the freedesktop one.
         let dir = tempfile::tempdir().unwrap();
         let mut other = locket_core::Vault::create(
-            &dir.path().join("other.vault"),
+            dir.path().join("other.vault"),
             "other",
             locket_core::crypto::KdfParams::insecure_fast(),
         )
