@@ -43,6 +43,10 @@ struct Entry {
     data: Option<EntryData>,
     #[serde(default)]
     pinned: bool,
+    /// An alias's address. It sits on the item, beside `data`, and the
+    /// alias's own content is empty.
+    #[serde(rename = "aliasEmail")]
+    alias_email: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -103,9 +107,13 @@ struct ExtraField {
     data: Option<ExtraData>,
 }
 
+/// Text and hidden fields keep their value under `content`; a TOTP field
+/// keeps its URI under `totpUri`.
 #[derive(Deserialize)]
 struct ExtraData {
     content: Option<String>,
+    #[serde(rename = "totpUri")]
+    totp_uri: Option<String>,
 }
 
 /// Parse `data.json`, without touching a vault or a zip.
@@ -167,6 +175,7 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> Item {
         .as_deref()
         .filter(|s| !s.is_empty())
         .or_else(|| content.email.as_deref().filter(|s| !s.is_empty()))
+        .or_else(|| e.alias_email.as_deref().filter(|s| !s.is_empty()))
     {
         item.fields
             .push(Field::text(field_names::USERNAME, username));
@@ -237,7 +246,7 @@ fn convert(e: &Entry, vault_name: Option<&str>) -> Item {
         let Some(value) = f
             .data
             .as_ref()
-            .and_then(|d| d.content.as_deref())
+            .and_then(|d| d.content.as_deref().or(d.totp_uri.as_deref()))
             .filter(|v| !v.is_empty())
         else {
             continue;
@@ -409,6 +418,37 @@ mod tests {
         assert_eq!(card.kind, ItemKind::Card);
         assert_eq!(card.secret.expose(), "4111111111111111");
         assert_eq!(card.field("code").unwrap().kind, FieldKind::Secret);
+    }
+
+    /// The shapes Proton's own export types give: a TOTP extra field holds
+    /// its URI under `totpUri`, and an alias's address is the item-level
+    /// `aliasEmail` beside an empty `content`. Both were dropped.
+    #[test]
+    fn a_totp_extra_field_and_an_alias_address_survive() {
+        let items = parse(
+            r#"{"vaults": {"v1": {"name": "Personal", "items": [
+                {"itemId": "l1", "state": 1, "aliasEmail": null,
+                 "data": {"metadata": {"name": "Login"}, "type": "login",
+                          "content": {"password": "pw"},
+                          "extraFields": [{"fieldName": "2fa", "type": "totp",
+                                           "data": {"totpUri": "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"}}]}},
+                {"itemId": "a1", "state": 1, "aliasEmail": "shield.abc@passmail.net",
+                 "data": {"metadata": {"name": "Alias"}, "type": "alias", "content": {}}}
+            ]}}}"#,
+        )
+        .unwrap();
+        let login = items.iter().find(|i| i.label == "Login").unwrap();
+        let totp = login
+            .field("2fa")
+            .expect("the TOTP extra field was dropped");
+        assert_eq!(totp.kind, FieldKind::Totp);
+        assert!(totp.value.expose().starts_with("otpauth://"));
+
+        let alias = items.iter().find(|i| i.label == "Alias").unwrap();
+        assert_eq!(
+            alias.field_value(field_names::USERNAME),
+            Some("shield.abc@passmail.net")
+        );
     }
 
     #[test]

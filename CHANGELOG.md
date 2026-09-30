@@ -128,6 +128,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Importing a 1Password export now counts Document items in its note about
   files left inside the `.1pux` archive. They were missed before, so the
   import could say nothing was left behind when documents were.
+- Importing a Proton Pass export lost two things: one-time-code seeds stored
+  as extra fields on an item, and the address of every alias. Both now come
+  across.
 
 ### Security
 
