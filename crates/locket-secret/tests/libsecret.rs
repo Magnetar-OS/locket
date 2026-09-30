@@ -111,7 +111,11 @@ async fn libsecret_waits_for_the_person_to_unlock() {
     person.await.unwrap();
     assert!(stored.status.success(), "{}", stderr(&stored));
 
-    daemon.state.lock().await.lock_vault();
+    daemon
+        .state
+        .lock()
+        .await
+        .lock_vault(locket_secret::service::LockReason::Request);
     let person = daemon.unlock_after(Duration::from_millis(700));
     let found = lookup(&daemon).await;
     person.await.unwrap();

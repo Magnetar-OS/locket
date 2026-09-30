@@ -36,6 +36,11 @@ pub trait Manager {
 
     #[zbus(signal)]
     fn unlock_requested(&self) -> zbus::Result<()>;
+
+    /// The vault locked. `reason` is one of `request`, `idle`, `session`,
+    /// `suspend`, `shutdown`, `error`.
+    #[zbus(signal)]
+    fn vault_locked(&self, reason: String) -> zbus::Result<()>;
 }
 
 /// Connect to whichever bus name the daemon holds.

@@ -593,7 +593,9 @@ The Secret Service spec has no way to *unlock* a service — its `Prompt` object
 say "ask the user" without saying how, because on GNOME the answer is a
 gnome-keyring-specific dialog. `org.locket.Manager1` is that missing half:
 `Unlock(passphrase) -> bool`, `Lock()`, and `Locked`/`ItemCount`/`VaultPath`
-properties, plus an `UnlockRequested` signal.
+properties, plus two signals: `UnlockRequested`, and `VaultLocked(reason)`
+when the vault has locked — `request`, `idle`, `session`, `suspend`,
+`shutdown` or `error`.
 
 A locked locket vault cannot have its *items* enumerated — labels and
 attributes live inside the sealed body, which is the point, but it means

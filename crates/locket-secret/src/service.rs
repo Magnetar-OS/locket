@@ -133,6 +133,44 @@ impl Default for ServiceConfig {
     }
 }
 
+/// Why the vault locked, as announced on `Manager1.VaultLocked`.
+///
+/// The frontend's window holds a key of its own while it is unlocked — it
+/// opens the vault file itself — so it has to hear when the vault locks and
+/// decide whether to follow. It should for a person's own "lock", the screen
+/// locking and suspend; it should not for the daemon's idle timer, which
+/// knows nothing of somebody working in that window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockReason {
+    /// Somebody asked: the window, the panel applet, a bus client.
+    Request,
+    /// The daemon's own idle timer ran out.
+    Idle,
+    /// The session locked, or the screen locker came up.
+    Session,
+    /// The machine is suspending.
+    Suspend,
+    /// The daemon is stopping.
+    Shutdown,
+    /// The vault could no longer be served — the file changed under a key
+    /// that no longer opens it.
+    Error,
+}
+
+impl LockReason {
+    /// The word carried by the signal.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LockReason::Request => "request",
+            LockReason::Idle => "idle",
+            LockReason::Session => "session",
+            LockReason::Suspend => "suspend",
+            LockReason::Shutdown => "shutdown",
+            LockReason::Error => "error",
+        }
+    }
+}
+
 /// Notified whenever the unlocked vault appears, changes or goes away.
 ///
 /// The SSH agent is the reason this exists. It holds decrypted copies of every
@@ -192,6 +230,9 @@ pub struct ServiceState {
     /// Whether the screen is locked, as the daemon's session watcher last
     /// heard. See [`ServiceState::set_session_locked`].
     session_locked: AtomicBool,
+    /// A lock that has happened and not been announced yet, with its reason.
+    /// The upkeep task announces it; see [`spawn_upkeep`].
+    unannounced_lock: Option<LockReason>,
 }
 
 impl ServiceState {
@@ -210,6 +251,7 @@ impl ServiceState {
             auto_lock_seconds: AtomicU64::new(0),
             last_activity: AtomicU64::new(now()),
             session_locked: AtomicBool::new(false),
+            unannounced_lock: None,
         }
     }
 
@@ -299,8 +341,14 @@ impl ServiceState {
     ///
     /// The item objects come off the bus with it, by way of the object tree's
     /// upkeep task: a locked vault does not advertise how many items it holds.
+    ///
+    /// Called directly only where the vault can no longer be served; a lock
+    /// anybody meant goes through [`ServiceState::lock_vault`], which gives
+    /// its reason.
     pub fn close_vault(&mut self) {
-        self.vault = None;
+        if self.vault.take().is_some() {
+            self.unannounced_lock.get_or_insert(LockReason::Error);
+        }
         for observer in &self.observers {
             observer.vault_closed();
         }
@@ -438,10 +486,15 @@ impl ServiceState {
     /// Every lock goes through here — a client's `Lock`, the idle timer, the
     /// session locking, suspend, shutdown — so none of them can drop a change
     /// another would have saved.
-    pub fn lock_vault(&mut self) {
+    pub fn lock_vault(&mut self, reason: LockReason) {
+        if self.is_locked() {
+            return;
+        }
         if let Err(e) = self.persist() {
             tracing::error!("locking without the last change: {e}");
         }
+        // A failed save may have locked it already, as an error.
+        self.unannounced_lock = Some(reason);
         self.close_vault();
     }
 
@@ -803,7 +856,7 @@ impl SecretService {
     ) -> Result<(Vec<OwnedObjectPath>, OwnedObjectPath), SecretError> {
         {
             let mut state = self.state.lock().await;
-            state.lock_vault();
+            state.lock_vault(LockReason::Request);
         }
         sync_objects(server, &self.state).await?;
         Ok((objects, null_path()))
@@ -817,7 +870,7 @@ impl SecretService {
     ) -> Result<(), SecretError> {
         {
             let mut state = self.state.lock().await;
-            state.lock_vault();
+            state.lock_vault(LockReason::Request);
             state.sessions = SessionStore::new();
         }
         sync_objects(server, &self.state).await?;
@@ -1527,15 +1580,26 @@ pub async fn register_objects(server: &ObjectServer, state: &SharedState) -> Res
 /// vault, a reload picked up on the way into a write — which [`ServiceState`]
 /// announces through [`ObjectTree::changed`] — and clients leaving the bus,
 /// whose sessions (and their DH keys) are closed with them.
+///
+/// It is also what announces a lock (`Manager1.VaultLocked`), after the item
+/// objects have come off the bus: every lock ends up here, whichever way it
+/// happened.
 pub fn spawn_upkeep(connection: &zbus::Connection, state: &SharedState) {
     let server = connection.object_server().clone();
     let watched = state.clone();
+    let announcer = connection.clone();
     tokio::spawn(async move {
         let tree = watched.lock().await.tree.clone();
         loop {
             tree.changed.notified().await;
             if let Err(e) = sync_objects(&server, &watched).await {
                 tracing::error!("could not bring the published objects in step: {e}");
+            }
+            let locked = watched.lock().await.unannounced_lock.take();
+            if let Some(reason) = locked
+                && let Err(e) = crate::manager::announce_lock(&announcer, reason).await
+            {
+                tracing::warn!("could not announce that the vault locked: {e}");
             }
         }
     });
@@ -1740,7 +1804,7 @@ mod tests {
             let vault = state.vault.as_mut().unwrap();
             vault.add_item_default(Item::new(ItemKind::Note, "note"));
             vault.save().unwrap();
-            state.lock_vault();
+            state.lock_vault(LockReason::Request);
         }
         sync_objects(daemon.server.object_server(), &daemon.state)
             .await

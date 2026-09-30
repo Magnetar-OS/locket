@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use zbus::object_server::SignalEmitter;
 use zbus::{ObjectServer, fdo, interface};
 
-use crate::service::{PromptRequest, ServiceState, SharedState, sync_objects};
+use crate::service::{LockReason, PromptRequest, ServiceState, SharedState, sync_objects};
 
 pub const MANAGER_PATH: &str = "/org/locket/Manager";
 
@@ -87,7 +87,7 @@ impl Manager {
     /// Drop the data-encryption key, and the item objects with it.
     async fn lock(&self, #[zbus(object_server)] server: &ObjectServer) -> fdo::Result<()> {
         {
-            self.state.lock().await.lock_vault();
+            self.state.lock().await.lock_vault(LockReason::Request);
         }
         sync_objects(server, &self.state)
             .await
@@ -188,6 +188,21 @@ impl Manager {
     /// A frontend should raise its unlock dialog and call `Unlock`.
     #[zbus(signal)]
     pub async fn unlock_requested(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    /// Emitted when the vault has locked, with why: `request`, `idle`,
+    /// `session`, `suspend`, `shutdown` or `error`. See
+    /// [`crate::service::LockReason`].
+    #[zbus(signal)]
+    pub async fn vault_locked(emitter: &SignalEmitter<'_>, reason: &str) -> zbus::Result<()>;
+}
+
+/// Announce a lock on the manager's path.
+pub(crate) async fn announce_lock(
+    connection: &zbus::Connection,
+    reason: LockReason,
+) -> zbus::Result<()> {
+    let emitter = SignalEmitter::new(connection, MANAGER_PATH)?;
+    Manager::vault_locked(&emitter, reason.as_str()).await
 }
 
 /// Bridge `Prompt` objects to the frontend.

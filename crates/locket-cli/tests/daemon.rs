@@ -71,7 +71,11 @@ async fn a_write_reaches_the_running_daemon() {
 #[tokio::test]
 async fn a_locked_daemon_is_not_an_error() {
     let daemon = Daemon::start().await;
-    daemon.state.lock().await.lock_vault();
+    daemon
+        .state
+        .lock()
+        .await
+        .lock_vault(locket_secret::service::LockReason::Request);
 
     let added = cli(Some(daemon.bus.address()), daemon.vault_path(), &ADD).await;
     assert!(added.status.success(), "{}", stderr(&added));

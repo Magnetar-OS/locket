@@ -16,7 +16,9 @@ mod idle;
 
 use clap::Parser;
 use locket_core::{Vault, crypto::KdfParams};
-use locket_secret::service::{ServiceConfig, ServiceState, register_objects, spawn_upkeep};
+use locket_secret::service::{
+    LockReason, ServiceConfig, ServiceState, register_objects, spawn_upkeep,
+};
 use tokio::sync::Mutex;
 use zbus::fdo::RequestNameFlags;
 
@@ -314,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ = terminate() => tracing::info!("terminated"),
     }
 
-    state.lock().await.lock_vault();
+    state.lock().await.lock_vault(LockReason::Shutdown);
     tracing::info!("vault locked, exiting");
     Ok(())
 }

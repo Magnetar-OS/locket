@@ -206,7 +206,7 @@ impl Daemon {
         {
             let mut state = self.state.lock().await;
             state.prompts = Some(tx);
-            state.lock_vault();
+            state.lock_vault(crate::service::LockReason::Request);
         }
         sync_objects(self.server.object_server(), &self.state)
             .await

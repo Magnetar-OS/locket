@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt as _;
-use locket_secret::service::SharedState;
+use locket_secret::service::{LockReason, SharedState};
 
 /// Tell the desktop the vault just locked, and why.
 ///
@@ -72,7 +72,7 @@ pub async fn auto_lock(
 
         if idle >= seconds {
             tracing::info!(idle, "locking the vault after idling");
-            state.lock().await.lock_vault();
+            state.lock().await.lock_vault(LockReason::Idle);
             if notify {
                 notify_locked("Locked after being idle. Unlock in locket when you need it.").await;
             }
@@ -182,11 +182,11 @@ pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result
         tokio::select! {
             Some(signal) = sleeping.next() => {
                 if signal.args().map(|a| a.start).unwrap_or(false) {
-                    lock(&state, "the machine is suspending", notify).await;
+                    lock(&state, LockReason::Suspend, "the machine is suspending", notify).await;
                 }
             }
             Some(_) = async { match locks.as_mut() { Some(s) => s.next().await, None => None } } => {
-                lock(&state, "the session was locked", notify).await;
+                lock(&state, LockReason::Session, "the session was locked", notify).await;
             }
             Some(change) = async { match hints.as_mut() { Some(s) => s.next().await, None => None } } => {
                 // Kept as well as acted on: while the screen is locked nobody
@@ -195,7 +195,7 @@ pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result
                 let locked = change.get().await.unwrap_or(false);
                 state.lock().await.set_session_locked(locked);
                 if locked {
-                    lock(&state, "the screen locker came up", notify).await;
+                    lock(&state, LockReason::Session, "the screen locker came up", notify).await;
                 }
             }
             else => return Ok(()),
@@ -203,14 +203,14 @@ pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result
     }
 }
 
-async fn lock(state: &SharedState, why: &str, notify: bool) {
+async fn lock(state: &SharedState, reason: LockReason, why: &str, notify: bool) {
     {
         let mut guard = state.lock().await;
         if guard.is_locked() {
             return;
         }
         tracing::info!("locking the vault: {why}");
-        guard.lock_vault();
+        guard.lock_vault(reason);
     }
     // After suspend the notification lands on resume, which is exactly when
     // someone would wonder why their applications re-ask for things.

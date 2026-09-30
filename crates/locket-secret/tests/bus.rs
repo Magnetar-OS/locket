@@ -861,3 +861,49 @@ async fn nothing_asks_to_be_unlocked_behind_a_locked_screen() {
         "the person answered first"
     );
 }
+
+/// The window holds a key of its own while it is unlocked, so it has to hear
+/// when the vault locks, and why: it follows a person's "lock", the screen and
+/// suspend, and not the daemon's idle timer. Nothing announced a lock before,
+/// so a window left unlocked stayed so behind a locked screen.
+#[tokio::test]
+async fn a_lock_is_announced_with_its_reason() {
+    use futures_util::StreamExt as _;
+    use locket_secret::service::LockReason;
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let manager = client.manager().await;
+    let mut locked = manager.receive_signal("VaultLocked").await.unwrap();
+    let mut next = async || -> String {
+        let signal = tokio::time::timeout(std::time::Duration::from_secs(5), locked.next())
+            .await
+            .expect("the lock was not announced")
+            .unwrap();
+        signal.body().deserialize().unwrap()
+    };
+
+    // Asked for over the bus, as the panel applet's "Lock now" does.
+    let () = manager.call("Lock", &()).await.unwrap();
+    assert_eq!(next().await, "request");
+
+    // Locking what is already locked announces nothing new; the next thing
+    // heard is the screen locking after an unlock.
+    let () = manager.call("Lock", &()).await.unwrap();
+    let unlocked: bool = manager
+        .call("Unlock", &(support_passphrase(),))
+        .await
+        .unwrap();
+    assert!(unlocked);
+    daemon.state.lock().await.lock_vault(LockReason::Session);
+    assert_eq!(next().await, "session");
+
+    // A vault that could no longer be served says so.
+    let unlocked: bool = manager
+        .call("Unlock", &(support_passphrase(),))
+        .await
+        .unwrap();
+    assert!(unlocked);
+    daemon.state.lock().await.close_vault();
+    assert_eq!(next().await, "error");
+}

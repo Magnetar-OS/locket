@@ -4,6 +4,13 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Added
+
+- `org.locket.Manager1.VaultLocked(reason)`: the daemon now says when the
+  vault has locked and why — `request`, `idle`, `session`, `suspend`,
+  `shutdown` or `error` — so a window holding its own copy of the key can
+  follow.
+
 ### Changed
 
 - A locked vault no longer keeps an application waiting past the point where
