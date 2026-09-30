@@ -109,3 +109,22 @@ fn a_dry_run_names_an_unreadable_env_file() {
         text(&scanned.stdout)
     );
 }
+
+/// Restoring a revision went through `edit_item`, which files the current
+/// state first. With the history full that pushed the oldest revision out
+/// and shifted every number down before the restore read it, so `--restore
+/// 0` brought back the second-oldest and lost the one asked for.
+#[test]
+fn restoring_from_a_full_history_restores_the_revision_asked_for() {
+    let (_dir, vault) = vault_with(&["rotated"]);
+    for n in 1..=11 {
+        let edited = cli(&vault, &["edit", "rotated", "--set", &format!("note=v{n}")]);
+        assert!(edited.status.success(), "{}", text(&edited.stderr));
+    }
+    // Ten revisions kept: the states holding v1 to v10, oldest first.
+    let restored = cli(&vault, &["history", "rotated", "--restore", "0"]);
+    assert!(restored.status.success(), "{}", text(&restored.stderr));
+
+    let note = cli(&vault, &["get", "rotated", "--field", "note"]);
+    assert_eq!(text(&note.stdout).trim(), "v1");
+}

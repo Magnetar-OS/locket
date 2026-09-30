@@ -856,9 +856,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("\nrestore one with `history {query} --restore N`");
                 }
                 Some(n) => {
-                    let label = vault.edit_item(id, |item| {
-                        item.restore_revision(n).map(|()| item.label.clone())
-                    })??;
+                    // Not through `edit_item`: restoring files the replaced
+                    // state itself, and filing it first as well would, with
+                    // the history full, push revision 0 out and shift every
+                    // number down before revision `n` is read.
+                    let item = vault.item_mut(id).ok_or("item vanished")?;
+                    item.restore_revision(n)?;
+                    let label = item.label.clone();
                     save(&mut vault)?;
                     println!("restored revision {n} of {label}");
                 }
