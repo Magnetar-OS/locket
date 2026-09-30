@@ -66,12 +66,14 @@ pub struct Applet {
 /// past a handful the answer is to open the window and search properly.
 const MAX_RESULTS: usize = 8;
 
-/// Seconds before a copied secret is taken off the clipboard.
-///
-/// The applet cannot read the desktop's locket settings — those live in the
-/// main application's `cosmic-config` store — so this is the same default
-/// the window ships with rather than a second, quieter policy.
+/// Seconds before a copied secret is taken off the clipboard, when the
+/// window's setting is unset or cannot be read — the same default the window
+/// ships with, rather than a second, quieter policy.
 const CLIPBOARD_CLEAR_SECS: u64 = 30;
+
+/// Where the window keeps its settings: its application id, the version of
+/// its settings store, and the key of "Clear copied secrets".
+const LOCKET_SETTINGS: (&str, u64, &str) = ("com.magnetaros.Locket", 1, "clipboard_clear_seconds");
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -255,14 +257,26 @@ impl cosmic::Application for Applet {
                     self.notice = Some(fl!("copy-failed", label = label));
                     return Task::none();
                 };
-                self.notice = Some(fl!("copied", label = label, seconds = CLIPBOARD_CLEAR_SECS));
+                // Read at each copy: the setting lives with the window, and it
+                // can change there at any time.
+                let config =
+                    cosmic::cosmic_config::Config::new(LOCKET_SETTINGS.0, LOCKET_SETTINGS.1)
+                        .inspect_err(|e| tracing::debug!("locket's settings unavailable: {e}"))
+                        .ok();
+                let Some(seconds) = clear_after(config.as_ref()) else {
+                    self.notice = Some(fl!("copied-forever", label = label));
+                    self.clipboard_copy = None;
+                    self.clipboard_due = false;
+                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
+                };
+                self.notice = Some(fl!("copied", label = label, seconds = seconds));
                 self.clipboard_copy = Some(secret.clone());
                 self.clipboard_due = false;
                 self.clipboard_generation += 1;
                 let generation = self.clipboard_generation;
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
                 let clear = cosmic::task::future(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(CLIPBOARD_CLEAR_SECS)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
                     Message::ClearClipboard(generation)
                 });
                 return Task::batch([copy, clear]);
@@ -467,6 +481,22 @@ fn timer_is_current(fired_for: u64, latest: u64) -> bool {
     fired_for == latest
 }
 
+/// How long a copied secret stays on the clipboard, from the window's
+/// settings in `config`; `None` means it is never cleared.
+fn clear_after(config: Option<&cosmic::cosmic_config::Config>) -> Option<u64> {
+    use cosmic::cosmic_config::ConfigGet as _;
+    match config.map(|c| c.get::<u64>(LOCKET_SETTINGS.2)) {
+        Some(Ok(0)) => None,
+        Some(Ok(seconds)) => Some(seconds),
+        Some(Err(e)) => {
+            // Unset is the first-run case; either way, the window's default.
+            tracing::debug!("clipboard setting unavailable ({e}); using the default");
+            Some(CLIPBOARD_CLEAR_SECS)
+        }
+        None => Some(CLIPBOARD_CLEAR_SECS),
+    }
+}
+
 /// What a clear timer does with what it read back from the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClearDecision {
@@ -534,6 +564,32 @@ mod tests {
             clear_decision(None, Some("hunter2"), true),
             ClearDecision::Leave
         );
+    }
+
+    /// "Clear copied secrets" is set in the window; the panel's copy button
+    /// follows it rather than keeping a quieter policy of its own.
+    #[test]
+    fn the_windows_clipboard_setting_applies_to_the_panel_too() {
+        use cosmic::cosmic_config::{Config, ConfigSet as _};
+        let dir = std::env::temp_dir().join(format!(
+            "locket-applet-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        let config = Config::with_custom_path("com.magnetaros.Locket", 1, dir.clone()).unwrap();
+
+        assert_eq!(
+            clear_after(Some(&config)),
+            Some(30),
+            "unset is the window's default"
+        );
+        config.set("clipboard_clear_seconds", 10u64).unwrap();
+        assert_eq!(clear_after(Some(&config)), Some(10));
+        config.set("clipboard_clear_seconds", 0u64).unwrap();
+        assert_eq!(clear_after(Some(&config)), None, "zero is never");
+        assert_eq!(clear_after(None), Some(30));
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Copy A, then B ten seconds later: A's timer must leave B alone.

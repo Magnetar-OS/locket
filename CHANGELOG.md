@@ -223,6 +223,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   setting on hides a QR code that is showing.
 - Exporting over an existing file no longer deletes that file before the
   export has succeeded. A failed export used to leave you with neither.
+- Copying from the panel applet clears the clipboard after the time chosen
+  in locket's Settings, including never, instead of always after 30 seconds.
 
 ### Security
 
