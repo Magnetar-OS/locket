@@ -72,3 +72,32 @@ fn an_impossible_memory_cost_is_refused_by_name() {
     );
 }
 
+/// The dry run of `import-env` counted an unreadable file as one holding no
+/// variables, where the import itself would fail on it.
+#[test]
+fn a_dry_run_names_an_unreadable_env_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let env = project.join(".env");
+    std::fs::write(&env, "API_TOKEN=abc123def456ghi789\n").unwrap();
+    std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&env).is_ok() {
+        // Running as root: permissions do not stop the read, so there is
+        // nothing to show.
+        return;
+    }
+
+    let scanned = cli(
+        &dir.path().join("unused.vault"),
+        &["import-env", dir.path().to_str().unwrap(), "--dry-run"],
+    );
+    assert!(scanned.status.success(), "{}", text(&scanned.stderr));
+    assert!(
+        text(&scanned.stdout).contains("unreadable"),
+        "{}",
+        text(&scanned.stdout)
+    );
+}

@@ -494,7 +494,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let files = locket_import::dotenv::scan(dir)?;
         let (mut vars, mut secrets) = (0usize, 0usize);
         for f in &files {
-            let text = std::fs::read_to_string(&f.path).unwrap_or_default();
+            // A file the import would fail on is shown as such, not as one
+            // that holds nothing.
+            let text = match std::fs::read_to_string(&f.path) {
+                Ok(text) => text,
+                Err(e) => {
+                    println!("{:<56} unreadable: {e}", f.relative.display());
+                    continue;
+                }
+            };
             let parsed = locket_import::dotenv::parse(&text);
             let s = parsed
                 .iter()

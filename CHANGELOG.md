@@ -43,6 +43,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - `locket-cli passwd --memory-mib` refuses a value too large to express,
   where a release build used to wrap it round to a small cost and weaken the
   vault while reporting success.
+- `locket-cli import-env --dry-run` lists a `.env` file it cannot read as
+  unreadable, instead of as a file holding nothing.
 - A search answered the moment the vault unlocked could name items that were
   not on the bus yet, so reading the secret it had just found failed.
 - `pam_locket.so` contains a panic in any of its hooks and answers as it
