@@ -71,6 +71,13 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   "ada@example.com". Show QR code used to pass the escapes on to the phone,
   doubled.
 
+### Security
+
+- A vault file whose key-derivation costs were edited to absurd values is
+  now refused with an error when unlocked. It used to make the daemon,
+  locket or the CLI try to allocate terabytes of memory and crash, or hang
+  for good.
+
 ### Documentation
 
 - How Linux-PAM treats `PAM_ABORT` from an `optional` module is written down

@@ -69,7 +69,35 @@ impl KdfParams {
         }
     }
 
+    /// Upper bound on the memory cost, in KiB: 4 GiB.
+    ///
+    /// The costs are read from the vault file before anything in it is
+    /// authenticated, and Argon2 accepts anything up to `u32::MAX` — so without
+    /// a bound an edited file makes unlocking allocate terabytes and abort, or
+    /// run for ever. The bounds sit far above any cost a person would choose
+    /// (the strongest preset is 256 MiB and four passes), and every
+    /// derivation goes through here, so they also cover choosing new costs.
+    pub const MAX_M_COST: u32 = 4 * 1024 * 1024;
+    /// Upper bound on the number of passes.
+    pub const MAX_T_COST: u32 = 256;
+    /// Upper bound on the degree of parallelism.
+    pub const MAX_P_COST: u32 = 64;
+
     fn to_argon2(self) -> Result<argon2::Argon2<'static>> {
+        if self.m_cost > Self::MAX_M_COST
+            || self.t_cost > Self::MAX_T_COST
+            || self.p_cost > Self::MAX_P_COST
+        {
+            return Err(Error::KdfParams(format!(
+                "m={}KiB t={} p={} exceeds the limit of m={}KiB t={} p={}",
+                self.m_cost,
+                self.t_cost,
+                self.p_cost,
+                Self::MAX_M_COST,
+                Self::MAX_T_COST,
+                Self::MAX_P_COST
+            )));
+        }
         let params = argon2::Params::new(self.m_cost, self.t_cost, self.p_cost, Some(KEY_LEN))
             .map_err(|e| Error::KdfParams(e.to_string()))?;
         Ok(argon2::Argon2::new(
@@ -249,6 +277,46 @@ mod tests {
         let k3 = SymKey::derive("correct horse", &salt_b, p).unwrap();
         assert_eq!(k1.expose(), k2.expose());
         assert_ne!(k1.expose(), k3.expose());
+    }
+
+    // The costs come from the vault file, which is read before anything is
+    // authenticated. Argon2 itself accepts up to u32::MAX KiB and passes, so
+    // an edited file used to make unlocking try to allocate 4 TiB.
+    #[test]
+    fn absurd_kdf_costs_are_refused_before_allocating() {
+        let salt = [0u8; SALT_LEN];
+        for params in [
+            KdfParams {
+                m_cost: u32::MAX,
+                t_cost: 1,
+                p_cost: 1,
+            },
+            KdfParams {
+                m_cost: 8,
+                t_cost: u32::MAX,
+                p_cost: 1,
+            },
+            KdfParams {
+                m_cost: 64 * 1024,
+                t_cost: 1,
+                p_cost: 1024,
+            },
+        ] {
+            assert!(
+                matches!(
+                    SymKey::derive("pw", &salt, params),
+                    Err(Error::KdfParams(_))
+                ),
+                "{params:?} was accepted"
+            );
+        }
+        // The bounds themselves are usable.
+        let at_the_limit = KdfParams {
+            m_cost: 8 * KdfParams::MAX_P_COST,
+            t_cost: 1,
+            p_cost: KdfParams::MAX_P_COST,
+        };
+        assert!(SymKey::derive("pw", &salt, at_the_limit).is_ok());
     }
 
     #[test]
