@@ -191,10 +191,11 @@ impl Totp {
             digest[offset + 2],
             digest[offset + 3],
         ]);
-        let modulus = 10u32.pow(self.digits);
+        // In u64: `validate` allows ten digits, and 10^10 does not fit a u32.
+        let modulus = 10u64.pow(self.digits);
         Ok(format!(
             "{:0width$}",
-            binary % modulus,
+            u64::from(binary) % modulus,
             width = self.digits as usize
         ))
     }
@@ -348,6 +349,19 @@ mod tests {
         );
         assert_eq!(t.code_at(59).unwrap(), "90693936");
         assert_eq!(t.code_at(1111111109).unwrap(), "25091201");
+    }
+
+    // RFC 4226 Appendix D, count 3: the truncated value is 1726969429. Ten
+    // digits pass `validate`, and 10^10 does not fit the u32 the modulus was
+    // computed in — debug builds panicked, release builds wrapped it.
+    #[test]
+    fn ten_digit_codes_do_not_overflow() {
+        let t = Totp {
+            digits: 10,
+            ..rfc_totp(Algorithm::Sha1, RFC_SECRET)
+        };
+        assert_eq!(t.code_at(90).unwrap(), "1726969429");
+        assert_eq!(t.code_at(59).unwrap(), "1094287082");
     }
 
     #[test]

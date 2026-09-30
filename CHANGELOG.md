@@ -61,6 +61,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   because both copies of an item had gained a different attachment. The
   merge used to keep one side's attachments and drop the other's without a
   word.
+- A one-time-code seed set to ten digits now shows the right code. Such a
+  seed used to show a wrong code about a third of the time.
 
 ### Documentation
 
