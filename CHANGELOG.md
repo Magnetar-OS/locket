@@ -176,6 +176,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Restoring an earlier version of an item whose history was full brought
   back the version after the one you clicked, and deleted the one you
   clicked for good. It now restores the version you chose.
+- Saving an item that had been deleted elsewhere while you were editing it
+  said "Saved" and threw your changes away. The editor now stays open and
+  says the item is gone, so you can copy what you typed.
 
 ### Security
 

@@ -191,6 +191,7 @@ editor-field-needs-name = Every field needs a name.
 editor-expires = Expires
 editor-expires-placeholder = YYYY-MM-DD, or leave empty
 editor-bad-expiry = Expiry wants a YYYY-MM-DD date, or nothing for never.
+editor-item-gone = This item is no longer in the vault — it was deleted while you were editing it — so there is nothing to save this over. Copy anything you want to keep, then cancel.
 
 
 ## Import

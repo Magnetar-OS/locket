@@ -2223,27 +2223,15 @@ impl cosmic::Application for App {
                         let Some(vault) = self.vault.as_mut() else {
                             return Task::none();
                         };
-                        match id {
-                            // Applied field by field rather than replaced
-                            // wholesale: the editor only speaks for what its
-                            // form shows, and a whole-item overwrite silently
-                            // destroyed everything it does not — tags,
-                            // attachments, history. `edit_item` also files
-                            // the state being replaced into history first.
-                            Some(existing) => {
-                                let _ = vault.edit_item(existing, move |slot| {
-                                    slot.label = item.label;
-                                    slot.kind = item.kind;
-                                    slot.secret = item.secret;
-                                    slot.attributes = item.attributes;
-                                    slot.fields = item.fields;
-                                    slot.favorite = item.favorite;
-                                    slot.expires = item.expires;
-                                });
+                        // The item went away while the form was open — deleted
+                        // by another process, or this is a different vault
+                        // now. Say so and keep the form, so what was typed is
+                        // still there to copy.
+                        if apply_edit(vault, id, item).is_err() {
+                            if let Some(editor) = self.editor.as_mut() {
+                                editor.error = Some(fl!("editor-item-gone"));
                             }
-                            None => {
-                                vault.add_item_default(item);
-                            }
+                            return Task::none();
                         }
                         let saved = match self.save_vault() {
                             Ok(task) => task,
@@ -3729,6 +3717,33 @@ impl cosmic::Application for App {
     }
 }
 
+/// Put what the editor saved into the vault: over item `id`, or as a new item
+/// when there is none.
+fn apply_edit(vault: &mut Vault, id: Option<Uuid>, item: Item) -> locket_core::Result<()> {
+    match id {
+        // Applied field by field rather than replaced wholesale: the editor
+        // only speaks for what its form shows, and a whole-item overwrite
+        // silently destroyed everything it does not — tags, attachments,
+        // history. `edit_item` also files the state being replaced into
+        // history first.
+        Some(existing) => {
+            vault.edit_item(existing, move |slot| {
+                slot.label = item.label;
+                slot.kind = item.kind;
+                slot.secret = item.secret;
+                slot.attributes = item.attributes;
+                slot.fields = item.fields;
+                slot.favorite = item.favorite;
+                slot.expires = item.expires;
+            })?;
+        }
+        None => {
+            vault.add_item_default(item);
+        }
+    }
+    Ok(())
+}
+
 /// Put revision `index` of item `id` back, returning the item's label.
 ///
 /// Not through `edit_item`: that files the current state before anything
@@ -4039,6 +4054,27 @@ mod tests {
             vault.item(id).unwrap().secret.expose(),
             "v0",
             "a different revision came back"
+        );
+    }
+
+    /// An item deleted elsewhere while its editor was open: saving the edit
+    /// has nothing to land on, and must say so rather than report success.
+    #[test]
+    fn saving_an_edit_to_a_vanished_item_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault(&dir);
+        let original = Item::new(ItemKind::Login, "Site").with_secret("old");
+        let id = vault.add_item_default(original.clone());
+        let mut editor = Editor::from_item(&original);
+        vault.remove_item(id);
+
+        editor.update(EditorMessage::Secret("new".into()));
+        let Outcome::Save { id, item } = editor.update(EditorMessage::Save) else {
+            panic!("the editor did not save");
+        };
+        assert!(
+            apply_edit(&mut vault, id, *item).is_err(),
+            "an edit to a deleted item was accepted"
         );
     }
 }
