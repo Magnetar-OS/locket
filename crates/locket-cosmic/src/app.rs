@@ -2748,11 +2748,8 @@ impl cosmic::Application for App {
                 let Some(vault) = self.vault.as_mut() else {
                     return Task::none();
                 };
-                let restored = vault.edit_item(id, |item| {
-                    item.restore_revision(index).map(|()| item.label.clone())
-                });
-                match restored {
-                    Ok(Ok(label)) => {
+                match restore_revision(vault, id, index) {
+                    Ok(label) => {
                         self.conceal();
                         let saved = match self.save_vault() {
                             Ok(task) => task,
@@ -2763,7 +2760,7 @@ impl cosmic::Application for App {
                             self.toast(fl!("toast-revision-restored", label = label)),
                         ]);
                     }
-                    Ok(Err(e)) | Err(e) => return self.toast(e.to_string()),
+                    Err(e) => return self.toast(e.to_string()),
                 }
             }
 
@@ -3732,6 +3729,21 @@ impl cosmic::Application for App {
     }
 }
 
+/// Put revision `index` of item `id` back, returning the item's label.
+///
+/// Not through `edit_item`: that files the current state before anything
+/// else, and with the history at its bound the filing evicts the oldest
+/// revision and shifts every index down — the click then restored the next
+/// revision along, and the one asked for was gone. `restore_revision` reads
+/// the revision first and files the state it replaces itself.
+fn restore_revision(vault: &mut Vault, id: Uuid, index: usize) -> locket_core::Result<String> {
+    let item = vault
+        .item_mut(id)
+        .ok_or(locket_core::Error::NoSuchItem(id))?;
+    item.restore_revision(index)?;
+    Ok(item.label.clone())
+}
+
 fn has_totp(item: &Item) -> bool {
     item.fields.iter().any(|f| f.kind == FieldKind::Totp)
 }
@@ -3998,5 +4010,35 @@ mod tests {
                 "{deliberate:?} did not count as somebody being here"
             );
         }
+    }
+
+    fn vault(dir: &tempfile::TempDir) -> Vault {
+        Vault::create(dir.path().join("v.vault"), "pw", KdfParams::insecure_fast()).unwrap()
+    }
+
+    /// With the history at its bound, filing the current state first evicts
+    /// the oldest revision and shifts every index — so the click would restore
+    /// a different revision, and the one asked for would be gone.
+    #[test]
+    fn restoring_from_a_full_history_restores_the_revision_that_was_clicked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault(&dir);
+        let id = vault.add_item_default(Item::new(ItemKind::Login, "Site").with_secret("v0"));
+        for n in 1..=locket_core::model::MAX_REVISIONS {
+            vault
+                .edit_item(id, |item| item.secret = format!("v{n}").into())
+                .unwrap();
+        }
+        let history = &vault.item(id).unwrap().history;
+        assert_eq!(history.len(), locket_core::model::MAX_REVISIONS);
+        assert_eq!(history[0].item.secret.expose(), "v0");
+
+        restore_revision(&mut vault, id, 0).unwrap();
+
+        assert_eq!(
+            vault.item(id).unwrap().secret.expose(),
+            "v0",
+            "a different revision came back"
+        );
     }
 }

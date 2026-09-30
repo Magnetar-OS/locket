@@ -173,6 +173,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - The window now locks itself after the idle time chosen in Settings. It
   never did: a check for changes to the vault file, made every few seconds
   while the vault is open, counted as you using the window.
+- Restoring an earlier version of an item whose history was full brought
+  back the version after the one you clicked, and deleted the one you
+  clicked for good. It now restores the version you chose.
 
 ### Security
 
