@@ -172,6 +172,11 @@ pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result
         Some(s) => Some(s.receive_locked_hint_changed().await),
         None => None,
     };
+    // A daemon started behind a locked screen has no change to hear about.
+    if let Some(s) = session.as_ref() {
+        let locked = s.locked_hint().await.unwrap_or(false);
+        state.lock().await.set_session_locked(locked);
+    }
 
     loop {
         tokio::select! {
@@ -184,7 +189,12 @@ pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result
                 lock(&state, "the session was locked", notify).await;
             }
             Some(change) = async { match hints.as_mut() { Some(s) => s.next().await, None => None } } => {
-                if change.get().await.unwrap_or(false) {
+                // Kept as well as acted on: while the screen is locked nobody
+                // can answer an unlock dialog, and requests are refused
+                // instead of raising one.
+                let locked = change.get().await.unwrap_or(false);
+                state.lock().await.set_session_locked(locked);
+                if locked {
                     lock(&state, "the screen locker came up", notify).await;
                 }
             }

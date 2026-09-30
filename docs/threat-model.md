@@ -74,7 +74,8 @@ nothing to derive from.
 **Can** ask for an unlock, which surfaces as a dialog in a titled window of
 locket's own — not a keystroke the asking process can see, and not a surface it
 can position or dress up. One dialog serves every request made while it is up,
-so asking repeatedly does not stack them.
+so asking repeatedly does not stack them; behind a locked screen no dialog is
+raised at all and the request is refused.
 **Can** see the collection index and the fact that a vault exists.
 
 ### C. A process running as you, vault **unlocked**

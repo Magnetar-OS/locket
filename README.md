@@ -610,6 +610,9 @@ as long as the dialog is answerable (two minutes), then stores again. Nothing
 is held open for the person, so there is nothing to time out.
 
 One dialog answers everybody who asked while it was up, whichever way it goes.
+And behind a locked screen nothing asks at all: nobody can see a dialog there,
+so a request that would raise one is refused at once and asks again when the
+screen is back.
 
 Its *collections* are a different matter, and that is why the vault keeps a
 plaintext index of them: a service that cannot answer `ReadAlias` or

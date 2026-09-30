@@ -18,6 +18,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - One unlock dialog answers every application that asked while it was up.
   Requests used to queue, each with two minutes of dialog of its own, raised
   one after another long after the applications had given up.
+- Nothing asks to be unlocked behind a locked screen. A request that would
+  raise the dialog there is refused at once and asks again when the screen is
+  back.
 
 ### Fixed
 

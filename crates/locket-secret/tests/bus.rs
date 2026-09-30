@@ -819,3 +819,45 @@ async fn requests_share_one_unlock_dialog_and_its_answer() {
     assert!(started.elapsed() < patience);
     assert_eq!(launches.load(Ordering::SeqCst), 1);
 }
+
+/// Behind a locked screen nobody can see an unlock dialog. A request that
+/// needs one is refused at once, and nothing is launched.
+#[tokio::test]
+async fn nothing_asks_to_be_unlocked_behind_a_locked_screen() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let launches = Arc::new(AtomicUsize::new(0));
+    let counted = launches.clone();
+    daemon
+        .lock_and_serve_prompts(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok("nobody".to_owned())
+        })
+        .await;
+    daemon.state.lock().await.set_session_locked(true);
+
+    let started = std::time::Instant::now();
+    let found = client.search_all().await;
+    assert_eq!(
+        locket_secret::testing::error_name(&found.unwrap_err()),
+        "org.freedesktop.Secret.Error.IsLocked"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1000),
+        "a search waited for a dialog nobody could see"
+    );
+
+    // The screen comes back: the same request asks again.
+    daemon.state.lock().await.set_session_locked(false);
+    let person = daemon.unlock_after(std::time::Duration::from_millis(300));
+    assert!(client.search_all().await.is_ok());
+    person.await.unwrap();
+    assert_eq!(
+        launches.load(Ordering::SeqCst),
+        0,
+        "the person answered first"
+    );
+}

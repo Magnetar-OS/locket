@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use locket_core::{
     Vault,
@@ -189,6 +189,9 @@ pub struct ServiceState {
     /// Drives the daemon's idle lock. An atomic because the read paths take
     /// `&self` and touching this must not force them to take the write lock.
     last_activity: AtomicU64,
+    /// Whether the screen is locked, as the daemon's session watcher last
+    /// heard. See [`ServiceState::set_session_locked`].
+    session_locked: AtomicBool,
 }
 
 impl ServiceState {
@@ -206,7 +209,23 @@ impl ServiceState {
             tree: Arc::default(),
             auto_lock_seconds: AtomicU64::new(0),
             last_activity: AtomicU64::new(now()),
+            session_locked: AtomicBool::new(false),
         }
+    }
+
+    /// Note whether the screen is locked.
+    ///
+    /// Behind a locked screen nobody can see an unlock dialog, let alone
+    /// answer it, so a request that needs one is refused at once instead of
+    /// holding its caller for a person who is not there. The vault itself
+    /// locks with the screen; this is what keeps it from asking to be
+    /// unlocked again until the screen is back.
+    pub fn set_session_locked(&self, locked: bool) {
+        self.session_locked.store(locked, Ordering::Relaxed);
+    }
+
+    pub fn session_locked(&self) -> bool {
+        self.session_locked.load(Ordering::Relaxed)
     }
 
     /// How long the vault may sit idle before it locks itself. 0 is never.
@@ -429,12 +448,17 @@ impl ServiceState {
     /// Ask the frontend to unlock, and report whether it did.
     ///
     /// Returns `false` immediately when no frontend is attached, so a headless
-    /// daemon fails fast instead of stalling every caller.
+    /// daemon fails fast instead of stalling every caller, and when the
+    /// screen is locked, where a dialog would be raised for nobody.
     pub async fn request_unlock(state: &SharedState) -> bool {
         let sender = {
             let guard = state.lock().await;
             if !guard.is_locked() {
                 return true;
+            }
+            if guard.session_locked() {
+                tracing::info!("the screen is locked; refusing instead of asking to unlock");
+                return false;
             }
             guard.prompts.clone()
         };
