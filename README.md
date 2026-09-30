@@ -9,8 +9,7 @@ stock session `gnome-keyring-daemon` holds those; installing locket takes
 them over rather than sitting beside it.
 
 The desktop application creates, edits and deletes items, generates passwords,
-shows live TOTP codes, imports from eight sources and enrols TPM and FIDO2
-unlock factors. There is a CLI, a panel applet, a PAM module that unlocks at
+shows live TOTP codes and imports from eleven sources. There is a CLI, a panel applet, a PAM module that unlocks at
 login, and a browser extension with its native messaging host.
 
 Each of those has been exercised against the software that actually calls it —
@@ -299,7 +298,7 @@ it had stored.
 Implemented: the vault and its cryptography, key slots (passphrase, TPM 2.0,
 FIDO2), the Secret Service (Service/Collection/Item/Session and Prompt
 objects), `org.locket.Manager1` for lock state, the Secret portal backend, the
-SSH agent, the daemon, the CLI, eight importers, the PAM module, the browser
+SSH agent, the daemon, the CLI, eleven importers, the PAM module, the browser
 extension and its native messaging host, the panel applet, the installer, and a
 GUI that creates, edits, deletes, generates, imports and enrols factors.
 
@@ -628,6 +627,17 @@ One dialog answers everybody who asked while it was up, whichever way it goes.
 And behind a locked screen nothing asks at all: nobody can see a dialog there,
 so a request that would raise one is refused at once and asks again when the
 screen is back.
+
+**Unattended jobs.** A locked vault needs a person, and nothing else can stand
+in for one. A script, a build or an agent that runs `git push` while you are
+away — screen unlocked, nobody at the dialog — waits: twenty seconds for each
+lookup, and a store waits for as long as the dialog is up. That is deliberate;
+a vault that answered faster by skipping the question would answer the next
+thing that asked, too. For work that runs without you, give it a credential
+path that needs no person: a tool's own non-interactive helper (for git,
+`credential.helper` set to `gh auth git-credential`, or a token in the job's
+environment), not the desktop keyring. Where a job only runs while you are
+there, unlocking the vault first is enough.
 
 Its *collections* are a different matter, and that is why the vault keeps a
 plaintext index of them: a service that cannot answer `ReadAlias` or
