@@ -17,7 +17,7 @@ use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::prelude::*;
 use cosmic::widget::{self, menu, nav_bar};
 use locket_core::{
-    Totp, Vault,
+    SecretString, Totp, Vault,
     crypto::KdfParams,
     generator::{self, PasswordRecipe},
     model::{FieldKind, Item, ItemKind, Timestamp, field_names},
@@ -110,8 +110,8 @@ impl Category {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    PassphraseChanged(String),
-    ConfirmChanged(String),
+    PassphraseChanged(SecretString),
+    ConfirmChanged(SecretString),
     ToggleShowPassphrase,
     UnlockSubmit,
     /// The vault-opening task finished. The vault travels in a shared slot
@@ -182,8 +182,8 @@ pub enum Message {
     /// The warning/passphrase dialog was accepted; open the save dialog.
     ExportContinue,
     ExportCancel,
-    ExportKdbxPassphrase(String),
-    ExportKdbxConfirm(String),
+    ExportKdbxPassphrase(SecretString),
+    ExportKdbxConfirm(SecretString),
     /// Where to write, or `None` when the save dialog was cancelled.
     ExportPicked(ExportFormat, Option<PathBuf>),
     /// A kdbx export finished off-thread; the vault comes home in the slot,
@@ -310,8 +310,8 @@ struct ExportFlow {
     /// The format awaiting its warning (plaintext) or passphrase (kdbx)
     /// dialog. `None` when no export is in flight.
     pending: Option<ExportFormat>,
-    kdbx_passphrase: String,
-    kdbx_confirm: String,
+    kdbx_passphrase: SecretString,
+    kdbx_confirm: SecretString,
     error: Option<String>,
 }
 
@@ -439,8 +439,8 @@ pub struct App {
     vault: Option<Vault>,
     screen: Screen,
 
-    passphrase: String,
-    confirm: String,
+    passphrase: SecretString,
+    confirm: SecretString,
     show_passphrase: bool,
     /// Whether each unlock field holds focus, so its placeholder can clear.
     passphrase_focused: bool,
@@ -958,7 +958,7 @@ impl App {
                     // Argon2id, again and off the UI thread: the daemon ran
                     // its own pass on its own copy of the file.
                     let vault = if unlocked && here {
-                        tokio::task::spawn_blocking(move || Vault::open(&path, &passphrase))
+                        tokio::task::spawn_blocking(move || Vault::open(&path, passphrase.expose()))
                             .await
                             .ok()
                             .and_then(Result::ok)
@@ -1058,14 +1058,14 @@ impl App {
                     } else {
                         fl!("unlock-passphrase")
                     },
-                    &self.passphrase,
+                    self.passphrase.expose(),
                     Some(Message::ToggleShowPassphrase),
                     !self.show_passphrase,
                 )
                 .id(PASSPHRASE_ID.clone())
                 .on_focus(Message::PassphraseFocus(true))
                 .on_unfocus(Message::PassphraseFocus(false))
-                .on_input(Message::PassphraseChanged)
+                .on_input(|v| Message::PassphraseChanged(v.into()))
                 .on_submit(|_| Message::UnlockSubmit),
             );
 
@@ -1077,13 +1077,13 @@ impl App {
                     } else {
                         fl!("unlock-confirm")
                     },
-                    &self.confirm,
+                    self.confirm.expose(),
                     Some(Message::ToggleShowPassphrase),
                     !self.show_passphrase,
                 )
                 .on_focus(Message::ConfirmFocus(true))
                 .on_unfocus(Message::ConfirmFocus(false))
-                .on_input(Message::ConfirmChanged)
+                .on_input(|v| Message::ConfirmChanged(v.into()))
                 .on_submit(|_| Message::UnlockSubmit),
             );
         }
@@ -1094,7 +1094,8 @@ impl App {
         // first thing an attacker would try.
         if creating && !self.passphrase.is_empty() {
             use locket_core::health::Strength;
-            let strength = locket_core::health::strength(&self.passphrase, &["locket", "vault"]);
+            let strength =
+                locket_core::health::strength(self.passphrase.expose(), &["locket", "vault"]);
             let named = match strength {
                 Strength::VeryWeak => fl!("strength-label-very-weak"),
                 Strength::Weak => fl!("strength-label-weak"),
@@ -1931,8 +1932,8 @@ impl cosmic::Application for App {
             vault_exists,
             vault: None,
             screen: Screen::Locked,
-            passphrase: String::new(),
-            confirm: String::new(),
+            passphrase: SecretString::default(),
+            confirm: SecretString::default(),
             show_passphrase: false,
             passphrase_focused: false,
             confirm_focused: false,
@@ -2069,7 +2070,7 @@ impl cosmic::Application for App {
                 // Kept only long enough to forward to the daemon, so one entry
                 // unlocks the GUI and every libsecret client together.
                 let for_daemon = passphrase.clone();
-                self.confirm.clear();
+                self.confirm = SecretString::default();
                 self.screen = Screen::Unlocking;
                 self.error = None;
 
@@ -2078,9 +2079,9 @@ impl cosmic::Application for App {
                 return cosmic::task::future(async move {
                     let outcome = tokio::task::spawn_blocking(move || {
                         if creating {
-                            Vault::create(&path, &passphrase, KdfParams::default())
+                            Vault::create(&path, passphrase.expose(), KdfParams::default())
                         } else {
-                            Vault::open(&path, &passphrase)
+                            Vault::open(&path, passphrase.expose())
                         }
                     })
                     .await;
@@ -2673,7 +2674,7 @@ impl cosmic::Application for App {
                     let params = security::KDF_PRESETS[self.security.kdf_index]();
                     let current = std::mem::take(&mut self.security.current);
                     let new = std::mem::take(&mut self.security.new1);
-                    self.security.new2.clear();
+                    self.security.new2 = SecretString::default();
                     self.security.changing = true;
                     self.security.error = None;
                     self.security.notice = None;
@@ -2687,13 +2688,13 @@ impl cosmic::Application for App {
                             let mut vault = vault;
                             // Proof of knowledge first: an unlocked window is
                             // not authority to rotate the owner's passphrase.
-                            let result = match Vault::open(&path, &current) {
+                            let result = match Vault::open(&path, current.expose()) {
                                 Err(locket_core::Error::WrongPassphrase) => {
                                     Err(fl!("error-current-passphrase-wrong"))
                                 }
                                 Err(e) => Err(e.to_string()),
                                 Ok(_) => vault
-                                    .change_passphrase(&new, params)
+                                    .change_passphrase(new.expose(), params)
                                     .map_err(|e| e.to_string()),
                             };
                             (vault, result)
@@ -2747,9 +2748,11 @@ impl cosmic::Application for App {
                         let outcome = tokio::task::spawn_blocking(move || {
                             let mut vault = vault;
                             let result = match factor {
-                                security::Factor::TpmPin => security::enroll_tpm(&mut vault, &pin),
+                                security::Factor::TpmPin => {
+                                    security::enroll_tpm(&mut vault, pin.expose())
+                                }
                                 security::Factor::SecurityKey => {
-                                    security::enroll_fido(&mut vault, &pin)
+                                    security::enroll_fido(&mut vault, pin.expose())
                                 }
                             };
                             (vault, result)
@@ -3244,7 +3247,7 @@ impl cosmic::Application for App {
                         return cosmic::task::future(async move {
                             let outcome = tokio::task::spawn_blocking(move || {
                                 let result = export_replacing(&path, |to| {
-                                    locket_import::export::to_kdbx(&vault, to, &passphrase)
+                                    locket_import::export::to_kdbx(&vault, to, passphrase.expose())
                                         .map_err(|e| e.to_string())
                                 })
                                 .map(|count| (count, path.display().to_string()));
@@ -3563,20 +3566,20 @@ impl cosmic::Application for App {
                     .push(
                         widget::text_input::secure_input(
                             fl!("dialog-kdbx-passphrase"),
-                            &self.export.kdbx_passphrase,
+                            self.export.kdbx_passphrase.expose(),
                             None,
                             true,
                         )
-                        .on_input(Message::ExportKdbxPassphrase),
+                        .on_input(|v| Message::ExportKdbxPassphrase(v.into())),
                     )
                     .push(
                         widget::text_input::secure_input(
                             fl!("dialog-kdbx-confirm"),
-                            &self.export.kdbx_confirm,
+                            self.export.kdbx_confirm.expose(),
                             None,
                             true,
                         )
-                        .on_input(Message::ExportKdbxConfirm)
+                        .on_input(|v| Message::ExportKdbxConfirm(v.into()))
                         .on_submit(|_| Message::ExportContinue),
                     );
                 if let Some(error) = &self.export.error {
@@ -3953,7 +3956,7 @@ impl Exposed<'_> {
         *self.editor = None;
         *self.import = None;
         *self.export = ExportFlow::default();
-        self.security.pin.clear();
+        self.security.pin = SecretString::default();
         self.security.clear_passphrase_form();
         self.security.error = None;
         self.security.notice = None;
@@ -4671,6 +4674,39 @@ mod tests {
         }
         for reason in ["idle", "shutdown", "error", "something new"] {
             assert!(!follows_daemon_lock(reason), "{reason}");
+        }
+    }
+
+    /// Messages are cloned and can be logged with `{:?}`, and the import job
+    /// travels to a worker thread. None of them may carry a passphrase or PIN
+    /// in a form that prints, or that is left behind in freed memory.
+    #[test]
+    fn passphrases_do_not_show_in_debug_output() {
+        let typed = "hunter2-passphrase";
+        let shown = [
+            format!("{:?}", Message::PassphraseChanged(typed.into())),
+            format!("{:?}", Message::ConfirmChanged(typed.into())),
+            format!("{:?}", Message::ExportKdbxPassphrase(typed.into())),
+            format!("{:?}", Message::ExportKdbxConfirm(typed.into())),
+            format!("{:?}", prompt::Message::PassphraseChanged(typed.into())),
+            format!("{:?}", security::Message::PinChanged(typed.into())),
+            format!("{:?}", security::Message::CurrentPassphrase(typed.into())),
+            format!("{:?}", security::Message::NewPassphrase(typed.into())),
+            format!("{:?}", security::Message::ConfirmPassphrase(typed.into())),
+            format!(
+                "{:?}",
+                import::Message::DatabasePasswordChanged(typed.into())
+            ),
+            format!(
+                "{:?}",
+                import::Job::from(&import::Import {
+                    database_password: typed.into(),
+                    ..Default::default()
+                })
+            ),
+        ];
+        for text in shown {
+            assert!(!text.contains(typed), "printed: {text}");
         }
     }
 

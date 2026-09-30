@@ -18,7 +18,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use cosmic::iced::{Length, window};
 use cosmic::prelude::*;
 use cosmic::widget;
-use locket_core::Vault;
+use locket_core::{SecretString, Vault};
 
 use crate::fl;
 
@@ -35,7 +35,7 @@ pub static PASSPHRASE_ID: LazyLock<widget::Id> =
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    PassphraseChanged(String),
+    PassphraseChanged(SecretString),
     ToggleShow,
     Submit,
     /// The daemon answered: `true` when the passphrase opened the vault. When
@@ -60,7 +60,7 @@ pub enum Message {
 pub struct Prompt {
     /// The window it lives in.
     pub window: window::Id,
-    pub passphrase: String,
+    pub passphrase: SecretString,
     pub show_passphrase: bool,
     /// Set while the passphrase is with the daemon. Argon2id is deliberately
     /// slow, so the button has to say that something is happening.
@@ -72,7 +72,7 @@ impl Prompt {
     pub fn new(window: window::Id) -> Self {
         Self {
             window,
-            passphrase: String::new(),
+            passphrase: SecretString::default(),
             show_passphrase: false,
             busy: false,
             error: None,
@@ -82,8 +82,9 @@ impl Prompt {
     /// Take the passphrase out on the way to the daemon.
     ///
     /// Moved rather than copied: the field is cleared by the same call that
-    /// hands it over, so nothing is left in the widget's buffer afterwards.
-    pub fn take_passphrase(&mut self) -> String {
+    /// hands it over, so nothing is left in the dialog's state afterwards, and
+    /// the value wipes itself when the last holder drops it.
+    pub fn take_passphrase(&mut self) -> SecretString {
         std::mem::take(&mut self.passphrase)
     }
 
@@ -98,12 +99,12 @@ impl Prompt {
             .push(
                 widget::text_input::secure_input(
                     fl!("unlock-passphrase"),
-                    &self.passphrase,
+                    self.passphrase.expose(),
                     Some(Message::ToggleShow),
                     !self.show_passphrase,
                 )
                 .id(PASSPHRASE_ID.clone())
-                .on_input(Message::PassphraseChanged)
+                .on_input(|v| Message::PassphraseChanged(v.into()))
                 .on_submit(|_| Message::Submit),
             );
         if let Some(error) = &self.error {

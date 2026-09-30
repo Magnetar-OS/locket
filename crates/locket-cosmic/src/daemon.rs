@@ -136,11 +136,11 @@ pub enum Reply {
 }
 
 /// Hand a passphrase to the daemon.
-pub async fn unlock(passphrase: String) -> Reply {
+pub async fn unlock(passphrase: locket_core::SecretString) -> Reply {
     let Some((_connection, proxy)) = client::connect().await else {
         return Reply::NoDaemon;
     };
-    match proxy.unlock(&passphrase).await {
+    match proxy.unlock(passphrase.expose()).await {
         Ok(true) => {
             tracing::info!("daemon unlocked");
             Reply::Done

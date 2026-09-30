@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 
 use cosmic::widget;
 use cosmic::{Apply, Element};
-use locket_core::Vault;
+use locket_core::{SecretString, Vault};
 use locket_import::{ImportSummary, dotenv};
 
 use crate::fl;
@@ -116,7 +116,7 @@ pub enum Message {
     Picked(Option<PathBuf>),
     CollectionChanged(String),
     GroupingSelected(usize),
-    DatabasePasswordChanged(String),
+    DatabasePasswordChanged(SecretString),
     ToggleShowDatabasePassword,
     Run,
     Cancel,
@@ -130,7 +130,7 @@ pub struct Import {
     pub path: Option<PathBuf>,
     pub collection: String,
     pub grouping: dotenv::Grouping,
-    pub database_password: String,
+    pub database_password: SecretString,
     pub show_database_password: bool,
     /// Set while the import runs; the vault is moved out of the app for the
     /// duration, so nothing else may touch it.
@@ -145,7 +145,7 @@ impl Default for Import {
             path: None,
             collection: Source::BrowserCsv.default_collection().to_owned(),
             grouping: dotenv::Grouping::PerFile,
-            database_password: String::new(),
+            database_password: SecretString::default(),
             show_database_password: false,
             busy: false,
             error: None,
@@ -304,12 +304,12 @@ impl Import {
             form = form.push(
                 widget::text_input::secure_input(
                     "",
-                    &self.database_password,
+                    self.database_password.expose(),
                     Some(Message::ToggleShowDatabasePassword),
                     !self.show_database_password,
                 )
                 .label(fl!("import-database-password"))
-                .on_input(Message::DatabasePasswordChanged),
+                .on_input(|v| Message::DatabasePasswordChanged(v.into())),
             );
         }
 
@@ -372,7 +372,7 @@ pub struct Job {
     pub path: Option<PathBuf>,
     pub collection: String,
     pub grouping: dotenv::Grouping,
-    pub database_password: String,
+    pub database_password: SecretString,
 }
 
 impl Job {
@@ -420,7 +420,13 @@ fn import_blocking(vault: &mut Vault, job: &Job) -> Outcome {
         }
         Source::KeePass => {
             let path = path.ok_or_else(|| fl!("import-error-no-database"))?;
-            locket_import::keepass::import_kdbx(vault, path, &job.database_password, None, into)
+            locket_import::keepass::import_kdbx(
+                vault,
+                path,
+                job.database_password.expose(),
+                None,
+                into,
+            )
         }
         Source::SshKeys => {
             let path = path.ok_or_else(|| fl!("import-error-no-folder"))?;

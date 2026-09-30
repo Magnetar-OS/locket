@@ -18,7 +18,7 @@ use crate::fl;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
-use locket_core::{Vault, slots::SlotFactor};
+use locket_core::{SecretString, Vault, slots::SlotFactor};
 use uuid::Uuid;
 
 /// A factor the user can add, and whether this build can add it.
@@ -151,13 +151,13 @@ pub fn enroll_fido(_vault: &mut Vault, _pin: &str) -> Result<Uuid, String> {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    PinChanged(String),
+    PinChanged(SecretString),
     Enroll(Factor),
     Remove(Uuid),
     Dismiss,
-    CurrentPassphrase(String),
-    NewPassphrase(String),
-    ConfirmPassphrase(String),
+    CurrentPassphrase(SecretString),
+    NewPassphrase(SecretString),
+    ConfirmPassphrase(SecretString),
     KdfSelected(usize),
     ChangePassphrase,
 }
@@ -188,14 +188,14 @@ pub static KDF_LABELS: std::sync::LazyLock<Vec<String>> =
 /// State for the security screen.
 #[derive(Default)]
 pub struct Security {
-    pub pin: String,
+    pub pin: SecretString,
     pub busy: Option<Factor>,
     pub error: Option<String>,
     pub notice: Option<String>,
     // -- the passphrase form --
-    pub current: String,
-    pub new1: String,
-    pub new2: String,
+    pub current: SecretString,
+    pub new1: SecretString,
+    pub new2: SecretString,
     pub kdf_index: usize,
     pub changing: bool,
 }
@@ -203,9 +203,9 @@ pub struct Security {
 impl Security {
     /// Wipe the passphrase form, keeping the rest of the screen's state.
     pub fn clear_passphrase_form(&mut self) {
-        self.current.clear();
-        self.new1.clear();
-        self.new2.clear();
+        self.current = SecretString::default();
+        self.new1 = SecretString::default();
+        self.new2 = SecretString::default();
     }
 }
 
@@ -294,11 +294,11 @@ impl Security {
             column = column.push(
                 widget::text_input::secure_input(
                     fl!("security-pin-placeholder"),
-                    &self.pin,
+                    self.pin.expose(),
                     None,
                     true,
                 )
-                .on_input(Message::PinChanged),
+                .on_input(|v| Message::PinChanged(v.into())),
             );
 
             let mut buttons = widget::row::with_capacity(2).spacing(spacing.space_xs);
@@ -342,29 +342,29 @@ impl Security {
                 // owner out by rotating the passphrase under them.
                 widget::text_input::secure_input(
                     fl!("security-current-passphrase"),
-                    &self.current,
+                    self.current.expose(),
                     None,
                     true,
                 )
-                .on_input(Message::CurrentPassphrase),
+                .on_input(|v| Message::CurrentPassphrase(v.into())),
             )
             .push(
                 widget::text_input::secure_input(
                     fl!("security-new-passphrase"),
-                    &self.new1,
+                    self.new1.expose(),
                     None,
                     true,
                 )
-                .on_input(Message::NewPassphrase),
+                .on_input(|v| Message::NewPassphrase(v.into())),
             )
             .push(
                 widget::text_input::secure_input(
                     fl!("security-confirm-passphrase"),
-                    &self.new2,
+                    self.new2.expose(),
                     None,
                     true,
                 )
-                .on_input(Message::ConfirmPassphrase),
+                .on_input(|v| Message::ConfirmPassphrase(v.into())),
             )
             .push(widget::text::caption_heading(fl!("security-kdf-cost")))
             .push(widget::dropdown(
