@@ -134,7 +134,8 @@ ok "gnome-keyring is serving the private bus, unlocked"
 # --- the import ------------------------------------------------------------
 if [ "$DRY" = 1 ]; then
     say "Reading (dry run — nothing will be written)"
-    DBUS_SESSION_BUS_ADDRESS="$BUS_ADDR" "$CLI" --vault "$VAULT" import --dry-run
+    DBUS_SESSION_BUS_ADDRESS="$BUS_ADDR" "$CLI" --vault "$VAULT" import --dry-run \
+        || die "the dry run failed"
     exit 0
 fi
 
