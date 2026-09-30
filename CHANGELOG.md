@@ -43,6 +43,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Unlocking the screen does not unlock the vault, and the README, the threat
   model and the PAM notes now say so: applications ask again after a screen
   lock, and locket's own dialog is what reopens it.
+- The README and the threat model state that every browser fill is confirmed
+  separately — nothing is remembered per site or for a while afterwards.
 
 ## [2.0.0] - 2026-09-29
 

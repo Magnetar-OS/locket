@@ -138,7 +138,9 @@ hold whatever the extension claims:
   secret only on "Allow once"; a refusal, a closed dialog, 30 seconds of
   silence or no graphical session all answer `Refused`. The extension can
   ask, and cannot answer. A hostile extension naming `github.com` gets a
-  dialog saying so — not the password.
+  dialog saying so — not the password. The allowance is for that one fill:
+  nothing is remembered per site or for a while afterwards, so every
+  password a compromised extension obtains is one a person clicked through.
 - **Metadata is not protected against it.** `Search` returns labels and
   usernames — never passwords — for whatever origin it is asked about, and
   a hostile extension can ask about every site it can think of. That the

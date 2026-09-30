@@ -926,7 +926,9 @@ hostile. So the host never exposes the vault wholesale:
   dialog naming the entry and the site (`locket --confirm-fill`, answered over
   a pipe only the host holds). The extension can ask for a password; it
   cannot say yes. Refusing, closing the dialog, or 30 seconds without an
-  answer returns `refused`.
+  answer returns `refused`. **Every fill asks.** There is no "remember this
+  site" and no grace period: an allowance that outlived the click it was given
+  for is one a compromised extension could spend.
 * Before asking, `get` re-checks the entry against the page the secret is
   about to be typed into, so a tab that navigated between the popup opening
   and the click is not filled with the previous site's password.
