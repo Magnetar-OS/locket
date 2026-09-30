@@ -108,24 +108,42 @@ async fn handle_connection(mut stream: UnixStream, agent: Arc<Mutex<Agent>>) -> 
 /// locked or unlocked. An async mutex would force that second caller to be
 /// async for no benefit.
 ///
-/// The lock is held while the request is answered, so a second one queues
-/// behind a pending touch. That is the honest behaviour with one token: it can
-/// only be touched for one thing at a time.
+/// The agent is *not* held while a person is asked to confirm a signature,
+/// nor while a security key waits for its touch: see
+/// [`crate::agent::PendingConfirmation`] and [`crate::agent::PendingTouch`].
+/// The key is looked up again once the answer is in, so a vault that locked in
+/// the meantime refuses the signature rather than signing after the lock.
 ///
-/// It is *not* held while a person is asked to confirm a signature: see
-/// [`crate::agent::PendingConfirmation`]. The key is looked up again once the
-/// answer is in, so a vault that locked in the meantime refuses the
-/// signature rather than signing after the lock.
+/// Touches still happen one at a time, behind [`TOUCHES`]: a token can only be
+/// touched for one thing at once, and a second request sent to it mid-touch
+/// would be refused as busy rather than wait its turn.
 async fn dispatch(agent: &Arc<Mutex<Agent>>, body: Vec<u8>) -> Result<Vec<u8>> {
     let agent = agent.clone();
     tokio::task::spawn_blocking(move || {
         let pending = lock(&agent).confirmation_for(&body);
         let confirmed = pending.is_some_and(|pending| pending.ask());
+        if lock(&agent).touch_for(&body, confirmed).is_some() {
+            let _one_at_a_time = TOUCHES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Asked again after waiting for the turn: the vault may have
+            // locked meanwhile, and then nobody should be asked to touch.
+            // Bound first so the agent is released before the touch: an
+            // `if let` keeps its scrutinee's guard alive through the block.
+            let touch = lock(&agent).touch_for(&body, confirmed);
+            if let Some(touch) = touch {
+                let assertion = touch.touch();
+                return lock(&agent).handle_touched(&body, confirmed, assertion);
+            }
+        }
         lock(&agent).handle_confirmed(&body, confirmed)
     })
     .await
     .map_err(|e| crate::Error::Io(std::io::Error::other(e.to_string())))
 }
+
+/// Held for the length of one security-key touch; see [`dispatch`].
+static TOUCHES: Mutex<()> = Mutex::new(());
 
 fn lock(agent: &Mutex<Agent>) -> std::sync::MutexGuard<'_, Agent> {
     agent.lock().unwrap_or_else(|poisoned| {
@@ -139,8 +157,10 @@ fn lock(agent: &Mutex<Agent>) -> std::sync::MutexGuard<'_, Agent> {
 mod tests {
     use super::*;
     use crate::confirm::SigningConfirmer;
+    use crate::sk::{SkSignRequest, TokenAssertion, TokenSigner};
     use crate::wire::Writer;
     use crate::{AgentKey, protocol};
+    use ssh_key::sha2::{Digest as _, Sha256};
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -164,6 +184,106 @@ mod tests {
             self.locked_in_time
                 .store(locking.is_finished(), Ordering::SeqCst);
             true
+        }
+    }
+
+    /// A token that, while it waits for its touch, has the vault lock
+    /// underneath it — the way the daemon's observer does when the screen
+    /// locks. Records whether the lock got through before the touch ended.
+    struct LocksWhileTouched {
+        agent: OnceLock<Arc<Mutex<Agent>>>,
+        lock_the_vault: bool,
+        locked_in_time: AtomicBool,
+    }
+
+    impl TokenSigner for LocksWhileTouched {
+        fn assert(&self, _request: &SkSignRequest) -> crate::Result<TokenAssertion> {
+            if self.lock_the_vault {
+                let agent = self.agent.get().expect("agent wired").clone();
+                let locking = std::thread::spawn(move || lock(&agent).forget_keys());
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !locking.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                self.locked_in_time
+                    .store(locking.is_finished(), Ordering::SeqCst);
+            }
+            // Well-formed enough for the signature blob; nothing verifies it.
+            let mut auth_data = Sha256::digest(b"ssh:").to_vec();
+            auth_data.push(0x01);
+            auth_data.extend_from_slice(&7u32.to_be_bytes());
+            Ok(TokenAssertion {
+                auth_data,
+                signature: vec![0u8; 64],
+            })
+        }
+    }
+
+    /// An `sk-ssh-ed25519` identity whose credential the token above claims.
+    fn security_key() -> AgentKey {
+        use ssh_key::{private, public};
+
+        let credential = ssh_key::PrivateKey::random(
+            &mut ssh_key::rand_core::OsRng,
+            ssh_key::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let public::KeyData::Ed25519(point) = credential.public_key().key_data() else {
+            panic!("expected an ed25519 key");
+        };
+        let sk = private::SkEd25519::new(
+            public::SkEd25519::new(*point, "ssh:"),
+            0x01,
+            b"credential-handle".to_vec(),
+        )
+        .unwrap();
+        let key =
+            ssh_key::PrivateKey::new(private::KeypairData::SkEd25519(sk), "token@laptop").unwrap();
+        let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+        AgentKey::from_openssh(&pem, None, None).unwrap()
+    }
+
+    /// A touch waits for a person, up to the token's own timeout. With the
+    /// agent held across it, a vault lock in the meantime could not drop the
+    /// keys — the daemon waited inside its state lock for the token to give
+    /// up. The lock has to get through, and the signature then be refused.
+    #[tokio::test]
+    async fn locking_during_a_touch_wait_is_not_blocked() {
+        for lock_the_vault in [true, false] {
+            let key = security_key();
+            let blob = key.public_blob.clone();
+            let token = Arc::new(LocksWhileTouched {
+                agent: OnceLock::new(),
+                lock_the_vault,
+                locked_in_time: AtomicBool::new(false),
+            });
+            let agent = Arc::new(Mutex::new(
+                Agent::with_keys(vec![key]).with_signer(token.clone()),
+            ));
+            token.agent.set(agent.clone()).ok().unwrap();
+
+            let mut request = Writer::new();
+            request
+                .write_u8(protocol::SSH_AGENTC_SIGN_REQUEST)
+                .write_string(&blob)
+                .write_string(b"data")
+                .write_u32(0);
+            let response = dispatch(&agent, request.as_slice().to_vec()).await.unwrap();
+
+            if lock_the_vault {
+                assert!(
+                    token.locked_in_time.load(Ordering::SeqCst),
+                    "the vault could not lock while the token waited for a touch"
+                );
+                assert_eq!(
+                    response,
+                    protocol::failure(),
+                    "signed with a key the vault had already dropped"
+                );
+            } else {
+                let (body, _) = protocol::take_message(&response).unwrap().unwrap();
+                assert_eq!(body[0], protocol::SSH_AGENT_SIGN_RESPONSE);
+            }
         }
     }
 

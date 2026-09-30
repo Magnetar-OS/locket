@@ -257,6 +257,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   codes whose account contains a `+`, which an earlier version had imported
   with a space in its place. The existing item is recognised and its search
   attributes are corrected.
+- Locking the screen, suspending or an idle lock no longer waits for a
+  security key to be touched when an SSH signature is pending on it. The
+  vault locks straight away and the pending signature is refused.
 
 ### Security
 

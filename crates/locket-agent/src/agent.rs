@@ -14,7 +14,7 @@ use crate::confirm::SigningConfirmer;
 use crate::error::{Error, Result};
 use crate::protocol::{self, Request};
 use crate::signing::{self, RsaHash};
-use crate::sk::{self, SkAlgorithm, SkSignRequest, TokenSigner};
+use crate::sk::{self, SkAlgorithm, SkSignRequest, TokenAssertion, TokenSigner};
 use crate::wire::Writer;
 
 /// `SSH_SK_USER_VERIFICATION_REQD` — the key was created `verify-required`, so
@@ -226,16 +226,31 @@ impl AgentKey {
             signer.describe(),
             self.comment
         );
-        let assertion = signer.assert(&SkSignRequest {
-            algorithm: token.algorithm,
-            application: token.application.clone(),
-            key_handle: token.key_handle.clone(),
-            message: data.to_vec(),
-            user_verification: token.user_verification,
-            pin: token.pin.clone(),
-        })?;
+        let assertion = signer.assert(&token.request(data))?;
         sk::signature_blob(token.algorithm, &token.application, &assertion)
     }
+}
+
+impl TokenKey {
+    /// What the token needs to sign `data` with this credential.
+    fn request(&self, data: &[u8]) -> SkSignRequest {
+        SkSignRequest {
+            algorithm: self.algorithm,
+            application: self.application.clone(),
+            key_handle: self.key_handle.clone(),
+            message: data.to_vec(),
+            user_verification: self.user_verification,
+            pin: self.pin.clone(),
+        }
+    }
+}
+
+/// Frame a signature blob as the agent's answer.
+fn framed_signature(blob: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.write_u8(protocol::SSH_AGENT_SIGN_RESPONSE)
+        .write_string(blob);
+    w.into_framed()
 }
 
 /// Whether a field's value reads as "yes".
@@ -308,6 +323,31 @@ impl PendingConfirmation {
                 false
             }
         }
+    }
+}
+
+/// A security-key signature waiting for someone to touch the token.
+///
+/// Lifted out of the agent for the same reason as [`PendingConfirmation`]: a
+/// touch takes as long as the person does, up to the token's own timeout, and
+/// the daemon has to be able to take the agent meanwhile to drop the keys
+/// when the vault locks. With the agent held across the touch, a screen lock
+/// waited — inside the daemon's state lock — until the token gave up.
+pub struct PendingTouch {
+    key: String,
+    request: SkSignRequest,
+    signer: Arc<dyn TokenSigner>,
+}
+
+impl PendingTouch {
+    /// Ask the token, and block until it answers or gives up.
+    pub fn touch(&self) -> Result<TokenAssertion> {
+        tracing::info!(
+            "touch your {} to sign with `{}`",
+            self.signer.describe(),
+            self.key
+        );
+        self.signer.assert(&self.request)
     }
 }
 
@@ -545,10 +585,31 @@ impl Agent {
     ) -> Result<Vec<u8>> {
         let key = self.key_for(key_blob).ok_or(Error::NoSuchKey)?;
         let blob = key.sign(data, flags, self.signer.as_deref(), confirmed)?;
-        let mut w = Writer::new();
-        w.write_u8(protocol::SSH_AGENT_SIGN_RESPONSE)
-            .write_string(&blob);
-        Ok(w.into_framed())
+        Ok(framed_signature(&blob))
+    }
+
+    /// The signature response for a touch that has already happened.
+    fn touched_response(
+        &self,
+        body: &[u8],
+        confirmed: bool,
+        assertion: Result<TokenAssertion>,
+    ) -> Result<Vec<u8>> {
+        let Request::Sign { key_blob, .. } = Request::parse(body)? else {
+            return Err(Error::Malformed(
+                "a touch answered something other than a signature request",
+            ));
+        };
+        let key = self.key_for(&key_blob).ok_or(Error::NoSuchKey)?;
+        let token = key.token.as_ref().ok_or(Error::NoSuchKey)?;
+        if key.confirm_each_use && !confirmed {
+            return Err(Error::Refused(format!(
+                "signing with `{}` was not confirmed",
+                key.comment
+            )));
+        }
+        let blob = sk::signature_blob(token.algorithm, &token.application, &assertion?)?;
+        Ok(framed_signature(&blob))
     }
 
     /// Seconds since the epoch when this agent last answered a request, or 0
@@ -573,6 +634,56 @@ impl Agent {
         })
     }
 
+    /// The touch `body` needs before it can be answered, if any.
+    ///
+    /// Only a signature request for a security-key identity needs one, and
+    /// only once any confirmation the key asks for has been given. The caller
+    /// touches with the agent released and passes the result to
+    /// [`Agent::handle_touched`] — see [`PendingTouch`] for why.
+    pub fn touch_for(&self, body: &[u8], confirmed: bool) -> Option<PendingTouch> {
+        let Ok(Request::Sign { key_blob, data, .. }) = Request::parse(body) else {
+            return None;
+        };
+        let key = self.key_for(&key_blob)?;
+        if key.confirm_each_use && !confirmed {
+            // `handle_confirmed` refuses it; nobody should be asked to touch.
+            return None;
+        }
+        Some(PendingTouch {
+            key: key.comment.clone(),
+            request: key.token.as_ref()?.request(&data),
+            signer: self.signer.clone()?,
+        })
+    }
+
+    /// Answer `body` with what a [`PendingTouch`] got from the token.
+    ///
+    /// The key is looked up afresh: if the vault locked while the token was
+    /// waiting, the keys are gone and the signature is refused whatever the
+    /// token said.
+    pub fn handle_touched(
+        &mut self,
+        body: &[u8],
+        confirmed: bool,
+        assertion: Result<TokenAssertion>,
+    ) -> Vec<u8> {
+        self.note_request();
+        match self.touched_response(body, confirmed, assertion) {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::debug!("refusing to sign: {e}");
+                protocol::failure()
+            }
+        }
+    }
+
+    fn note_request(&mut self) {
+        self.last_request = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+    }
+
     /// Handle one request body, asking for any confirmation it needs in
     /// place; returns the framed response.
     ///
@@ -594,10 +705,7 @@ impl Agent {
     /// question was open, the keys are gone and the signature is refused
     /// whatever the answer was.
     pub fn handle_confirmed(&mut self, body: &[u8], confirmed: bool) -> Vec<u8> {
-        self.last_request = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        self.note_request();
 
         let request = match Request::parse(body) {
             Ok(r) => r,
