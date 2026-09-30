@@ -256,6 +256,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   browser extension could send a site name carrying line breaks,
   text-direction controls or enough text to push the real question and its
   buttons out of view.
+- The locket window now locks when the vault is locked from the panel, when
+  the screen locks and when the machine suspends. It used to stay open on
+  every secret after all three; it still keeps its own idle timer rather
+  than following the daemon's.
 
 ### Documentation
 

@@ -2409,6 +2409,13 @@ impl cosmic::Application for App {
                     // mean.
                     return self.raise_prompt();
                 }
+                DaemonEvent::Locked { reason } => {
+                    if follows_daemon_lock(&reason) && self.screen == Screen::Browsing {
+                        // This window only: the daemon is already locked, and
+                        // telling it again would be telling it about itself.
+                        return self.lock_window();
+                    }
+                }
                 // Nothing to do: the next call simply finds no daemon and the
                 // frontend falls back to the vault file, which is a supported
                 // way to run.
@@ -3967,6 +3974,18 @@ impl Exposed<'_> {
     }
 }
 
+/// Whether the window locks when the daemon locks for `reason`.
+///
+/// The window holds its own copy of the key, so the daemon locking did not
+/// lock it: the panel's "Lock now", a locked screen or a suspend left the
+/// window open on every secret. Those are a person saying "lock", and the
+/// window follows them. Not the daemon's idle timer — work in this window
+/// is no use the daemon can see, and the window keeps its own idle clock —
+/// nor shutdown or an error, which say nothing about the person.
+fn follows_daemon_lock(reason: &str) -> bool {
+    matches!(reason, "request" | "session" | "suspend")
+}
+
 /// What this window asked the daemon to do alongside itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DaemonAsked {
@@ -4637,6 +4656,22 @@ mod tests {
             ClearDecision::Leave
         );
         assert_eq!(clear_decision(Some("x"), None, false), ClearDecision::Leave);
+    }
+
+    /// The window holds its own copy of the key, so a locked daemon did not
+    /// lock it. Someone asking — the panel's "Lock now", another window —
+    /// the screen locking and the machine suspending are all a person saying
+    /// "lock"; the daemon's own idle timer is not, because work in this
+    /// window is not use the daemon can see, and shutdown and errors are not
+    /// about the person at all.
+    #[test]
+    fn the_window_locks_with_the_daemon_when_a_person_would_expect_it() {
+        for reason in ["request", "session", "suspend"] {
+            assert!(follows_daemon_lock(reason), "{reason}");
+        }
+        for reason in ["idle", "shutdown", "error", "something new"] {
+            assert!(!follows_daemon_lock(reason), "{reason}");
+        }
     }
 
     /// The window unlocking or locking says nothing about the daemon unless

@@ -26,6 +26,9 @@ pub enum DaemonEvent {
     Connected { locked: bool },
     /// An application asked for a secret and the vault is locked.
     UnlockRequested,
+    /// The daemon locked, for this reason: `request`, `idle`, `session`,
+    /// `suspend`, `shutdown` or `error`.
+    Locked { reason: String },
     /// The daemon went away, or was never there.
     Unavailable,
 }
@@ -33,6 +36,7 @@ pub enum DaemonEvent {
 /// What the subscription hears from the bus.
 enum Heard {
     UnlockRequested,
+    Locked(String),
     /// The daemon's name changed hands: `true` when somebody owns it now.
     Owner(bool),
 }
@@ -69,9 +73,25 @@ pub fn subscription() -> Subscription<DaemonEvent> {
                     let _ = tx.send(DaemonEvent::Unavailable).await;
                     continue;
                 };
+                let Ok(locks) = proxy.receive_vault_locked().await else {
+                    let _ = tx.send(DaemonEvent::Unavailable).await;
+                    continue;
+                };
+                let locks = locks.filter_map(|signal| {
+                    std::future::ready(match signal.args() {
+                        Ok(args) => Some(Heard::Locked(args.reason().to_owned())),
+                        Err(e) => {
+                            tracing::warn!("unreadable VaultLocked signal: {e}");
+                            None
+                        }
+                    })
+                });
                 let mut heard = cosmic::iced::futures::stream::select(
-                    requests.map(|_| Heard::UnlockRequested),
-                    owners.map(|owner| Heard::Owner(owner.is_some())),
+                    cosmic::iced::futures::stream::select(
+                        requests.map(|_| Heard::UnlockRequested),
+                        owners.map(|owner| Heard::Owner(owner.is_some())),
+                    ),
+                    locks,
                 );
 
                 while let Some(event) = heard.next().await {
@@ -79,6 +99,10 @@ pub fn subscription() -> Subscription<DaemonEvent> {
                         Heard::UnlockRequested => {
                             tracing::info!("daemon asked for an unlock");
                             DaemonEvent::UnlockRequested
+                        }
+                        Heard::Locked(reason) => {
+                            tracing::info!(reason, "daemon locked");
+                            DaemonEvent::Locked { reason }
                         }
                         // A fresh connection, so the lock state is the new
                         // daemon's rather than a value cached from the old.
