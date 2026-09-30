@@ -20,7 +20,7 @@ use locket_core::{
     Totp, Vault,
     crypto::KdfParams,
     generator::{self, PasswordRecipe},
-    model::{FieldKind, Item, ItemKind, field_names},
+    model::{FieldKind, Item, ItemKind, Timestamp, field_names},
 };
 use uuid::Uuid;
 
@@ -2286,9 +2286,16 @@ impl cosmic::Application for App {
                         // by another process, or this is a different vault
                         // now. Say so and keep the form, so what was typed is
                         // still there to copy.
-                        if apply_edit(vault, id, item).is_err() {
+                        let base = self.editor.as_ref().and_then(|e| e.base_modified);
+                        if let Err(refused) = apply_edit(vault, id, item, base) {
                             if let Some(editor) = self.editor.as_mut() {
-                                editor.error = Some(fl!("editor-item-gone"));
+                                editor.error = Some(match refused {
+                                    EditRefused::Gone => fl!("editor-item-gone"),
+                                    EditRefused::ChangedElsewhere(when) => {
+                                        editor.base_modified = Some(when);
+                                        fl!("editor-changed-elsewhere")
+                                    }
+                                });
                             }
                             return Task::none();
                         }
@@ -3898,7 +3905,27 @@ fn readmit(screen: Screen, vault: Option<Vault>) -> Option<Vault> {
 
 /// Put what the editor saved into the vault: over item `id`, or as a new item
 /// when there is none.
-fn apply_edit(vault: &mut Vault, id: Option<Uuid>, item: Item) -> locket_core::Result<()> {
+///
+/// `base` is when the item had last changed as the editor opened it.
+fn apply_edit(
+    vault: &mut Vault,
+    id: Option<Uuid>,
+    item: Item,
+    base: Option<Timestamp>,
+) -> Result<(), EditRefused> {
+    // The draft was taken when the editor opened, and the vault under it is
+    // re-read whenever another process writes the file. Applying the whole
+    // draft over a newer item would quietly put back whatever that process
+    // changed — a password an application just rotated, say.
+    if let (Some(existing), Some(base)) = (id, base) {
+        match vault.item(existing) {
+            None => return Err(EditRefused::Gone),
+            Some(current) if current.modified != base => {
+                return Err(EditRefused::ChangedElsewhere(current.modified));
+            }
+            Some(_) => {}
+        }
+    }
     match id {
         // Applied field by field rather than replaced wholesale: the editor
         // only speaks for what its form shows, and a whole-item overwrite
@@ -3906,21 +3933,33 @@ fn apply_edit(vault: &mut Vault, id: Option<Uuid>, item: Item) -> locket_core::R
         // history. `edit_item` also files the state being replaced into
         // history first.
         Some(existing) => {
-            vault.edit_item(existing, move |slot| {
-                slot.label = item.label;
-                slot.kind = item.kind;
-                slot.secret = item.secret;
-                slot.attributes = item.attributes;
-                slot.fields = item.fields;
-                slot.favorite = item.favorite;
-                slot.expires = item.expires;
-            })?;
+            vault
+                .edit_item(existing, move |slot| {
+                    slot.label = item.label;
+                    slot.kind = item.kind;
+                    slot.secret = item.secret;
+                    slot.attributes = item.attributes;
+                    slot.fields = item.fields;
+                    slot.favorite = item.favorite;
+                    slot.expires = item.expires;
+                })
+                .map_err(|_| EditRefused::Gone)?;
         }
         None => {
             vault.add_item_default(item);
         }
     }
     Ok(())
+}
+
+/// Why an edit was not applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditRefused {
+    /// The item is no longer in the vault.
+    Gone,
+    /// Something else changed the item after the editor opened it; carries
+    /// when, so saving again can knowingly replace that change.
+    ChangedElsewhere(Timestamp),
 }
 
 /// Put revision `index` of item `id` back, returning the item's label.
@@ -4252,9 +4291,40 @@ mod tests {
             panic!("the editor did not save");
         };
         assert!(
-            apply_edit(&mut vault, id, *item).is_err(),
+            apply_edit(&mut vault, id, *item, Some(original.modified)).is_err(),
             "an edit to a deleted item was accepted"
         );
+    }
+
+    /// Another application replaced the password while the editor was open
+    /// on the item's name: saving the stale draft must not silently put the
+    /// old password back.
+    #[test]
+    fn a_draft_older_than_the_item_is_not_applied_silently() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut vault = vault(&dir);
+        let id = vault.add_item_default(Item::new(ItemKind::Login, "Site").with_secret("old"));
+        let mut editor = Editor::from_item(vault.item(id).unwrap());
+        let changed = {
+            let theirs = vault.item_mut(id).unwrap();
+            theirs.secret = "theirs".into();
+            theirs.modified += 1;
+            theirs.modified
+        };
+
+        editor.update(EditorMessage::Label("Site (work)".into()));
+        let Outcome::Save { id: target, item } = editor.update(EditorMessage::Save) else {
+            panic!("the editor did not save");
+        };
+        assert_eq!(
+            apply_edit(&mut vault, target, *item.clone(), editor.base_modified),
+            Err(EditRefused::ChangedElsewhere(changed))
+        );
+        assert_eq!(vault.item(id).unwrap().secret.expose(), "theirs");
+
+        // Told, and saving again: that is a decision, and it goes through.
+        assert_eq!(apply_edit(&mut vault, target, *item, Some(changed)), Ok(()));
+        assert_eq!(vault.item(id).unwrap().label, "Site (work)");
     }
 
     /// Import, enrolment, a passphrase change and a kdbx export hold the

@@ -183,6 +183,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   straight away. Closing it from the window menu or a keyboard shortcut, or
   cancelling it when locket had been started only to show it, left the
   application waiting two minutes.
+- Saving an item you had open in the editor no longer quietly undoes a
+  change another application made to it meanwhile, such as a password the
+  browser extension updated. locket says the item changed; saving again
+  replaces that change, and the replaced version stays in the item's
+  history.
 
 ### Security
 

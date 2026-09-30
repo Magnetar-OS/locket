@@ -192,6 +192,7 @@ editor-expires = Expires
 editor-expires-placeholder = YYYY-MM-DD, or leave empty
 editor-bad-expiry = Expiry wants a YYYY-MM-DD date, or nothing for never.
 editor-item-gone = This item is no longer in the vault — it was deleted while you were editing it — so there is nothing to save this over. Copy anything you want to keep, then cancel.
+editor-changed-elsewhere = Something else changed this item while you were editing it. Save again to replace that change with what is here — the replaced version stays in the item's history — or cancel to keep it.
 
 
 ## Import

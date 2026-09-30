@@ -86,6 +86,9 @@ pub struct Editor {
     original_secret: String,
     /// Decoded length of the binary secret, for the caption.
     binary_len: usize,
+    /// When the item had last changed as it was opened here, so a save can
+    /// tell whether something else changed it since. `None` for a new item.
+    pub base_modified: Option<locket_core::model::Timestamp>,
 }
 
 impl Editor {
@@ -126,6 +129,7 @@ impl Editor {
             secret_is_binary: false,
             original_secret: String::new(),
             binary_len: 0,
+            base_modified: None,
         }
     }
 
@@ -166,6 +170,7 @@ impl Editor {
             } else {
                 0
             },
+            base_modified: Some(item.modified),
         }
     }
 
