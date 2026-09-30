@@ -32,6 +32,14 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 - A search answered the moment the vault unlocked could name items that were
   not on the bus yet, so reading the secret it had just found failed.
+- `pam_locket.so` contains a panic in any of its hooks and answers as it
+  would with nothing to do, so a defect there cannot fail a login even on a
+  stack that lists it as `required`.
+
+### Documentation
+
+- How Linux-PAM treats `PAM_ABORT` from an `optional` module is written down
+  with the measurement behind it.
 
 ## [2.0.0] - 2026-09-29
 

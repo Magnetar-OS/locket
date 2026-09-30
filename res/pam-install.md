@@ -36,6 +36,15 @@ password change. The module is written to match: every path returns success or
 *decision*. It observes the token PAM already accepted and hands it to the
 daemon; it cannot let anyone in.
 
+A panic is covered twice. Each hook catches its own and answers as it would
+with nothing to do, so nothing unwinds into libpam. And if a hook ever did
+answer `PAM_ABORT`, an `optional` line ignores it: Linux-PAM reads `optional`
+as `[success=ok new_authtok_reqd=ok default=ignore]`, and its dispatcher looks
+the action up by return code before anything else. Measured on Linux-PAM 1.7.2
+with a module that returns `PAM_ABORT` from every hook: beside
+`pam_permit.so`, `optional` authenticates and opens the session; `required`
+fails both with "Critical error - immediate abort". Keep the line `optional`.
+
 `sm_chauthtok` does nothing on PAM's first (`PAM_PRELIM_CHECK`) pass, and on
 the second sends the old and new passwords to the daemon. The daemon proves
 the old one opens the vault before re-wrapping the key under the new one, so a

@@ -679,8 +679,9 @@ It is an **auth/password/session** module and nothing more. `sm_authenticate`
 returns `PAM_IGNORE`, so it takes no part in the authentication decision — it
 only observes a token PAM already accepted. Every failure path returns success:
 a password manager that stops you logging in is worse than one that does not
-auto-unlock. There is deliberately no `sudo` entry; authorising privilege
-escalation is a different module with a much higher bar.
+auto-unlock. That includes a panic: each hook contains its own, and answers as
+it would with nothing to do. There is deliberately no `sudo` entry; authorising
+privilege escalation is a different module with a much higher bar.
 
 The `password` line is what survives `passwd`. Change your login password
 without it and the vault keeps the old passphrase: auto-unlock quietly stops
