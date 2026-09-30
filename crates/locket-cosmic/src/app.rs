@@ -159,10 +159,12 @@ pub enum Message {
     AttachmentAdd,
     /// The picked file, read off the UI thread: name and bytes, or `None`
     /// when the dialog was cancelled, or an error string.
-    AttachmentLoaded(Option<Result<(String, Vec<u8>), String>>),
+    /// Carries the item it is for: the picker is its own window, and the
+    /// selection can move while it is open.
+    AttachmentLoaded(Uuid, Option<Result<(String, Vec<u8>), String>>),
     AttachmentSave(Uuid),
     /// Where to write attachment `0`, or `None` when cancelled.
-    AttachmentWrite(Uuid, Option<PathBuf>),
+    AttachmentWrite(Uuid, Uuid, Option<PathBuf>),
     /// The write finished: the path on success, the error otherwise.
     AttachmentWritten(Result<String, String>),
     AttachmentRemove(Uuid),
@@ -2944,9 +2946,9 @@ impl cosmic::Application for App {
             }
 
             Message::AttachmentAdd => {
-                if self.selected.is_none() {
+                let Some(item) = self.selected else {
                     return Task::none();
-                }
+                };
                 use cosmic::dialog::file_chooser::open::Dialog;
                 return cosmic::task::future(async move {
                     let chosen = Dialog::new()
@@ -2956,28 +2958,25 @@ impl cosmic::Application for App {
                         .ok()
                         .and_then(|r| r.url().to_file_path().ok());
                     let Some(path) = chosen else {
-                        return Message::AttachmentLoaded(None);
+                        return Message::AttachmentLoaded(item, None);
                     };
                     // Read off the UI thread; an attachment can be megabytes.
-                    let loaded = tokio::fs::read(&path).await.map_err(|e| e.to_string());
+                    let loaded = read_attachment(&path).await;
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "attachment".to_owned());
-                    Message::AttachmentLoaded(Some(loaded.map(|data| (name, data))))
+                    Message::AttachmentLoaded(item, Some(loaded.map(|data| (name, data))))
                 });
             }
 
-            Message::AttachmentLoaded(outcome) => {
+            Message::AttachmentLoaded(id, outcome) => {
                 let Some(outcome) = outcome else {
                     return Task::none(); // cancelled
                 };
                 let (name, data) = match outcome {
                     Ok(pair) => pair,
                     Err(e) => return self.toast(fl!("toast-attachment-failed", error = e)),
-                };
-                let Some(id) = self.selected else {
-                    return Task::none();
                 };
                 let Some(vault) = self.vault.as_mut() else {
                     return Task::none();
@@ -3007,6 +3006,7 @@ impl cosmic::Application for App {
                     return Task::none();
                 };
                 let name = attachment.name.clone();
+                let item_id = item.id;
                 use cosmic::dialog::file_chooser::save::Dialog;
                 return cosmic::task::future(async move {
                     let chosen = Dialog::new()
@@ -3016,15 +3016,15 @@ impl cosmic::Application for App {
                         .await
                         .ok()
                         .and_then(|r| r.url().and_then(|u| u.to_file_path().ok()));
-                    Message::AttachmentWrite(attachment_id, chosen)
+                    Message::AttachmentWrite(item_id, attachment_id, chosen)
                 });
             }
 
-            Message::AttachmentWrite(attachment_id, path) => {
+            Message::AttachmentWrite(item_id, attachment_id, path) => {
                 let Some(path) = path else {
                     return Task::none(); // cancelled
                 };
-                let Some(item) = self.selected_item() else {
+                let Some(item) = self.vault.as_ref().and_then(|v| v.item(item_id)) else {
                     return Task::none();
                 };
                 let Some(attachment) = item.attachment(attachment_id) else {
@@ -4157,6 +4157,28 @@ fn mime_for(name: &str) -> &'static str {
     }
 }
 
+/// Read a file picked to attach, refusing one over the attachment limit
+/// before reading it — the vault would refuse it anyway, after the whole
+/// file had been pulled into memory.
+async fn read_attachment(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let size = tokio::fs::metadata(path)
+        .await
+        .map_err(|e| e.to_string())?
+        .len();
+    if size > locket_core::model::MAX_ATTACHMENT_BYTES as u64 {
+        return Err(locket_core::Error::AttachmentTooLarge {
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            size: usize::try_from(size).unwrap_or(usize::MAX),
+            max: locket_core::model::MAX_ATTACHMENT_BYTES,
+        }
+        .to_string());
+    }
+    tokio::fs::read(path).await.map_err(|e| e.to_string())
+}
+
 /// Write attachment bytes where the save dialog pointed, 0600 first.
 ///
 /// The mode is set at open rather than after the write, so the plaintext is
@@ -4167,6 +4189,15 @@ async fn write_attachment(path: &std::path::Path, data: &[u8]) -> std::io::Resul
     #[cfg(unix)]
     opts.mode(0o600);
     let mut file = opts.open(path).await?;
+    // The mode above applies only when the file is created. Over an existing
+    // file the dialog let the person pick, it has to be set explicitly, or
+    // the plaintext keeps whatever the old file allowed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
     use tokio::io::AsyncWriteExt as _;
     file.write_all(data).await?;
     file.sync_all().await
@@ -4555,6 +4586,40 @@ mod tests {
         }
         assert!(daemon_notice(DaemonAsked::Unlock, Reply::Done).is_some());
         assert!(daemon_notice(DaemonAsked::Lock, Reply::Done).is_none());
+    }
+
+    /// The save dialog lets the person pick an existing file. Opening it with
+    /// a mode only sets that mode on a file it creates, so a 0644 file kept
+    /// 0644 and the decrypted attachment landed world-readable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_attachment_written_over_an_existing_file_is_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id_ed25519");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_attachment(&path, b"secret").await.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "written with mode {mode:o}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret");
+    }
+
+    /// An attachment is at most 10 MiB; a larger file is refused before it
+    /// is read into memory, not after.
+    #[tokio::test]
+    async fn an_oversized_file_is_refused_before_it_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("disk.img");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(locket_core::model::MAX_ATTACHMENT_BYTES as u64 + 1)
+            .unwrap();
+        assert!(read_attachment(&path).await.is_err());
+
+        std::fs::write(&path, b"small").unwrap();
+        assert_eq!(read_attachment(&path).await.unwrap(), b"small");
     }
 
     /// Copy A, then B ten seconds later: A's timer must leave B alone, or B

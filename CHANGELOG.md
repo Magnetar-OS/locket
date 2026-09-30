@@ -212,6 +212,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   word; a successful unlock now also says it reached other applications.
 - An import that reports it failed no longer leaves some of its items behind
   to be saved with your next change.
+- An attachment goes to the item you added it from, even if you select
+  another item while the file dialog is open, and saving one over an
+  existing file makes that file readable only by you.
 
 ### Security
 
