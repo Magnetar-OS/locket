@@ -204,6 +204,19 @@ fn auth_from_pin(pin: Option<&str>) -> Result<Option<Auth>> {
     }
 }
 
+/// The auth value to present when unsealing a slot.
+///
+/// Only a slot sealed with a PIN gets one. A PIN offered to a slot sealed
+/// without — the one typed for some other slot — would make the TPM check
+/// the session against an auth value the object does not have, and refuse.
+fn slot_auth(with_pin: bool, pin: Option<&str>) -> Result<Option<Auth>> {
+    if with_pin {
+        auth_from_pin(pin)
+    } else {
+        Ok(None)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TPM operations
 // ---------------------------------------------------------------------------
@@ -299,7 +312,7 @@ pub fn unseal(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
     let (public_bytes, private_bytes) = unpack(sealed)?;
     let public = Public::unmarshall(&public_bytes).map_err(|_| Error::MalformedBlob)?;
     let private = Private::try_from(private_bytes).map_err(|_| Error::MalformedBlob)?;
-    let auth = auth_from_pin(pin)?;
+    let auth = slot_auth(*with_pin, pin)?;
 
     let mut context = open_context()?;
     let data = context.execute_with_nullauth_session(|ctx| {
@@ -448,6 +461,17 @@ mod tests {
             "{:?}",
             unseal(&factor, Some("1234"))
         );
+    }
+
+    /// A slot sealed without a PIN has an empty auth value. Presenting a PIN
+    /// to it anyway — the one the person typed for some other slot — makes
+    /// the TPM compute the session HMAC with a key the object does not have,
+    /// and the unseal fails.
+    #[test]
+    fn a_pinless_slot_ignores_a_pin_it_was_not_sealed_with() {
+        assert!(slot_auth(false, Some("1234")).unwrap().is_none());
+        assert!(slot_auth(false, None).unwrap().is_none());
+        assert!(slot_auth(true, Some("1234")).unwrap().is_some());
     }
 
     #[test]
