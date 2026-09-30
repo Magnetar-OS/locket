@@ -52,6 +52,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - `pam_locket.so` contains a panic in any of its hooks and answers as it
   would with nothing to do, so a defect there cannot fail a login even on a
   stack that lists it as `required`.
+- Merging a diverged copy no longer reports "the copies are identical" and
+  throws the result away when every conflicting item had been edited more
+  recently here. The other copy's edits are filed into each item's history
+  and saved, and so are collection renames and trash that only the other
+  copy had.
 
 ### Documentation
 

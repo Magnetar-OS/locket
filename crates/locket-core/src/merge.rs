@@ -57,6 +57,15 @@ pub struct MergeReport {
     /// Conflicted edits where the losing side carried attachments the winner
     /// does not have; those attachments are gone, and the UI should say so.
     pub attachments_dropped: usize,
+    /// Collections the incoming copy had renamed or re-aliased more recently.
+    pub collections_updated: usize,
+    /// Losing sides of conflicted edits filed into the winner's history. This
+    /// is the only trace of a merge in which our edit won every conflict, and
+    /// it is a change to the vault like any other: it has to be saved.
+    pub filed: usize,
+    /// Trash entries taken from the incoming copy: items only its trash held,
+    /// and later deletion times for items both sides had trashed.
+    pub trash_updated: usize,
 }
 
 impl MergeReport {
@@ -70,8 +79,16 @@ impl std::fmt::Display for MergeReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} added, {} updated, {} deleted, {} restored, {} collections added",
-            self.added, self.updated, self.trashed, self.restored, self.collections_added
+            "{} added, {} updated, {} deleted, {} restored, {} collections added, \
+             {} collections updated, {} filed in history, {} trash entries updated",
+            self.added,
+            self.updated,
+            self.trashed,
+            self.restored,
+            self.collections_added,
+            self.collections_updated,
+            self.filed,
+            self.trash_updated
         )
     }
 }
@@ -88,6 +105,7 @@ pub fn merge(data: &mut VaultData, other: VaultData) -> MergeReport {
                     ours.label = c.label.clone();
                     ours.alias = c.alias.clone();
                     ours.modified = c.modified;
+                    report.collections_updated += 1;
                 }
             }
             None => {
@@ -200,9 +218,17 @@ fn merge_trashed_item(data: &mut VaultData, t: TrashedItem, report: &mut MergeRe
     match data.trash.iter_mut().find(|e| e.item.id == t.item.id) {
         // Trashed on both sides: keep one, under the newer deletion time so
         // the retention window counts from the later of the two deletes.
-        Some(ours) => ours.deleted = ours.deleted.max(t.deleted),
+        Some(ours) => {
+            if t.deleted > ours.deleted {
+                ours.deleted = t.deleted;
+                report.trash_updated += 1;
+            }
+        }
         // Only their trash has it: carry it over, retention and all.
-        None => data.trash.push(t),
+        None => {
+            data.trash.push(t);
+            report.trash_updated += 1;
+        }
     }
 }
 
@@ -223,6 +249,7 @@ fn absorb_loser(winner: &mut Item, loser: &Item, report: &mut MergeReport) {
         item: loser.snapshot(),
     });
     winner.trim_history();
+    report.filed += 1;
 }
 
 /// The collection an incoming item should land in: where the winning side had
@@ -449,6 +476,97 @@ mod tests {
         );
         assert_eq!(merged.item_count(), 1);
         assert!(merged.all_items().all(|(_, i)| i.history.is_empty()));
+    }
+
+    // The callers save only when the report says something changed, so a
+    // merge that alters the vault without counting it is a merge that is
+    // thrown away — and reported as "the copies are identical".
+    #[test]
+    fn a_losing_incoming_edit_counts_as_a_change() {
+        let (base, id) = vault_with("Login", "original");
+        let mut a = fork(&base);
+        let mut b = fork(&base);
+        {
+            let item = &mut a.collections[0].items[0];
+            item.secret = "from A".into();
+            item.modified = 2_000;
+        }
+        {
+            let item = &mut b.collections[0].items[0];
+            item.secret = "from B".into();
+            item.modified = 1_000;
+        }
+
+        let report = merge(&mut a, b);
+        let (_, item) = a.find_item(id).unwrap();
+        assert_eq!(item.secret.expose(), "from A");
+        assert_eq!(item.history.len(), 1, "the losing edit was not filed");
+        assert!(
+            report.changed(),
+            "a revision was filed but the report says nothing changed: {report}"
+        );
+        assert_eq!(report.filed, 1);
+        assert!(
+            report.to_string().contains("1 filed in history"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn a_collection_renamed_on_the_incoming_side_counts_as_a_change() {
+        let (base, _) = vault_with("Login", "s");
+        let mut a = fork(&base);
+        let mut b = fork(&base);
+        a.collections[0].modified = 1_000;
+        b.collections[0].label = "Personal".into();
+        b.collections[0].modified = 2_000;
+
+        let report = merge(&mut a, b);
+        assert_eq!(a.collections[0].label, "Personal");
+        assert!(
+            report.changed(),
+            "a collection was renamed but the report says nothing changed: {report}"
+        );
+        assert_eq!(report.collections_updated, 1);
+    }
+
+    #[test]
+    fn trash_taken_from_the_incoming_copy_counts_as_a_change() {
+        let (base, id) = vault_with("Login", "s");
+        let mut a = fork(&base);
+        let mut b = fork(&base);
+
+        // Only B's trash holds this one.
+        let gone = Item::new(ItemKind::Note, "Deleted on B");
+        let gone_id = gone.id;
+        b.default_collection_mut().items.push(gone);
+        b.trash_item(gone_id);
+
+        let report = merge(&mut a, fork(&b));
+        assert!(a.trashed(gone_id).is_some());
+        assert!(
+            report.changed(),
+            "a trash entry arrived but the report says nothing changed: {report}"
+        );
+        assert_eq!(report.trash_updated, 1);
+
+        // Trashed on both sides, later on B.
+        let redate = |data: &mut VaultData, at| {
+            data.trash_item(id);
+            data.trash
+                .iter_mut()
+                .filter(|t| t.item.id == id)
+                .for_each(|t| t.deleted = at);
+        };
+        redate(&mut a, 1_000);
+        redate(&mut b, 2_000);
+        let report = merge(&mut a, b);
+        assert_eq!(a.trashed(id).unwrap().deleted, 2_000);
+        assert!(
+            report.changed(),
+            "a deletion time moved but the report says nothing changed: {report}"
+        );
+        assert_eq!(report.trash_updated, 1);
     }
 
     #[test]
