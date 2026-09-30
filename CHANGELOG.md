@@ -159,6 +159,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   service-account keys (which are not imported), used to be passed over
   without a word; they are now counted as unreadable and named in the
   summary.
+- Importing a Bitwarden JSON export kept less than it should: SSH keys
+  arrived as empty logins, only the first website of a login survived, and a
+  card's expiry was dropped when only the month or the year was set. SSH
+  keys now import as SSH keys the agent can use, every website is kept, and
+  a partial expiry is kept as it is.
 
 ### Security
 

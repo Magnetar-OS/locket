@@ -61,7 +61,7 @@ struct Entry {
         deserialize_with = "null_as_default"
     )]
     collection_ids: Vec<String>,
-    /// 1 login, 2 secure note, 3 card, 4 identity.
+    /// 1 login, 2 secure note, 3 card, 4 identity, 5 SSH key.
     #[serde(rename = "type")]
     kind: Option<u8>,
     name: Option<String>,
@@ -71,6 +71,8 @@ struct Entry {
     login: Option<Login>,
     card: Option<Card>,
     identity: Option<Identity>,
+    #[serde(rename = "sshKey")]
+    ssh_key: Option<SshKey>,
     #[serde(default, deserialize_with = "null_as_default")]
     fields: Vec<CustomField>,
 }
@@ -100,6 +102,16 @@ struct Card {
     #[serde(rename = "expYear")]
     exp_year: Option<String>,
     code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SshKey {
+    #[serde(rename = "privateKey")]
+    private_key: Option<String>,
+    #[serde(rename = "publicKey")]
+    public_key: Option<String>,
+    #[serde(rename = "keyFingerprint")]
+    fingerprint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +159,7 @@ fn convert(e: &Entry, folders: &BTreeMap<String, String>) -> Item {
         Some(2) => ItemKind::Note,
         Some(3) => ItemKind::Card,
         Some(4) => ItemKind::Identity,
+        Some(5) => ItemKind::SshKey,
         _ => ItemKind::Login,
     };
     let label = e.name.clone().unwrap_or_else(|| "Unnamed".to_owned());
@@ -184,14 +197,19 @@ fn convert(e: &Entry, folders: &BTreeMap<String, String>) -> Item {
         if let Some(password) = login.password.as_deref().filter(|s| !s.is_empty()) {
             item.secret = password.into();
         }
-        if let Some(uri) = login
+        // The first URI is the item's URL; the rest are kept beside it
+        // rather than dropped.
+        let uris = login
             .uris
             .iter()
             .filter_map(|u| u.uri.as_deref())
-            .find(|u| !u.is_empty())
-        {
-            item.fields
-                .push(Field::new(field_names::URL, FieldKind::Url, uri));
+            .filter(|u| !u.is_empty());
+        for (n, uri) in uris.enumerate() {
+            let name = match n {
+                0 => field_names::URL.to_owned(),
+                n => format!("{} {}", field_names::URL, n + 1),
+            };
+            item.fields.push(Field::new(name, FieldKind::Url, uri));
         }
         if let Some(totp) = login.totp.as_deref().filter(|s| !s.is_empty()) {
             item.fields
@@ -213,11 +231,39 @@ fn convert(e: &Entry, folders: &BTreeMap<String, String>) -> Item {
                 item.fields.push(Field::text(name, v));
             }
         }
-        if let (Some(m), Some(y)) = (card.exp_month.as_deref(), card.exp_year.as_deref()) {
-            item.fields.push(Field::text("expiry", format!("{m}/{y}")));
+        // Either half may be missing; keep whichever is there.
+        let expiry = [card.exp_month.as_deref(), card.exp_year.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("/");
+        if !expiry.is_empty() {
+            item.fields.push(Field::text("expiry", expiry));
         }
         if let Some(code) = card.code.as_deref().filter(|s| !s.is_empty()) {
             item.fields.push(Field::secret("code", code));
+        }
+    }
+
+    // SSH keys, in the shape locket's own agent reads.
+    if let Some(key) = &e.ssh_key {
+        for (name, kind, value) in [
+            (
+                field_names::PRIVATE_KEY,
+                FieldKind::PrivateKey,
+                key.private_key.as_deref(),
+            ),
+            (
+                field_names::PUBLIC_KEY,
+                FieldKind::PublicKey,
+                key.public_key.as_deref(),
+            ),
+            ("fingerprint", FieldKind::Text, key.fingerprint.as_deref()),
+        ] {
+            if let Some(v) = value.filter(|s| !s.is_empty()) {
+                item.fields.push(Field::new(name, kind, v));
+            }
         }
     }
 
@@ -372,6 +418,54 @@ mod tests {
         let me = items.iter().find(|i| i.label == "Me").unwrap();
         assert_eq!(me.kind, ItemKind::Identity);
         assert_eq!(me.field_value("firstName"), Some("Ada"));
+    }
+
+    /// Shapes from Bitwarden's own export models (`CipherType.SshKey` is 5,
+    /// with `sshKey: {privateKey, publicKey, keyFingerprint}`): an SSH key
+    /// item used to arrive as an empty login, every URI after the first was
+    /// dropped, and a card with only an expiry year lost it.
+    #[test]
+    fn ssh_keys_extra_uris_and_partial_expiry_survive() {
+        let items = parse(
+            r#"{"items": [
+                {"id": "k1", "type": 5, "name": "Deploy key",
+                 "sshKey": {"privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n",
+                            "publicKey": "ssh-ed25519 AAAA", "keyFingerprint": "SHA256:abc"}},
+                {"id": "l1", "type": 1, "name": "Two sites",
+                 "login": {"uris": [{"uri": "https://a.example"}, {"uri": "https://b.example"}],
+                           "password": "pw"}},
+                {"id": "c1", "type": 3, "name": "Card",
+                 "card": {"number": "4111", "expMonth": null, "expYear": "2027"}}
+            ]}"#,
+        )
+        .unwrap();
+
+        let key = items.iter().find(|i| i.label == "Deploy key").unwrap();
+        assert_eq!(key.kind, ItemKind::SshKey);
+        let private = key
+            .field(field_names::PRIVATE_KEY)
+            .expect("the key was dropped");
+        assert_eq!(private.kind, FieldKind::PrivateKey);
+        assert_eq!(
+            key.field_value(field_names::PUBLIC_KEY),
+            Some("ssh-ed25519 AAAA")
+        );
+
+        let login = items.iter().find(|i| i.label == "Two sites").unwrap();
+        assert_eq!(
+            login.field_value(field_names::URL),
+            Some("https://a.example")
+        );
+        assert!(
+            login
+                .fields
+                .iter()
+                .any(|f| f.kind == FieldKind::Url && f.value.expose() == "https://b.example"),
+            "the second URI was dropped"
+        );
+
+        let card = items.iter().find(|i| i.label == "Card").unwrap();
+        assert_eq!(card.field_value("expiry"), Some("2027"));
     }
 
     #[test]
