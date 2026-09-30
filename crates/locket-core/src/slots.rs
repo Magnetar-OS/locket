@@ -51,7 +51,9 @@ pub enum SlotFactor {
         /// brick a slot somebody already enrolled.
         #[serde(default)]
         parent: TpmParent,
-        /// PCRs bound into the policy, if any. Empty means PIN only.
+        /// PCRs to bind into the policy. Always empty: no PCR policy is built
+        /// yet, so `locket-tpm` refuses a slot that lists any rather than
+        /// unsealing it on the PIN alone.
         #[serde(default)]
         pcrs: Vec<u32>,
         /// Whether unsealing requires a PIN (a TPM `authValue`).

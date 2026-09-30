@@ -275,11 +275,20 @@ pub fn unseal(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
         sealed,
         with_pin,
         parent,
-        ..
+        pcrs,
     } = factor
     else {
         return Err(Error::WrongFactor);
     };
+
+    // No PCR policy is ever built, so a slot that lists PCRs would be
+    // unsealed on its PIN alone while claiming more. Refuse it, and before
+    // the TPM is opened: nothing here needs the chip to know that.
+    if !pcrs.is_empty() {
+        return Err(Error::Other(format!(
+            "this slot is bound to PCRs {pcrs:?}, and PCR policies are not supported"
+        )));
+    }
 
     // Check this before touching the TPM: a needless failed unseal costs a
     // dictionary-attack strike against the whole device.
@@ -421,6 +430,24 @@ mod tests {
         // Must fail the PIN check rather than spend a lockout strike.
         assert!(matches!(unseal(&factor, None), Err(Error::PinRequired)));
         assert!(matches!(unseal(&factor, Some("")), Err(Error::PinRequired)));
+    }
+
+    /// `pcrs` promises a PCR policy, and no policy is ever built: a slot
+    /// claiming one would unseal on the PIN alone while saying otherwise.
+    /// Refused before the TPM is opened, like a missing PIN.
+    #[test]
+    fn a_slot_claiming_pcrs_is_refused_without_touching_hardware() {
+        let factor = SlotFactor::Tpm2 {
+            sealed: pack(&[0u8; 8], &[0u8; 8]),
+            parent: Default::default(),
+            pcrs: vec![7],
+            with_pin: true,
+        };
+        assert!(
+            matches!(unseal(&factor, Some("1234")), Err(Error::Other(ref msg)) if msg.contains("PCR")),
+            "{:?}",
+            unseal(&factor, Some("1234"))
+        );
     }
 
     #[test]
