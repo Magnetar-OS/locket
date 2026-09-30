@@ -803,6 +803,25 @@ impl App {
         closed
     }
 
+    /// The person turned the dialog down: take it away and refuse the request
+    /// that raised it.
+    fn dismiss_prompt(&mut self) -> Task<Message> {
+        self.unlock_requested_by_app = false;
+        let Some(prompt) = self.prompt.take() else {
+            return Task::none();
+        };
+        let only_window = self.core.main_window_id().is_none();
+        let mut task = Task::none();
+        for step in dismissal(only_window) {
+            task = task.chain(match step {
+                Dismissal::Close => cosmic::iced::window::close(prompt.window),
+                Dismissal::Refuse => Self::refuse_unlock(),
+                Dismissal::Exit => cosmic::iced::exit(),
+            });
+        }
+        task
+    }
+
     /// Tell the daemon the unlock request was refused, so the application
     /// that asked hears "no" now rather than after the daemon's timeout.
     fn refuse_unlock() -> Task<Message> {
@@ -931,10 +950,7 @@ impl App {
                 return Task::batch(tasks);
             }
 
-            prompt::Message::Dismiss => {
-                self.unlock_requested_by_app = false;
-                return Task::batch([self.close_prompt(), Self::refuse_unlock()]);
-            }
+            prompt::Message::Dismiss => return self.dismiss_prompt(),
 
             prompt::Message::OpenWindow => {
                 // The dialog stays: it is the thing that can answer the
@@ -2497,7 +2513,9 @@ impl cosmic::Application for App {
                     .as_ref()
                     .is_some_and(|prompt| prompt.window == id)
                 {
-                    return self.close_prompt();
+                    // Closing it from the compositor is turning it down, the
+                    // same as its Cancel button.
+                    return self.dismiss_prompt();
                 }
             }
 
@@ -3843,6 +3861,31 @@ impl Exposed<'_> {
     }
 }
 
+/// One step of turning the unlock dialog down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dismissal {
+    /// Take the window away.
+    Close,
+    /// Tell the daemon, so the application that asked is refused now.
+    Refuse,
+    /// End the process, when the dialog was the only reason it was running.
+    Exit,
+}
+
+/// What turning the unlock dialog down does, in the order it happens.
+///
+/// The window goes first, so it disappears the moment it is dismissed; the
+/// refusal is a round trip to the daemon, and has to finish before the
+/// process ends — an exit issued alongside it ended the process first, and
+/// the application that asked waited out the daemon's two-minute timeout.
+fn dismissal(only_window: bool) -> Vec<Dismissal> {
+    let mut steps = vec![Dismissal::Close, Dismissal::Refuse];
+    if only_window {
+        steps.push(Dismissal::Exit);
+    }
+    steps
+}
+
 /// Take back a vault that a worker had for the duration of its job.
 ///
 /// Only into a window that is still open. The lock button stays live while a
@@ -4222,6 +4265,22 @@ mod tests {
         let (locked, open) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         assert!(readmit(Screen::Locked, Some(vault(&locked))).is_none());
         assert!(readmit(Screen::Browsing, Some(vault(&open))).is_some());
+    }
+
+    /// Refusing needs a round trip to the daemon; ending the process first
+    /// would drop it, leaving the application that asked to wait out the
+    /// daemon's two-minute timeout.
+    #[test]
+    fn turning_the_dialog_down_refuses_before_the_process_ends() {
+        for only_window in [true, false] {
+            let steps = dismissal(only_window);
+            let refuse = steps.iter().position(|s| *s == Dismissal::Refuse);
+            assert!(refuse.is_some(), "{steps:?} never refuses");
+            if let Some(exit) = steps.iter().position(|s| *s == Dismissal::Exit) {
+                assert!(refuse < Some(exit), "{steps:?} exits before refusing");
+            }
+            assert_eq!(steps.contains(&Dismissal::Exit), only_window);
+        }
     }
 
     /// Locking drops the vault; this is everything else that came out of it

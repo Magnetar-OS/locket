@@ -179,6 +179,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Saving an item that had been deleted elsewhere while you were editing it
   said "Saved" and threw your changes away. The editor now stays open and
   says the item is gone, so you can copy what you typed.
+- Turning down the unlock dialog now refuses the application that asked
+  straight away. Closing it from the window menu or a keyboard shortcut, or
+  cancelling it when locket had been started only to show it, left the
+  application waiting two minutes.
 
 ### Security
 
