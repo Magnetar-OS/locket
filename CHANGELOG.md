@@ -109,6 +109,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   now refused with an error when unlocked. It used to make the daemon,
   locket or the CLI try to allocate terabytes of memory and crash, or hang
   for good.
+- SSH keys imported from `~/.ssh` were stored as an ordinary note field, so
+  opening the item showed the private key in the clear and searching could
+  match its contents. Newly imported keys are stored as private-key fields,
+  masked until revealed. Keys imported earlier keep the old field kind.
 
 ### Documentation
 

@@ -251,7 +251,7 @@ pub fn scan(dir: &Path) -> Result<Vec<KeyFile>> {
 pub fn item_for(key: &KeyFile, pem: &str) -> Item {
     let mut item = Item::new(ItemKind::SshKey, key.name.clone()).with_field(Field::new(
         field_names::PRIVATE_KEY,
-        FieldKind::Note,
+        FieldKind::PrivateKey,
         pem,
     ));
 
@@ -550,6 +550,22 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
             item.secret.expose(),
             "",
             "the secret is reserved for the key's passphrase"
+        );
+    }
+
+    /// The key is the most sensitive thing on the item. Stored as a note it
+    /// was shown in the clear, searchable, and exported unprotected.
+    #[test]
+    fn the_private_key_field_is_a_sensitive_kind() {
+        let dir = tree();
+        let key = &scan(dir.path()).unwrap()[0];
+        let item = item_for(key, UNENCRYPTED);
+        let field = item.field(field_names::PRIVATE_KEY).unwrap();
+        assert_eq!(field.kind, FieldKind::PrivateKey);
+        assert!(field.kind.is_sensitive());
+        assert!(
+            !item.matches("b3BlbnNzaC1rZXktdjE"),
+            "the key body is searchable"
         );
     }
 
