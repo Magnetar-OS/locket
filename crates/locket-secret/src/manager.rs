@@ -22,10 +22,7 @@ use tokio::sync::Mutex;
 use zbus::object_server::SignalEmitter;
 use zbus::{ObjectServer, fdo, interface};
 
-use crate::service::{ServiceState, SharedState, sync_objects};
-
-/// How long a Secret Service `Prompt` waits for the user before giving up.
-pub const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+use crate::service::{PromptRequest, ServiceState, SharedState, sync_objects};
 
 pub const MANAGER_PATH: &str = "/org/locket/Manager";
 
@@ -203,6 +200,12 @@ impl Manager {
 /// two paths independent: an unlock typed directly into the frontend, with no
 /// prompt outstanding, resolves any pending prompt just the same.
 ///
+/// One dialog answers everybody. Requests that arrive while it is up wait on
+/// it and get its answer, whichever way it goes; a request whose caller has
+/// stopped waiting raises nothing. Otherwise each application that asked
+/// during one unattended stretch would have its own two minutes of dialog
+/// queued up, re-launched one after another long after it had given up.
+///
 /// Signing confirmations do not come through here: see [`crate::frontend`].
 ///
 /// `launch` starts a frontend when none answered the signal —
@@ -210,11 +213,14 @@ impl Manager {
 pub async fn serve_prompts(
     connection: zbus::Connection,
     state: SharedState,
-    mut requests: tokio::sync::mpsc::Receiver<crate::service::PromptRequest>,
+    mut requests: tokio::sync::mpsc::Receiver<PromptRequest>,
     launch: impl Fn() -> std::io::Result<String>,
 ) {
-    let refused = state.lock().await.unlock_refused.clone();
-    while let Some(request) = requests.recv().await {
+    let (refused, patience) = {
+        let guard = state.lock().await;
+        (guard.unlock_refused.clone(), guard.config.prompt_timeout)
+    };
+    while let Some(request) = next_waiting(&mut requests).await {
         let reply = request.reply;
 
         if !state.lock().await.is_locked() {
@@ -250,9 +256,9 @@ pub async fn serve_prompts(
                     Err(e) => tracing::warn!("could not launch the frontend to prompt: {e}"),
                 }
             }
-            let unlocked = wait_until_unlocked(&state, PROMPT_TIMEOUT).await;
+            let unlocked = wait_until_unlocked(&state, patience).await;
             if !unlocked {
-                tracing::info!("unlock request timed out after {PROMPT_TIMEOUT:?}");
+                tracing::info!("unlock request timed out after {patience:?}");
             }
             unlocked
         };
@@ -260,15 +266,32 @@ pub async fn serve_prompts(
             unlocked = answer => unlocked,
             () = refused.notified() => {
                 tracing::info!("the unlock dialog was dismissed; refusing");
-                // Everything queued behind this request was waiting on the
-                // same dialog, and gets the same answer.
-                while let Ok(queued) = requests.try_recv() {
-                    let _ = queued.reply.send(false);
-                }
                 false
             }
         };
         let _ = reply.send(unlocked);
+        // Everything queued behind this request was waiting on the same
+        // dialog, and gets the same answer.
+        while let Ok(queued) = requests.try_recv() {
+            let _ = queued.reply.send(unlocked);
+        }
+    }
+}
+
+/// The next request somebody is still waiting on.
+///
+/// A `SearchItems` call stops waiting before its client's call timeout does
+/// ([`crate::service::UNLOCK_WAIT`]), and its request may still be in the
+/// queue. Serving it would raise a dialog for an application that has already
+/// been answered.
+async fn next_waiting(
+    requests: &mut tokio::sync::mpsc::Receiver<PromptRequest>,
+) -> Option<PromptRequest> {
+    loop {
+        let request = requests.recv().await?;
+        if !request.reply.is_closed() {
+            return Some(request);
+        }
     }
 }
 
@@ -299,7 +322,23 @@ mod tests {
         Arc::new(Mutex::new(ServiceState::new(ServiceConfig {
             bus_name: "org.locket.test".into(),
             autosave: false,
+            ..ServiceConfig::default()
         })))
+    }
+
+    /// A caller that stopped waiting must not get a dialog raised for it.
+    #[tokio::test]
+    async fn a_request_nobody_waits_on_is_passed_over() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (abandoned, gone) = tokio::sync::oneshot::channel();
+        tx.send(PromptRequest { reply: abandoned }).await.unwrap();
+        drop(gone);
+        let (live, mut answer) = tokio::sync::oneshot::channel();
+        tx.send(PromptRequest { reply: live }).await.unwrap();
+
+        let next = next_waiting(&mut rx).await.expect("the live request");
+        next.reply.send(true).unwrap();
+        assert_eq!(answer.try_recv(), Ok(true));
     }
 
     #[tokio::test]

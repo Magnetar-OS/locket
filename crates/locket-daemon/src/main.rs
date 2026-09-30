@@ -174,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = ServiceState::new(ServiceConfig {
         bus_name: bus_name.clone(),
-        autosave: true,
+        ..ServiceConfig::default()
     });
     if let Some(vault) = vault {
         state.vault = Some(vault);

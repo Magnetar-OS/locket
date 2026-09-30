@@ -257,7 +257,10 @@ identities and the confirm-each-use gate, the security-key signature encoding
 against a software token, two writers racing for the vault
 file, the unlock socket's rekey framing, the portal's key derivation, every importer's parsing and classification, the
 browser host's origin matching, and the GUI's editor and import state machines.
-All of that runs without hardware. The TPM and FIDO2 round trips are
+The Secret Service objects are exercised over a real message bus — a private
+`dbus-daemon` each test starts for itself, never the session's — by a raw
+client, by libsecret's own `secret-tool`, and by `locket-cli` run beside a
+daemon. All of that runs without hardware. The TPM and FIDO2 round trips are
 `#[ignore]`d behind environment variables because they need a chip and a touch
 — the TPM ones have been run against a real AMD fTPM and `swtpm` (see
 [On authorising `sudo`](#on-authorising-sudo)); the FIDO2 ones have not been
@@ -390,6 +393,10 @@ binaries actually link against, read off `ldd` rather than guessed:
 cargo build --release          # ~4 minutes cold, ~75 MB of binaries
 cargo test --workspace         # no hardware needed; TPM and FIDO2 tests are #[ignore]d
 ```
+
+The tests also run two programs: `dbus-daemon` (Arch `dbus`, Debian `dbus`) for
+the private buses, and libsecret's `secret-tool` (Arch `libsecret`, Debian
+`libsecret-tools`).
 
 Both hardware factors are cargo features (`tpm`, `fido`, on by default).
 Without them neither library is needed, the GUI still builds, and it says the
@@ -589,7 +596,20 @@ attributes live inside the sealed body, which is the point, but it means
 gnome-keyring's trick of listing locked items is unavailable. Returning "no
 matches" would be a lie clients believe, reporting a secret as *missing* rather
 than locked. So `SearchItems` on a locked vault emits `UnlockRequested` and
-waits.
+waits — for twenty seconds. GDBus, libdbus, sd-bus and QtDBus all give a method
+call 25, and a call still held when the client gives up is answered to nobody:
+`secret-tool` and `git credential-libsecret` print "Timeout was reached" and
+move on. At twenty seconds the search says `IsLocked`, which is the truth. The
+dialog stays where it is: unlock when you get to it, and the application's
+next attempt finds the vault open.
+
+Every other call answers `IsLocked` at once, because that is the answer
+libsecret does something with. A store into a locked vault calls `Unlock`, gets
+a `Prompt`, and waits on its `Completed` signal — which has no deadline — for
+as long as the dialog is answerable (two minutes), then stores again. Nothing
+is held open for the person, so there is nothing to time out.
+
+One dialog answers everybody who asked while it was up, whichever way it goes.
 
 Its *collections* are a different matter, and that is why the vault keeps a
 plaintext index of them: a service that cannot answer `ReadAlias` or
@@ -626,9 +646,14 @@ when the dialog does. A `--prompt` start that finds an instance already running
 hands the request over D-Bus to that one, which raises its dialog rather than
 its window.
 
-Verified end to end on a private bus: with the vault locked, `secret-tool
-lookup` blocks, `UnlockRequested` fires, a frontend answering with `Unlock`
-releases the pending call, and the client gets its secret. A wrong passphrase
+Tested on a private bus with libsecret itself (`secret-tool`, in
+`crates/locket-secret/tests/libsecret.rs`): with the vault locked, a lookup
+waits, `UnlockRequested` fires, an unlock releases the pending call and the
+client gets its secret; a store goes through `Unlock` and the `Prompt` and
+lands once the vault opens; and with nobody answering, both are told the vault
+is locked instead of timing out. `git credential-libsecret` was run by hand
+against the same arrangement: a store whose unlock came forty seconds after it
+asked succeeded, where it used to fail at twenty-five. A wrong passphrase
 returns `false` rather than a D-Bus error, since a typo is an expected outcome
 and not a fault.
 

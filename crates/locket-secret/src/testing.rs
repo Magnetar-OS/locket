@@ -21,7 +21,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
 use crate::manager::{MANAGER_PATH, Manager};
-use crate::service::{ServiceConfig, ServiceState, SharedState, register_objects, spawn_upkeep};
+use crate::service::{
+    ServiceConfig, ServiceState, SharedState, register_objects, spawn_upkeep, sync_objects,
+};
 use locket_core::Vault;
 use locket_core::crypto::KdfParams;
 use tokio::sync::Mutex;
@@ -80,6 +82,11 @@ impl PrivateBus {
         }
     }
 
+    /// Where this bus listens, for a client that is its own process.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
     /// A new connection to this bus.
     pub async fn connect(&self) -> zbus::Connection {
         zbus::connection::Builder::address(self.address.as_str())
@@ -109,6 +116,13 @@ pub struct Daemon {
 
 pub const PASSPHRASE: &str = "correct horse";
 
+/// How long a locked search holds its caller here: the daemon's twenty
+/// seconds, scaled down so a test of "nobody answered" does not take them.
+pub const UNLOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// How long an unlock dialog stays answerable here; two minutes in the daemon.
+pub const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
 impl Daemon {
     /// Serve a fresh vault, unlocked, with its objects published the way
     /// `locketd` publishes them.
@@ -130,6 +144,8 @@ impl Daemon {
         let mut state = ServiceState::new(ServiceConfig {
             bus_name: "org.locket.test".into(),
             autosave: true,
+            unlock_wait: UNLOCK_WAIT,
+            prompt_timeout: PROMPT_TIMEOUT,
         });
         state.index = Vault::read_index(&vault_path).unwrap_or_default();
         state.vault = vault;
@@ -162,6 +178,41 @@ impl Daemon {
             vault_path,
             _dir: dir,
         }
+    }
+
+    /// Lock the vault and answer unlock requests the way `locketd` does, with
+    /// `launch` standing in for starting the GUI — never the real one: a test
+    /// must not put a window on this desktop.
+    pub async fn lock_and_serve_prompts(
+        &self,
+        launch: impl Fn() -> std::io::Result<String> + Send + Sync + 'static,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        {
+            let mut state = self.state.lock().await;
+            state.prompts = Some(tx);
+            state.lock_vault();
+        }
+        sync_objects(self.server.object_server(), &self.state)
+            .await
+            .expect("take the item objects down");
+        tokio::spawn(crate::manager::serve_prompts(
+            self.server.clone(),
+            self.state.clone(),
+            rx,
+            launch,
+        ));
+    }
+
+    /// Unlock after `delay`, as a person typing the passphrase would.
+    pub fn unlock_after(&self, delay: std::time::Duration) -> tokio::task::JoinHandle<()> {
+        let state = self.state.clone();
+        let path = self.vault_path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let vault = Vault::open(&path, PASSPHRASE).expect("open the test vault");
+            state.lock().await.install_unlocked(vault);
+        })
     }
 
     /// The server's unique name, which clients address directly.

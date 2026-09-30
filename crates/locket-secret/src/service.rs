@@ -98,6 +98,17 @@ pub struct PromptRequest {
     pub reply: oneshot::Sender<bool>,
 }
 
+/// How long a locked `SearchItems` holds its caller while the person unlocks.
+///
+/// Inside the 25 seconds GDBus, libdbus, sd-bus and QtDBus each give a method
+/// call by default, with room for the reply to travel. Waiting any longer
+/// answers nobody: the client has already reported "Timeout was reached".
+pub const UNLOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+const _: () = assert!(UNLOCK_WAIT.as_secs() < 25);
+
+/// How long an unlock request waits for the person before it is refused.
+pub const PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
     /// Bus name to claim. Defaults to the development name so that starting
@@ -105,6 +116,10 @@ pub struct ServiceConfig {
     pub bus_name: String,
     /// Persist to disk after every mutation. Off only in tests.
     pub autosave: bool,
+    /// See [`UNLOCK_WAIT`]. Shorter only in tests.
+    pub unlock_wait: std::time::Duration,
+    /// See [`PROMPT_TIMEOUT`]. Shorter only in tests.
+    pub prompt_timeout: std::time::Duration,
 }
 
 impl Default for ServiceConfig {
@@ -112,6 +127,8 @@ impl Default for ServiceConfig {
         Self {
             bus_name: crate::DEV_NAME.to_owned(),
             autosave: true,
+            unlock_wait: UNLOCK_WAIT,
+            prompt_timeout: PROMPT_TIMEOUT,
         }
     }
 }
@@ -431,26 +448,45 @@ impl ServiceState {
         wait.await.unwrap_or(false)
     }
 
-    /// Ask the frontend to unlock, and block this call until it answers.
+    /// Ask the frontend to unlock, and hold this call while the person
+    /// answers — for [`ServiceConfig::unlock_wait`] at most.
     ///
-    /// Every method that actually touches secret data funnels through here.
-    /// The alternative — answering "locked" or, worse, "no such item" — is
-    /// what makes clients misbehave: Chromium and Electron's `safeStorage`
-    /// treat a failed lookup as "no key yet" and generate a *new* one, which
-    /// silently orphans everything they had already encrypted. Prompting is
-    /// both friendlier and safer.
+    /// For `SearchItems` alone. A locked locket vault cannot say which items
+    /// match: labels and attributes are inside the sealed body. The
+    /// specification's answer to a locked search is the list of locked items,
+    /// which the client then unlocks through a `Prompt`; there is no such list
+    /// to give, and an empty one is a lie clients believe — Chromium and
+    /// Electron's `safeStorage` treat "no such item" as "no key yet" and
+    /// generate a *new* one, which silently orphans everything they had
+    /// already encrypted. So the search raises the dialog itself and waits.
     ///
-    /// Property reads deliberately do not call this: D-Bus property traffic is
+    /// The wait ends before the caller's own deadline does. A call still
+    /// waiting here when the client gives up — 25 seconds, for every common
+    /// D-Bus binding — is answered to nobody, and the client reports a
+    /// transport timeout instead of the truth, which is `IsLocked`. The dialog
+    /// stays up either way: a person who takes longer still unlocks the vault,
+    /// and the application's next attempt finds it open.
+    ///
+    /// Every other call answers `IsLocked` at once, which sends a client
+    /// through `Unlock` and a `Prompt` — whose `Completed` signal has no
+    /// deadline. Property reads never prompt: D-Bus property traffic is
     /// constant and background, and a passphrase dialog raised by a property
     /// get would be unattributable to any user action.
     pub async fn ensure_unlocked(state: &SharedState) -> Result<()> {
-        if !state.lock().await.is_locked() {
-            return Ok(());
-        }
-        if Self::request_unlock(state).await {
-            Ok(())
-        } else {
-            Err(Error::Locked)
+        let patience = {
+            let guard = state.lock().await;
+            if !guard.is_locked() {
+                return Ok(());
+            }
+            guard.config.unlock_wait
+        };
+        match tokio::time::timeout(patience, Self::request_unlock(state)).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(Error::Locked),
+            Err(_) => {
+                tracing::info!("nobody unlocked within {patience:?}; answering that it is locked");
+                Err(Error::Locked)
+            }
         }
     }
 
@@ -686,7 +722,8 @@ impl SecretService {
         //
         // The consequence is that returning "no matches" here would be a lie
         // that clients believe: libsecret would report the secret as missing
-        // rather than prompting. So ask for an unlock and wait.
+        // rather than prompting. So ask for an unlock and wait — though not
+        // past the caller's own deadline; see `ensure_unlocked`.
         ServiceState::ensure_unlocked(&self.state).await?;
 
         let state = self.state.lock().await;
@@ -776,8 +813,6 @@ impl SecretService {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<HashMap<OwnedObjectPath, SecretStruct>, SecretError> {
-        ServiceState::ensure_unlocked(&self.state).await?;
-
         let state = self.state.lock().await;
         let vault = state.vault()?;
         let sess = state.sessions.get(&session, caller(&header).as_deref())?;
@@ -951,10 +986,13 @@ impl CollectionIface {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(OwnedObjectPath, OwnedObjectPath), SecretError> {
-        // Writes prompt too. An application that is told "locked" when it tries
-        // to save typically discards the secret it was holding.
-        ServiceState::ensure_unlocked(&self.state).await?;
-
+        // A locked vault answers `IsLocked` at once, below, and does not hold
+        // the call while it asks: that is the answer libsecret acts on. It
+        // calls `Unlock` for this collection, waits on the `Prompt` for as
+        // long as the person takes, and stores again. Holding the call gave
+        // the person the 25 seconds of a D-Bus call timeout instead, after
+        // which `secret-tool store` and `git credential` reported "Timeout
+        // was reached" and dropped the secret.
         let label = take_string(&properties, prop::ITEM_LABEL).unwrap_or_default();
         let attributes = take_attributes(&properties, prop::ITEM_ATTRIBUTES);
         let schema = take_string(&properties, prop::ITEM_TYPE);
@@ -1160,8 +1198,6 @@ impl ItemIface {
         session: OwnedObjectPath,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> Result<(SecretStruct,), SecretError> {
-        ServiceState::ensure_unlocked(&self.state).await?;
-
         let state = self.state.lock().await;
         let vault = state.vault()?;
         let sess = state.sessions.get(&session, caller(&header).as_deref())?;
@@ -1184,8 +1220,6 @@ impl ItemIface {
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
     ) -> Result<(), SecretError> {
-        ServiceState::ensure_unlocked(&self.state).await?;
-
         let mut state = self.state.lock().await;
         let plaintext = {
             let session = state

@@ -423,6 +423,7 @@ mod tests {
         let mut state = ServiceState::new(ServiceConfig {
             bus_name: "org.locket.test".into(),
             autosave: true,
+            ..ServiceConfig::default()
         });
         state.vault = Some(daemon);
 

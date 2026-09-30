@@ -624,3 +624,198 @@ async fn only_the_portal_frontend_gets_an_applications_key() {
     assert_eq!(code, 0);
     assert_eq!(secret.len(), locket_secret::portal::APP_SECRET_LEN);
 }
+
+/// What libsecret sends for `secret_service_store`: an item for the default
+/// collection, addressed by its alias.
+async fn create_item(
+    client: &locket_secret::testing::Client,
+    session: &zbus::zvariant::OwnedObjectPath,
+) -> zbus::Result<(
+    zbus::zvariant::OwnedObjectPath,
+    zbus::zvariant::OwnedObjectPath,
+)> {
+    use std::collections::HashMap;
+    use zbus::zvariant::Value;
+
+    let mut attributes = HashMap::new();
+    attributes.insert("service", "example");
+    let mut properties = HashMap::new();
+    properties.insert("org.freedesktop.Secret.Item.Label", Value::from("stored"));
+    properties.insert(
+        "org.freedesktop.Secret.Item.Attributes",
+        Value::from(attributes),
+    );
+    let secret = (session, Vec::<u8>::new(), b"s3cret".to_vec(), "text/plain");
+    client
+        .proxy(DEFAULT_ALIAS, "org.freedesktop.Secret.Collection")
+        .await
+        .call("CreateItem", &(properties, secret, true))
+        .await
+}
+
+const DEFAULT_ALIAS: &str = "/org/freedesktop/secrets/aliases/default";
+
+/// A store into a locked vault is refused by name, at once. That is what
+/// libsecret acts on: it calls `Unlock`, waits on the `Prompt` for as long as
+/// the person takes, and stores again. The call used to be held while the
+/// daemon asked, which gave the person the 25 seconds of a D-Bus call timeout;
+/// after that `secret-tool store` and `git credential-libsecret store`
+/// reported "Timeout was reached".
+#[tokio::test]
+async fn a_store_into_a_locked_vault_is_refused_at_once_by_name() {
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let session = client.open_session().await;
+    daemon
+        .lock_and_serve_prompts(|| Ok("nobody".to_owned()))
+        .await;
+
+    let started = std::time::Instant::now();
+    let stored = tokio::time::timeout(
+        std::time::Duration::from_millis(1000),
+        create_item(&client, &session),
+    )
+    .await
+    .expect("the store was held while the daemon asked to be unlocked");
+    assert_eq!(
+        locket_secret::testing::error_name(&stored.unwrap_err()),
+        "org.freedesktop.Secret.Error.IsLocked"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(1000));
+}
+
+/// The whole of libsecret's store against a locked vault, call for call:
+/// `CreateItem` → `IsLocked` → `Unlock([collection])` → `Prompt()` →
+/// `Completed` → `CreateItem`. The person answers after the first `CreateItem`
+/// has long returned, and nothing on the way is a call held open for them.
+#[tokio::test]
+async fn a_locked_store_goes_through_the_unlock_prompt_and_lands() {
+    use futures_util::StreamExt as _;
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let session = client.open_session().await;
+    daemon
+        .lock_and_serve_prompts(|| Ok("nobody".to_owned()))
+        .await;
+
+    let refused = create_item(&client, &session).await.unwrap_err();
+    assert_eq!(
+        locket_secret::testing::error_name(&refused),
+        "org.freedesktop.Secret.Error.IsLocked"
+    );
+
+    let collection = OwnedObjectPath::try_from(DEFAULT_ALIAS).unwrap();
+    let (unlocked, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = client
+        .service()
+        .await
+        .call("Unlock", &(vec![&collection],))
+        .await
+        .unwrap();
+    assert!(unlocked.is_empty());
+    assert_ne!(prompt.as_str(), "/", "a locked vault needs a prompt");
+
+    let prompt = client
+        .proxy(prompt.as_str(), "org.freedesktop.Secret.Prompt")
+        .await;
+    let mut completed = prompt.receive_signal("Completed").await.unwrap();
+    let () = prompt.call("Prompt", &("",)).await.unwrap();
+    let person = daemon.unlock_after(std::time::Duration::from_millis(600));
+
+    let signal = tokio::time::timeout(std::time::Duration::from_secs(10), completed.next())
+        .await
+        .expect("Completed never arrived")
+        .unwrap();
+    let (dismissed, result): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+    assert!(!dismissed);
+    // libsecret reads the result as `ao`, the objects now unlocked.
+    let result = Vec::<OwnedObjectPath>::try_from(result).unwrap();
+    assert_eq!(result, vec![collection]);
+    person.await.unwrap();
+
+    let (item, no_prompt) = create_item(&client, &session).await.unwrap();
+    assert_eq!(no_prompt.as_str(), "/");
+    assert_eq!(client.item_label(&item).await.unwrap(), "stored");
+}
+
+/// A search of a locked vault waits for the person — there is no list of
+/// locked items to hand back instead — but not past the point where its
+/// caller stops listening. It then says `IsLocked`, which is true, where the
+/// client used to report a transport timeout.
+#[tokio::test]
+async fn a_locked_search_gives_up_before_its_caller_does() {
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    daemon
+        .lock_and_serve_prompts(|| Ok("nobody".to_owned()))
+        .await;
+
+    let started = std::time::Instant::now();
+    let found = client.search_all().await;
+    let waited = started.elapsed();
+    assert_eq!(
+        locket_secret::testing::error_name(&found.unwrap_err()),
+        "org.freedesktop.Secret.Error.IsLocked"
+    );
+    assert!(
+        waited >= locket_secret::testing::UNLOCK_WAIT,
+        "the search did not wait for the person at all ({waited:?})"
+    );
+    assert!(
+        waited < locket_secret::testing::UNLOCK_WAIT + std::time::Duration::from_secs(2),
+        "the search outwaited its caller ({waited:?})"
+    );
+}
+
+/// One dialog answers everybody waiting on it. A second request arriving
+/// while it is up used to queue behind the first and, when that one ran out,
+/// raise a dialog and a full wait of its own.
+#[tokio::test]
+async fn requests_share_one_unlock_dialog_and_its_answer() {
+    use futures_util::StreamExt as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+
+    let daemon = Daemon::start().await;
+    let client = daemon.client().await;
+    let launches = Arc::new(AtomicUsize::new(0));
+    let counted = launches.clone();
+    daemon
+        .lock_and_serve_prompts(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok("nobody".to_owned())
+        })
+        .await;
+
+    let mut waiting = Vec::new();
+    for _ in 0..2 {
+        let (_, prompt): (Vec<OwnedObjectPath>, OwnedObjectPath) = client
+            .service()
+            .await
+            .call("Unlock", &(Vec::<OwnedObjectPath>::new(),))
+            .await
+            .unwrap();
+        let prompt = client
+            .proxy(prompt.as_str(), "org.freedesktop.Secret.Prompt")
+            .await;
+        let completed = prompt.receive_signal("Completed").await.unwrap();
+        let () = prompt.call("Prompt", &("",)).await.unwrap();
+        waiting.push(completed);
+    }
+
+    // Nobody answers: both are refused when the one dialog runs out.
+    let patience = locket_secret::testing::PROMPT_TIMEOUT + std::time::Duration::from_secs(4);
+    let started = std::time::Instant::now();
+    for completed in &mut waiting {
+        let signal = tokio::time::timeout(patience, completed.next())
+            .await
+            .expect("a request was left to wait out a dialog of its own")
+            .unwrap();
+        let (dismissed, _): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+        assert!(dismissed);
+    }
+    assert!(started.elapsed() < patience);
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
+}

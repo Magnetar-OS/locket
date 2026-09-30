@@ -4,6 +4,21 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- A locked vault no longer keeps an application waiting past the point where
+  the application stops listening. `git push`, `secret-tool` and anything else
+  on libsecret used to hang for 25 seconds per call and then report "Timeout
+  was reached" when nobody unlocked in time — twice per push, once for the
+  lookup and once for the store. Now a lookup waits twenty seconds for the
+  unlock dialog and is then told the vault is locked; a store is told at
+  once, which sends libsecret through its own unlock prompt, where it waits
+  for as long as the dialog is up (two minutes) and then stores. An unlock
+  that takes longer than 25 seconds no longer loses the secret being saved.
+- One unlock dialog answers every application that asked while it was up.
+  Requests used to queue, each with two minutes of dialog of its own, raised
+  one after another long after the applications had given up.
+
 ## [2.0.0] - 2026-09-29
 
 ### Changed
