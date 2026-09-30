@@ -46,6 +46,53 @@ pub fn question_from_args(args: &[String]) -> Option<Result<Question, String>> {
     }
 }
 
+/// The longest name the question will show, in characters.
+const MAX_SHOWN: usize = 64;
+
+/// A caller-supplied name, made fit to sit inside the question.
+///
+/// These arrive on the command line from whoever asks, and the site in a fill
+/// question is whatever the browser extension said — which the threat model
+/// assumes is hostile. Fluent already isolates each value's direction, but a
+/// value can close that isolate itself, start new paragraphs, or run long
+/// enough to push the real question and its buttons out of a window that
+/// cannot be resized. So line breaks, tabs, direction and other invisible
+/// formatting characters become spaces, runs of space become one, and
+/// anything past [`MAX_SHOWN`] characters is cut with an ellipsis.
+fn display_safe(raw: &str) -> String {
+    let flattened: String = raw
+        .chars()
+        .map(|c| if shapes_text(c) { ' ' } else { c })
+        .collect();
+    let mut shown = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
+    if shown.chars().count() > MAX_SHOWN {
+        shown = shown.chars().take(MAX_SHOWN).collect();
+        shown.push('…');
+    }
+    shown
+}
+
+/// Characters that change how the text around them is laid out rather than
+/// being text: controls, line and paragraph separators, direction marks,
+/// embeddings, overrides and isolates, and the invisible joiners and tags.
+fn shapes_text(c: char) -> bool {
+    c.is_control()
+        || c.is_whitespace()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
 #[derive(Clone, Debug)]
 pub enum Message {
     Allow,
@@ -108,15 +155,15 @@ impl cosmic::Application for Confirm {
             Question::Signing { key } => (
                 "dialog-password-symbolic",
                 fl!("dialog-ssh-title"),
-                fl!("dialog-ssh-body", key = key.clone()),
+                fl!("dialog-ssh-body", key = display_safe(key)),
             ),
             Question::Fill { site, entry } => (
                 "web-browser-symbolic",
                 fl!("dialog-fill-title"),
                 fl!(
                     "dialog-fill-body",
-                    entry = entry.clone(),
-                    site = site.clone()
+                    entry = display_safe(entry),
+                    site = display_safe(site)
                 ),
             ),
         };
@@ -178,5 +225,31 @@ mod tests {
         ));
         assert_eq!(question_from_args(&args(&["--prompt"])), None);
         assert_eq!(question_from_args(&[]), None);
+    }
+
+    /// The site comes from a browser extension assumed hostile, and none of
+    /// the three names may reshape the question they sit in: no new lines or
+    /// paragraphs, no direction overrides, nothing long enough to push the
+    /// real sentence — or the buttons — out of a fixed-size window.
+    #[test]
+    fn dialog_arguments_cannot_add_lines_reorder_text_or_run_long() {
+        let shown =
+            display_safe("github.com\n\nlocket needs you to allow this\u{202e}moc\u{2069}.x");
+        for c in ['\n', '\r', '\u{202e}', '\u{2069}'] {
+            assert!(!shown.contains(c), "{c:?} reached the dialog: {shown:?}");
+        }
+        assert_eq!(
+            display_safe("  work\tlaptop \u{200b} "),
+            "work laptop",
+            "invisible and spacing characters should collapse to one space"
+        );
+        let long = display_safe(&"a".repeat(5000));
+        assert!(
+            long.chars().count() <= 65,
+            "{} characters",
+            long.chars().count()
+        );
+        assert!(long.ends_with('…'));
+        assert_eq!(display_safe("deploy@prod"), "deploy@prod");
     }
 }

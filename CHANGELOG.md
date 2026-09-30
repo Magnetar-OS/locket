@@ -205,6 +205,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   unsaved edit, a half-filled passphrase or export form, the health report
   and any open delete dialog used to survive the lock and come back after
   the next unlock, and an auto-type counting down still typed.
+- The dialogs that ask before an SSH signature or a browser fill show the
+  key, site and entry names on one line and at most 64 characters long. A
+  browser extension could send a site name carrying line breaks,
+  text-direction controls or enough text to push the real question and its
+  buttons out of view.
 
 ### Documentation
 
