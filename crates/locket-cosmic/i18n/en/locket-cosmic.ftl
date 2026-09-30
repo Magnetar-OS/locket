@@ -544,6 +544,8 @@ toast-merge-attachments =
     their other changes are in the item's history.
 toast-imported = Imported { $summary }
 toast-unlocked-others = Unlocked for other applications too
+toast-daemon-kept-locked = locketd did not take this passphrase, so other applications still see a locked vault.
+toast-daemon-kept-unlocked = locketd could not be locked, so other applications can still read secrets.
 toast-factor-removed = Factor removed.
 toast-factor-added = Factor added. Your passphrase still works.
 toast-qr-failed = Could not build a QR code: { $error }

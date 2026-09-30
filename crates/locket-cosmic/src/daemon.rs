@@ -66,26 +66,36 @@ pub fn subscription() -> Subscription<DaemonEvent> {
     })
 }
 
-/// Hand a passphrase to the daemon. Returns whether it unlocked.
-///
-/// A missing daemon is `Ok(false)`, not an error: running without one is a
-/// supported configuration, not a failure.
-pub async fn unlock(passphrase: String) -> bool {
+/// How the daemon answered a request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reply {
+    /// No daemon on the bus: running without one is a supported
+    /// configuration, not a failure.
+    NoDaemon,
+    /// It did what was asked.
+    Done,
+    /// It was there and did not: a passphrase it rejected, or a call that
+    /// failed.
+    Refused,
+}
+
+/// Hand a passphrase to the daemon.
+pub async fn unlock(passphrase: String) -> Reply {
     let Some((_connection, proxy)) = client::connect().await else {
-        return false;
+        return Reply::NoDaemon;
     };
     match proxy.unlock(&passphrase).await {
-        Ok(ok) => {
-            if ok {
-                tracing::info!("daemon unlocked");
-            } else {
-                tracing::warn!("daemon rejected the passphrase");
-            }
-            ok
+        Ok(true) => {
+            tracing::info!("daemon unlocked");
+            Reply::Done
+        }
+        Ok(false) => {
+            tracing::warn!("daemon rejected the passphrase");
+            Reply::Refused
         }
         Err(e) => {
             tracing::warn!("could not unlock the daemon: {e}");
-            false
+            Reply::Refused
         }
     }
 }
@@ -127,9 +137,15 @@ pub async fn reload() -> bool {
 }
 
 /// Ask the daemon to drop its key too, so locking the GUI locks everything.
-pub async fn lock() -> bool {
+pub async fn lock() -> Reply {
     let Some((_connection, proxy)) = client::connect().await else {
-        return false;
+        return Reply::NoDaemon;
     };
-    proxy.lock().await.is_ok()
+    match proxy.lock().await {
+        Ok(()) => Reply::Done,
+        Err(e) => {
+            tracing::warn!("could not lock the daemon: {e}");
+            Reply::Refused
+        }
+    }
 }

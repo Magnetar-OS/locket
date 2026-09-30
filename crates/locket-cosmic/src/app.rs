@@ -116,7 +116,8 @@ pub enum Message {
     UnlockSubmit,
     /// The vault-opening task finished. The vault travels in a shared slot
     /// because `Vault` is deliberately not `Clone` and messages must be.
-    VaultOpened(Arc<Mutex<Option<Vault>>>, Option<String>),
+    /// The last part is how the daemon took the same passphrase.
+    VaultOpened(Arc<Mutex<Option<Vault>>>, Option<String>, daemon::Reply),
     Lock,
     SearchChanged(String),
     Select(Uuid),
@@ -198,7 +199,8 @@ pub enum Message {
     BreachesChecked(Result<Vec<(Uuid, u64)>, String>),
     // -- daemon --
     Daemon(DaemonEvent),
-    DaemonUnlocked(bool),
+    /// How the daemon answered being asked to lock with this window.
+    DaemonLocked(daemon::Reply),
     /// The small window an application's unlock request raises.
     Prompt(prompt::Message),
     // -- unlock factors --
@@ -249,7 +251,7 @@ impl Message {
             Message::Tick
                 | Message::IdleCheck
                 | Message::Daemon(_)
-                | Message::DaemonUnlocked(_)
+                | Message::DaemonLocked(_)
                 | Message::CloseToast(_)
                 | Message::ReloadVaultFile
                 | Message::SettingsChanged(_)
@@ -942,7 +944,7 @@ impl App {
 
                 return cosmic::task::future(async move {
                     let for_daemon = passphrase.clone();
-                    let unlocked = daemon::unlock(for_daemon).await;
+                    let unlocked = daemon::unlock(for_daemon).await == daemon::Reply::Done;
                     // Argon2id, again and off the UI thread: the daemon ran
                     // its own pass on its own copy of the file.
                     let vault = if unlocked && here {
@@ -2075,22 +2077,24 @@ impl cosmic::Application for App {
 
                     match outcome {
                         Ok(Ok(vault)) => {
-                            // Best effort: no daemon is a supported setup.
-                            let _ = daemon::unlock(for_daemon).await;
-                            Message::VaultOpened(Arc::new(Mutex::new(Some(vault))), None)
+                            let forwarded = daemon::unlock(for_daemon).await;
+                            Message::VaultOpened(Arc::new(Mutex::new(Some(vault))), None, forwarded)
                         }
-                        Ok(Err(e)) => {
-                            Message::VaultOpened(Arc::new(Mutex::new(None)), Some(e.to_string()))
-                        }
+                        Ok(Err(e)) => Message::VaultOpened(
+                            Arc::new(Mutex::new(None)),
+                            Some(e.to_string()),
+                            daemon::Reply::NoDaemon,
+                        ),
                         Err(e) => Message::VaultOpened(
                             Arc::new(Mutex::new(None)),
                             Some(fl!("error-unlock-task", error = e.to_string())),
+                            daemon::Reply::NoDaemon,
                         ),
                     }
                 });
             }
 
-            Message::VaultOpened(slot, error) => {
+            Message::VaultOpened(slot, error, forwarded) => {
                 let vault = slot.lock().ok().and_then(|mut g| g.take());
                 match vault {
                     Some(v) => {
@@ -2112,7 +2116,11 @@ impl cosmic::Application for App {
                         if conflict.is_some() {
                             self.sync_conflict = conflict;
                         }
-                        return Task::batch([closed, title, self.settle_opened()]);
+                        let told = match daemon_notice(DaemonAsked::Unlock, forwarded) {
+                            Some(notice) => self.toast(notice),
+                            None => Task::none(),
+                        };
+                        return Task::batch([closed, title, self.settle_opened(), told]);
                     }
                     None => {
                         self.screen = Screen::Locked;
@@ -2128,10 +2136,7 @@ impl cosmic::Application for App {
                 let locked = self.lock_window();
                 return Task::batch([
                     locked,
-                    cosmic::task::future(async {
-                        daemon::lock().await;
-                        Message::DaemonUnlocked(false)
-                    }),
+                    cosmic::task::future(async { Message::DaemonLocked(daemon::lock().await) }),
                 ]);
             }
 
@@ -2400,11 +2405,9 @@ impl cosmic::Application for App {
                 DaemonEvent::Unavailable => {}
             },
 
-            Message::DaemonUnlocked(ok) => {
-                if ok {
-                    self.unlock_requested_by_app = false;
-                    let closed = self.close_prompt();
-                    return Task::batch([closed, self.toast(fl!("toast-unlocked-others"))]);
+            Message::DaemonLocked(reply) => {
+                if let Some(notice) = daemon_notice(DaemonAsked::Lock, reply) {
+                    return self.toast(notice);
                 }
             }
 
@@ -3947,6 +3950,29 @@ impl Exposed<'_> {
     }
 }
 
+/// What this window asked the daemon to do alongside itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonAsked {
+    Unlock,
+    Lock,
+}
+
+/// What to tell the person about the daemon's answer, if anything.
+///
+/// The window and the daemon hold separate copies of the key, and the daemon
+/// is what every libsecret application, the browser extension and the SSH
+/// agent talk to. When it refuses, the window's state is not theirs, and
+/// staying quiet about that is how "locked" comes to mean two things.
+fn daemon_notice(asked: DaemonAsked, reply: daemon::Reply) -> Option<String> {
+    match (asked, reply) {
+        (_, daemon::Reply::NoDaemon) => None,
+        (DaemonAsked::Unlock, daemon::Reply::Done) => Some(fl!("toast-unlocked-others")),
+        (DaemonAsked::Unlock, daemon::Reply::Refused) => Some(fl!("toast-daemon-kept-locked")),
+        (DaemonAsked::Lock, daemon::Reply::Done) => None,
+        (DaemonAsked::Lock, daemon::Reply::Refused) => Some(fl!("toast-daemon-kept-unlocked")),
+    }
+}
+
 /// What a clear timer does with what it read back from the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClearDecision {
@@ -4514,6 +4540,21 @@ mod tests {
             ClearDecision::Leave
         );
         assert_eq!(clear_decision(Some("x"), None, false), ClearDecision::Leave);
+    }
+
+    /// The window unlocking or locking says nothing about the daemon unless
+    /// the daemon was told and answered. A refusal leaves every libsecret
+    /// application seeing a different state from the window, and that has
+    /// to be said; no daemon at all is a supported setup and is not.
+    #[test]
+    fn a_daemon_that_refused_is_reported_and_a_missing_one_is_not() {
+        use daemon::Reply;
+        for asked in [DaemonAsked::Unlock, DaemonAsked::Lock] {
+            assert!(daemon_notice(asked, Reply::Refused).is_some(), "{asked:?}");
+            assert!(daemon_notice(asked, Reply::NoDaemon).is_none(), "{asked:?}");
+        }
+        assert!(daemon_notice(DaemonAsked::Unlock, Reply::Done).is_some());
+        assert!(daemon_notice(DaemonAsked::Lock, Reply::Done).is_none());
     }
 
     /// Copy A, then B ten seconds later: A's timer must leave B alone, or B

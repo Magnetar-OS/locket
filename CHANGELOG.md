@@ -206,6 +206,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   the application unlocks it, not only from what the window shows. Without
   the daemon running, those items stayed in the file until you next changed
   something.
+- The window says when locketd did not follow it: a passphrase the daemon
+  would not take leaves other applications seeing a locked vault, and a
+  failed lock leaves them able to read secrets. Both used to pass without a
+  word; a successful unlock now also says it reached other applications.
 
 ### Security
 
