@@ -200,6 +200,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   it somewhere. locket cannot touch the clipboard from the background, so it
   now clears it as soon as you come back to the window or open the panel
   popup, and the copy message says so.
+- Copying a second secret shortly after a first no longer clears the second
+  one early, on the first one's timer.
 
 ### Security
 

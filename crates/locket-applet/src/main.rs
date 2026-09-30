@@ -57,6 +57,8 @@ pub struct Applet {
     clipboard_copy: Option<String>,
     /// The clear timer could not read the clipboard; it retries every tick.
     clipboard_due: bool,
+    /// Counts copies, so each clear timer knows whether it is still current.
+    clipboard_generation: u64,
     notice: Option<String>,
 }
 
@@ -85,7 +87,8 @@ pub enum Message {
     /// Copy the secret behind this path; the label is for the notice.
     Copy(String, String),
     Copied(String, Option<String>),
-    ClearClipboard,
+    /// The clear timer for the copy with this number fired.
+    ClearClipboard(u64),
     ClipboardChecked(Option<String>),
 }
 
@@ -154,6 +157,7 @@ impl cosmic::Application for Applet {
             results: Vec::new(),
             clipboard_copy: None,
             clipboard_due: false,
+            clipboard_generation: 0,
             notice: None,
         };
         // Ask immediately so the icon is right before the first tick.
@@ -188,7 +192,8 @@ impl cosmic::Application for Applet {
                     Message::Status(locket_secret::client::status().await)
                 });
                 if std::mem::take(&mut self.clipboard_due) {
-                    return Task::batch([status, cosmic::task::message(Message::ClearClipboard)]);
+                    let clear = Message::ClearClipboard(self.clipboard_generation);
+                    return Task::batch([status, cosmic::task::message(clear)]);
                 }
                 return status;
             }
@@ -253,15 +258,20 @@ impl cosmic::Application for Applet {
                 self.notice = Some(fl!("copied", label = label, seconds = CLIPBOARD_CLEAR_SECS));
                 self.clipboard_copy = Some(secret.clone());
                 self.clipboard_due = false;
+                self.clipboard_generation += 1;
+                let generation = self.clipboard_generation;
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
-                let clear = cosmic::task::future(async {
+                let clear = cosmic::task::future(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(CLIPBOARD_CLEAR_SECS)).await;
-                    Message::ClearClipboard
+                    Message::ClearClipboard(generation)
                 });
                 return Task::batch([copy, clear]);
             }
 
-            Message::ClearClipboard => {
+            Message::ClearClipboard(generation) => {
+                if !timer_is_current(generation, self.clipboard_generation) {
+                    return Task::none();
+                }
                 // Look before wiping: the person may have copied something of
                 // their own since, and clearing that would be its own small
                 // disaster. Same check the main window makes.
@@ -451,6 +461,12 @@ impl Applet {
     }
 }
 
+/// Whether a clear timer is for the latest copy. Each copy starts its own
+/// timer, and an older one must not wipe a newer copy early.
+fn timer_is_current(fired_for: u64, latest: u64) -> bool {
+    fired_for == latest
+}
+
 /// What a clear timer does with what it read back from the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClearDecision {
@@ -518,5 +534,12 @@ mod tests {
             clear_decision(None, Some("hunter2"), true),
             ClearDecision::Leave
         );
+    }
+
+    /// Copy A, then B ten seconds later: A's timer must leave B alone.
+    #[test]
+    fn an_older_timer_does_not_clear_a_newer_copy() {
+        assert!(!timer_is_current(1, 2));
+        assert!(timer_is_current(2, 2));
     }
 }

@@ -124,7 +124,8 @@ pub enum Message {
     /// Show or hide the `otpauth://` QR for a one-time-code field.
     ToggleQr(String),
     CopyValue(String, String),
-    ClearClipboard,
+    /// The clear timer for the copy with this number fired.
+    ClearClipboard(u64),
     /// What the clipboard held when the clear timer fired.
     ClipboardChecked(Option<String>),
     /// The vault file changed underneath us; pick the change up.
@@ -252,7 +253,7 @@ impl Message {
                 | Message::CloseToast(_)
                 | Message::ReloadVaultFile
                 | Message::SettingsChanged(_)
-                | Message::ClearClipboard
+                | Message::ClearClipboard(_)
                 | Message::ClipboardChecked(_)
                 | Message::WindowUnfocused
                 | Message::HealthReady(_)
@@ -494,6 +495,8 @@ pub struct App {
     /// The clear timer fired while no locket window had the keyboard, so the
     /// clipboard could not be read or written; it runs again when one does.
     clipboard_due: bool,
+    /// Counts copies, so each clear timer knows whether it is still current.
+    clipboard_generation: u64,
     /// The dialog raised by an application's unlock request, while one is up.
     prompt: Option<Prompt>,
 
@@ -1930,6 +1933,7 @@ impl cosmic::Application for App {
             unlock_requested_by_app: false,
             clipboard_copy: None,
             clipboard_due: false,
+            clipboard_generation: 0,
             prompt: None,
             qr: None,
             about: about(),
@@ -2177,6 +2181,8 @@ impl cosmic::Application for App {
                 // there is a timer, or it would outlive every lock.
                 self.clipboard_copy = (clear_after > 0).then(|| value.clone());
                 self.clipboard_due = false;
+                self.clipboard_generation += 1;
+                let generation = self.clipboard_generation;
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(value);
                 let notice = self.toast(if clear_after > 0 {
                     fl!("toast-copied-clearing", what = what, seconds = clear_after)
@@ -2189,12 +2195,15 @@ impl cosmic::Application for App {
                 }
                 let clear = cosmic::task::future(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(clear_after)).await;
-                    Message::ClearClipboard
+                    Message::ClearClipboard(generation)
                 });
                 return Task::batch([copy, notice, clear]);
             }
 
-            Message::ClearClipboard => {
+            Message::ClearClipboard(generation) => {
+                if !timer_is_current(generation, self.clipboard_generation) {
+                    return Task::none();
+                }
                 // Look before wiping: between the copy and this timer the user
                 // may well have copied something of their own, and clearing
                 // the clipboard out from under them is its own small disaster.
@@ -2535,9 +2544,10 @@ impl cosmic::Application for App {
                 // keyboard. The pause lets the clipboard's own connection see
                 // the focus change before it is asked to read.
                 let retry = if std::mem::take(&mut self.clipboard_due) {
-                    cosmic::task::future(async {
+                    let generation = self.clipboard_generation;
+                    cosmic::task::future(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        Message::ClearClipboard
+                        Message::ClearClipboard(generation)
                     })
                 } else {
                     Task::none()
@@ -3948,6 +3958,12 @@ fn clear_decision(current: Option<&str>, ours: Option<&str>, focused: bool) -> C
     }
 }
 
+/// Whether a clear timer is for the latest copy. Each copy starts its own
+/// timer, and an older one must not wipe a newer copy early.
+fn timer_is_current(fired_for: u64, latest: u64) -> bool {
+    fired_for == latest
+}
+
 /// One step of turning the unlock dialog down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dismissal {
@@ -4301,7 +4317,7 @@ mod tests {
             Message::Tick,
             Message::IdleCheck,
             Message::ReloadVaultFile,
-            Message::ClearClipboard,
+            Message::ClearClipboard(1),
             Message::ClipboardChecked(None),
             Message::SettingsChanged(Settings::default()),
             Message::WindowUnfocused,
@@ -4442,6 +4458,14 @@ mod tests {
             ClearDecision::Leave
         );
         assert_eq!(clear_decision(Some("x"), None, false), ClearDecision::Leave);
+    }
+
+    /// Copy A, then B ten seconds later: A's timer must leave B alone, or B
+    /// is gone twenty seconds before the toast said it would be.
+    #[test]
+    fn an_older_timer_does_not_clear_a_newer_copy() {
+        assert!(!timer_is_current(1, 2));
+        assert!(timer_is_current(2, 2));
     }
 
     /// Refusing needs a round trip to the daemon; ending the process first
