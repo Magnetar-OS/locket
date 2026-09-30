@@ -66,7 +66,11 @@ the editor lets you set it per field rather than guessing from the name.
   a secret on display, so it hides again with everything else — on lock, on
   changing item, and on losing focus if you asked for that.
 - **Copying** clears the clipboard afterwards — 30 seconds by default,
-  configurable, or never.
+  configurable, or never; the panel applet follows the same setting. A
+  Wayland client can only read or clear the clipboard while it has focus, so
+  when locket is in the background at that moment the clear happens as soon
+  as you come back to it, and only if the clipboard still holds what locket
+  put there.
 - **Auto-lock** after 15 minutes idle by default. Revealed secrets also
   re-conceal when the window loses focus, which is a display change and not a
   lock: it costs nothing and covers the screenshot-and-screen-share case.
@@ -146,10 +150,13 @@ The two COSMIC crates carry their own fluent catalogue under
 message id that does not exist is a build error rather than a label reading
 `id` at runtime.
 
-While `locketd` is running it holds the only unlocked copy of the
-data-encryption key, and the GUI, the browser host and every `libsecret` client
-go through it — so the vault is unlocked once per session rather than once per
-application.
+While `locketd` is running, the browser host, the panel applet and every
+`libsecret` client go through it — so the vault is unlocked once per session
+rather than once per application. The window is the other process that holds
+the data-encryption key: it opens the vault file itself, and while it is
+unlocked it has its own copy. Unlocking it unlocks the daemon with the same
+passphrase, and it locks itself when the daemon is locked from the panel, by
+the screen locking or by suspend.
 
 `locket-cli` is the exception, on purpose: it opens the vault file itself and
 never goes through the daemon, so it still works when the daemon will not
@@ -993,13 +1000,19 @@ than a button:
 
 * **The GUI locks it** with `Ctrl+L`, and that locks the daemon too — otherwise
   the window would look locked while every `libsecret` client carried on
-  reading secrets.
-* **Idle**: the frontend has a 15-minute default for its own window, and
+  reading secrets. The other way round holds as well: when the daemon is
+  locked from the panel applet or by another client, or because the screen
+  locked or the machine suspended, it announces it (`Manager1.VaultLocked`)
+  and the window locks with it.
+* **Idle**: the window has a 15-minute default for itself, and
   `locketd --auto-lock SECONDS` covers the session, because closing the window
-  is not the same as ending the session. Both Secret Service traffic and SSH
-  agent requests count as use — being locked out mid-`ssh` because no secret
-  had been read would be its own bug. The installed unit passes
-  `--auto-lock 900`.
+  is not the same as ending the session. Each keeps its own clock — the window
+  counts what you do in it, the daemon counts Secret Service traffic and SSH
+  agent requests, since being locked out mid-`ssh` because no secret had been
+  read would be its own bug — so the window idling out locks the window, and
+  the daemon idling out locks the daemon. The window pushes its setting to the
+  daemon, so the two use one number. The installed unit passes
+  `--auto-lock 900` as the default until the window does.
 * **The session locks**, or the machine suspends. `locketd` watches logind for
   both `Lock` and the `LockedHint` a screen locker sets, plus
   `PrepareForSleep`, because different lockers announce themselves differently

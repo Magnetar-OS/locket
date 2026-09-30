@@ -59,8 +59,8 @@ the targeting mechanism, and the UI has to be built around that fact.
 
 - **Auto-type ships against the RemoteDesktop portal**, keysym path. The
   flow is: the person picks an item and presses *Auto-type*; the portal asks
-  for permission (a system dialog, owned by the compositor, first use per
-  session); locket then counts down a few seconds while the person clicks
+  for permission (a system dialog, owned by the compositor; locket keeps
+  no restore token, so nothing on its side lets a later use skip it); locket then counts down a few seconds while the person clicks
   the field they want filled, and types `username → Tab → password`. No
   Enter — submitting a form nobody has reviewed is a decision, not a
   keystroke.

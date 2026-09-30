@@ -29,7 +29,7 @@ model underneath it.
 |---|---|---|---|
 | `locket-core` | in memory, while open | nothing — no I/O, no D-Bus, no UI | linked into everything below |
 | `locketd` | **yes**, while unlocked | the vault file, the session bus | every client below |
-| `locket` (GUI) | yes, when running daemonless | the vault file, `cosmic-config` | the person at the keyboard |
+| `locket` (GUI) | yes, while its window is unlocked — it opens the vault file itself, with or without a daemon | the vault file, `cosmic-config`, the daemon's `VaultLocked` announcements | the person at the keyboard |
 | `locket-cli` | yes, while it runs | the vault file only; it reads nothing from the daemon, and tells a running one to re-read the file after a write | a terminal |
 | `pam_locket.so` | no | the unlock socket's location — a 0700 directory in the user's 0700 `XDG_RUNTIME_DIR`; no peer credentials are checked | the login stack, as root |
 | SSH agent (in `locketd`) | via the daemon | nothing about its callers | any process running as you |
@@ -38,9 +38,14 @@ model underneath it.
 | Browser extension | no | nothing it is given | every page you visit |
 | `locket-applet` | no | nothing — an ordinary Secret Service client | the panel |
 
-The shape to notice: **exactly one process holds the key at a time**, and
-the pieces most exposed to hostile input — the extension, its host, the
-applet — hold none of it and cannot unlock anything.
+The shape to notice: **the daemon holds the key for the session, and the
+window holds a copy only while it is unlocked** — it locks itself on its own
+idle timer, on `Ctrl+L`, and when the daemon announces a lock from the panel,
+the screen locking or suspend. The pieces most exposed to hostile input — the
+extension, its host, the applet — hold none of it and cannot unlock anything.
+Unlike the daemon and the confirmation dialogs, the window does not make
+itself non-dumpable, so while it is unlocked a process that may `ptrace` it
+(Yama permitting) can read its memory.
 
 ## Attacker positions
 
