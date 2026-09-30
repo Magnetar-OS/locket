@@ -598,10 +598,7 @@ impl App {
             return Ok(Task::none());
         };
         let saved = match vault.save() {
-            Ok(()) => Ok(cosmic::task::future(async {
-                daemon::reload().await;
-                Message::Tick
-            })),
+            Ok(()) => Ok(Self::daemon_catch_up()),
             Err(locket_core::Error::ChangedOnDisk { .. }) => Err(fl!("error-save-conflict")),
             Err(e) => Err(fl!("error-save-failed", error = e.to_string())),
         };
@@ -613,6 +610,20 @@ impl App {
             return saved.map(|task| Task::batch([task, recompute]));
         }
         saved
+    }
+
+    /// Tell the daemon the vault file changed, so it re-reads it.
+    ///
+    /// Needed after every write this window makes, not only the ones through
+    /// [`App::save_vault`]: the daemon re-reads before it writes but not
+    /// before it reads, so without this an import or a new factor stays
+    /// invisible to libsecret applications, the browser extension and the SSH
+    /// agent until something else happens to write the file.
+    fn daemon_catch_up() -> Task<Message> {
+        cosmic::task::future(async {
+            daemon::reload().await;
+            Message::Tick
+        })
     }
 
     /// Recompute the health report from the vault as it stands, dropping any
@@ -2472,7 +2483,9 @@ impl cosmic::Application for App {
                         // Notes are things the counts cannot say — a key that
                         // only signs with hardware present, say. One toast per
                         // note, so none of them is buried in a summary line.
-                        let mut tasks = vec![self.update_title()];
+                        // The import saved the file itself, so the daemon has
+                        // to be told here rather than by `save_vault`.
+                        let mut tasks = vec![self.update_title(), Self::daemon_catch_up()];
                         tasks
                             .push(self.toast(fl!("toast-imported", summary = summary.to_string())));
                         for note in &summary.notes {
@@ -2628,7 +2641,10 @@ impl cosmic::Application for App {
                         return Task::none();
                     };
                     match vault.remove_slot(id) {
-                        Ok(()) => self.security.notice = Some(fl!("toast-factor-removed")),
+                        Ok(()) => {
+                            self.security.notice = Some(fl!("toast-factor-removed"));
+                            return Self::daemon_catch_up();
+                        }
                         Err(e) => self.security.error = Some(e.to_string()),
                     }
                 }
@@ -2685,10 +2701,7 @@ impl cosmic::Application for App {
                     None => {
                         self.security.notice = Some(fl!("security-passphrase-changed"));
                         // The daemon's copy of the file just changed under it.
-                        return cosmic::task::future(async {
-                            daemon::reload().await;
-                            Message::Tick
-                        });
+                        return Self::daemon_catch_up();
                     }
                 }
                 if self.vault.is_none() && self.screen == Screen::Browsing {
@@ -2701,6 +2714,7 @@ impl cosmic::Application for App {
             Message::SecurityEnrolled(slot, error) => {
                 self.security.busy = None;
                 self.vault = readmit(self.screen, slot.lock().ok().and_then(|mut g| g.take()));
+                let added = error.is_none();
                 match error {
                     Some(e) => self.security.error = Some(e),
                     None => self.security.notice = Some(fl!("toast-factor-added")),
@@ -2709,6 +2723,11 @@ impl cosmic::Application for App {
                     // Failing safe: without a vault there is nothing to show.
                     self.lock_state();
                     return self.update_title();
+                }
+                // The new slot is on disk, whether or not the window is
+                // still open to show it.
+                if added {
+                    return Self::daemon_catch_up();
                 }
             }
 

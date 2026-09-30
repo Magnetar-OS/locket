@@ -192,6 +192,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   password; such a value is refused instead of submitting the form or
   splitting across fields. A login with an empty username is typed as the
   password alone, into the field you clicked, instead of the field after it.
+- Items imported in the application are available to libsecret applications,
+  the browser extension, the panel's quick search and the SSH agent straight
+  away. They used to appear only after the next edit or unlock.
 
 ### Security
 
