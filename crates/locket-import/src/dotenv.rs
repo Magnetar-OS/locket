@@ -386,23 +386,47 @@ pub fn is_env_file(name: &str) -> bool {
 /// Symlinked directories are not followed: a `node_modules` symlink into a
 /// shared store would otherwise turn a project scan into a filesystem crawl.
 pub fn scan(root: &Path) -> Result<Vec<EnvFile>> {
+    scan_tree(root).map(|tree| tree.files)
+}
+
+/// What a scan found: the environment files, and the directories below the
+/// root it could not read.
+struct Tree {
+    files: Vec<EnvFile>,
+    unreadable: Vec<PathBuf>,
+}
+
+fn scan_tree(root: &Path) -> Result<Tree> {
     if !root.is_dir() {
         return Err(Error::NotFound(root.to_path_buf()));
     }
 
-    fn walk(root: &Path, dir: &Path, depth: usize, out: &mut Vec<EnvFile>) -> std::io::Result<()> {
+    fn walk(root: &Path, dir: &Path, depth: usize, tree: &mut Tree) -> std::io::Result<()> {
         // Deep enough for a monorepo's packages/*/apps/*, shallow enough that
         // a mistyped root does not scan the whole home directory.
         if depth > 6 {
             return Ok(());
         }
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+        // The root failing is the caller's error. Below it, one directory we
+        // cannot open — a container's data volume owned by another uid — is
+        // noted and passed over rather than costing the rest of the tree.
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if depth == 0 => return Err(e),
+            Err(_) => {
+                tree.unreadable.push(dir.to_path_buf());
+                return Ok(());
+            }
+        };
+        for entry in entries {
+            let Ok((entry, meta)) = entry.and_then(|e| e.metadata().map(|m| (e, m))) else {
+                tree.unreadable.push(dir.to_path_buf());
+                break;
+            };
             let path = entry.path();
             let name = entry.file_name();
             let name = name.to_string_lossy().into_owned();
 
-            let meta = entry.metadata()?;
             if meta.is_symlink() {
                 continue;
             }
@@ -410,7 +434,7 @@ pub fn scan(root: &Path) -> Result<Vec<EnvFile>> {
                 if SKIP_DIRS.contains(&name.as_str()) {
                     continue;
                 }
-                walk(root, &path, depth + 1, out)?;
+                walk(root, &path, depth + 1, tree)?;
             } else if meta.is_file() && is_env_file(&name) {
                 let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
                 let project = path
@@ -418,7 +442,7 @@ pub fn scan(root: &Path) -> Result<Vec<EnvFile>> {
                     .and_then(|p| p.file_name())
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "env".to_owned());
-                out.push(EnvFile {
+                tree.files.push(EnvFile {
                     project,
                     relative,
                     path: path.clone(),
@@ -429,13 +453,16 @@ pub fn scan(root: &Path) -> Result<Vec<EnvFile>> {
         Ok(())
     }
 
-    let mut out = Vec::new();
-    walk(root, root, 0, &mut out).map_err(|e| Error::Io {
+    let mut tree = Tree {
+        files: Vec::new(),
+        unreadable: Vec::new(),
+    };
+    walk(root, root, 0, &mut tree).map_err(|e| Error::Io {
         path: root.to_path_buf(),
         source: e,
     })?;
-    out.sort_by(|a, b| a.relative.cmp(&b.relative));
-    Ok(out)
+    tree.files.sort_by(|a, b| a.relative.cmp(&b.relative));
+    Ok(tree)
 }
 
 // ---------------------------------------------------------------------------
@@ -557,9 +584,22 @@ pub fn import_dir(
     grouping: Grouping,
     into_collection: Option<&str>,
 ) -> Result<ImportSummary> {
-    let files = scan(root)?;
+    let Tree { files, unreadable } = scan_tree(root)?;
     let target = crate::target_collection(vault, into_collection.unwrap_or("Environment"));
     let mut summary = ImportSummary::default();
+
+    if !unreadable.is_empty() {
+        summary.skipped_unreadable += unreadable.len();
+        summary.notes.push(format!(
+            "{} folder(s) could not be read and were skipped: {}",
+            unreadable.len(),
+            unreadable
+                .iter()
+                .map(|d| d.strip_prefix(root).unwrap_or(d).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
 
     for file in &files {
         let text = match std::fs::read_to_string(&file.path) {
@@ -729,6 +769,39 @@ EMPTY=
             .collect();
         assert_eq!(names, vec!["project-a/.env", "project-b/.env.local"]);
         assert_eq!(found[0].project, "project-a");
+    }
+
+    /// A directory the scan cannot open — a container's data volume owned
+    /// by another uid, say — used to abort the whole import, blaming the
+    /// root. It is now counted and the rest of the tree still imports.
+    #[test]
+    fn an_unreadable_subdirectory_does_not_abort_the_scan() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let src = tree();
+        let locked = src.path().join("project-a/pgdata");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: permissions do not stop us, nothing to test.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+
+        let found = scan(src.path());
+        let (_d, mut v) = vault();
+        let summary = import_dir(&mut v, src.path(), Grouping::PerFile, None);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(found.unwrap().len(), 2);
+        let summary = summary.unwrap();
+        assert_eq!(summary.imported, 2);
+        assert_eq!(summary.skipped_unreadable, 1);
+        assert!(
+            summary.notes.iter().any(|n| n.contains("pgdata")),
+            "{:?}",
+            summary.notes
+        );
     }
 
     fn vault() -> (tempfile::TempDir, Vault) {

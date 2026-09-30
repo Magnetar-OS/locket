@@ -112,6 +112,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Unquoted `.env` values with a `#` right after certain non-ASCII letters
   were cut short: `PASSWORD=pà#ss` imported as `pà`. Only a `#` after real
   whitespace starts a comment now.
+- Importing `.env` files from a folder of projects failed outright with
+  "Permission denied" on the folder itself when any directory inside it
+  could not be read, such as a database volume owned by another user. Those
+  directories are now skipped and named in the summary, and everything else
+  imports.
 
 ### Security
 
