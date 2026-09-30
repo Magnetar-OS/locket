@@ -55,6 +55,8 @@ pub struct Applet {
     /// What we last put on the clipboard, so the clear timer can check it is
     /// still ours before wiping it — the same rule the main window follows.
     clipboard_copy: Option<String>,
+    /// The clear timer could not read the clipboard; it retries every tick.
+    clipboard_due: bool,
     notice: Option<String>,
 }
 
@@ -151,6 +153,7 @@ impl cosmic::Application for Applet {
             query: String::new(),
             results: Vec::new(),
             clipboard_copy: None,
+            clipboard_due: false,
             notice: None,
         };
         // Ask immediately so the icon is right before the first tick.
@@ -181,9 +184,13 @@ impl cosmic::Application for Applet {
                 }
             }
             Message::Tick => {
-                return cosmic::task::future(async {
+                let status = cosmic::task::future(async {
                     Message::Status(locket_secret::client::status().await)
                 });
+                if std::mem::take(&mut self.clipboard_due) {
+                    return Task::batch([status, cosmic::task::message(Message::ClearClipboard)]);
+                }
+                return status;
             }
             Message::Status(status) => self.status = status,
             Message::Lock => {
@@ -245,6 +252,7 @@ impl cosmic::Application for Applet {
                 };
                 self.notice = Some(fl!("copied", label = label, seconds = CLIPBOARD_CLEAR_SECS));
                 self.clipboard_copy = Some(secret.clone());
+                self.clipboard_due = false;
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
                 let clear = cosmic::task::future(async {
                     tokio::time::sleep(std::time::Duration::from_secs(CLIPBOARD_CLEAR_SECS)).await;
@@ -262,11 +270,21 @@ impl cosmic::Application for Applet {
             }
 
             Message::ClipboardChecked(current) => {
-                let ours = self.clipboard_copy.take();
-                if current.is_some() && current == ours {
-                    // Overwrite rather than clear: some clipboard managers
-                    // treat an empty payload as "no change".
-                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(String::new());
+                match clear_decision(
+                    current.as_deref(),
+                    self.clipboard_copy.as_deref(),
+                    self.popup.is_some(),
+                ) {
+                    ClearDecision::Clear => {
+                        self.clipboard_copy = None;
+                        // Overwrite rather than clear: some clipboard managers
+                        // treat an empty payload as "no change".
+                        return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
+                            String::new(),
+                        );
+                    }
+                    ClearDecision::Leave => self.clipboard_copy = None,
+                    ClearDecision::Retry => self.clipboard_due = true,
                 }
             }
 
@@ -433,6 +451,34 @@ impl Applet {
     }
 }
 
+/// What a clear timer does with what it read back from the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearDecision {
+    /// Still the secret we put there: wipe it.
+    Clear,
+    /// Something else, or nothing of ours to clear: leave it alone.
+    Leave,
+    /// Could not be read; try again on the next tick.
+    Retry,
+}
+
+/// `current` is what the clipboard read back as, `ours` what the applet put
+/// there, and `open` whether the popup — the applet's only surface that takes
+/// the keyboard — was open at the time.
+///
+/// On Wayland a client can read the clipboard only while it has the keyboard,
+/// and the popup is usually closed by the time a pasted password's timer
+/// fires. Not being able to look says nothing about whose it is, so the clear
+/// is retried on the next tick, and succeeds once the popup is open again.
+fn clear_decision(current: Option<&str>, ours: Option<&str>, open: bool) -> ClearDecision {
+    match (current, ours) {
+        (_, None) => ClearDecision::Leave,
+        (None, Some(_)) if !open => ClearDecision::Retry,
+        (Some(current), Some(ours)) if current == ours => ClearDecision::Clear,
+        _ => ClearDecision::Leave,
+    }
+}
+
 fn main() -> cosmic::iced::Result {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -445,4 +491,32 @@ fn main() -> cosmic::iced::Result {
     i18n::init(&i18n_embed::DesktopLanguageRequester::requested_languages());
 
     cosmic::applet::run::<Applet>(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The popup is closed by the time a pasted password's timer fires, and
+    /// without the keyboard the clipboard reads back as nothing. That is not
+    /// "somebody copied something else".
+    #[test]
+    fn an_unreadable_clipboard_is_retried_not_forgotten() {
+        assert_eq!(
+            clear_decision(None, Some("hunter2"), false),
+            ClearDecision::Retry
+        );
+        assert_eq!(
+            clear_decision(Some("hunter2"), Some("hunter2"), true),
+            ClearDecision::Clear
+        );
+        assert_eq!(
+            clear_decision(Some("mine"), Some("hunter2"), true),
+            ClearDecision::Leave
+        );
+        assert_eq!(
+            clear_decision(None, Some("hunter2"), true),
+            ClearDecision::Leave
+        );
+    }
 }

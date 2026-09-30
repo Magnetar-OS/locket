@@ -491,6 +491,9 @@ pub struct App {
     /// The secret we last put on the clipboard, so the clear timer can check
     /// it is still ours before wiping it.
     clipboard_copy: Option<String>,
+    /// The clear timer fired while no locket window had the keyboard, so the
+    /// clipboard could not be read or written; it runs again when one does.
+    clipboard_due: bool,
     /// The dialog raised by an application's unlock request, while one is up.
     prompt: Option<Prompt>,
 
@@ -1926,6 +1929,7 @@ impl cosmic::Application for App {
             security: Security::default(),
             unlock_requested_by_app: false,
             clipboard_copy: None,
+            clipboard_due: false,
             prompt: None,
             qr: None,
             about: about(),
@@ -2172,6 +2176,7 @@ impl cosmic::Application for App {
                 // "the user has copied something else since" — and only when
                 // there is a timer, or it would outlive every lock.
                 self.clipboard_copy = (clear_after > 0).then(|| value.clone());
+                self.clipboard_due = false;
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(value);
                 let notice = self.toast(if clear_after > 0 {
                     fl!("toast-copied-clearing", what = what, seconds = clear_after)
@@ -2198,14 +2203,28 @@ impl cosmic::Application for App {
             }
 
             Message::ClipboardChecked(current) => {
-                let ours = self.clipboard_copy.take();
-                if current.is_some() && current == ours {
-                    // Overwrite rather than clear: some clipboard managers
-                    // treat an empty payload as "no change" and keep serving
-                    // the old value.
-                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(String::new());
+                let focused = self.core.focused_window().is_some();
+                match clear_decision(current.as_deref(), self.clipboard_copy.as_deref(), focused) {
+                    ClearDecision::Clear => {
+                        self.clipboard_copy = None;
+                        // Overwrite rather than clear: some clipboard managers
+                        // treat an empty payload as "no change" and keep
+                        // serving the old value.
+                        return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
+                            String::new(),
+                        );
+                    }
+                    ClearDecision::Leave => {
+                        self.clipboard_copy = None;
+                        tracing::debug!("clipboard holds something else now; leaving it alone");
+                    }
+                    ClearDecision::RetryWhenFocused => {
+                        tracing::debug!(
+                            "cannot read the clipboard from the background; clearing it on return"
+                        );
+                        self.clipboard_due = true;
+                    }
                 }
-                tracing::debug!("clipboard holds something else now; leaving it alone");
             }
 
             Message::ToggleFavorite(id) => {
@@ -2511,20 +2530,34 @@ impl cosmic::Application for App {
             }
 
             Message::WindowFocused(id) => {
+                // A clear that could not look at the clipboard from the
+                // background gets its second look now that we have the
+                // keyboard. The pause lets the clipboard's own connection see
+                // the focus change before it is asked to read.
+                let retry = if std::mem::take(&mut self.clipboard_due) {
+                    cosmic::task::future(async {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        Message::ClearClipboard
+                    })
+                } else {
+                    Task::none()
+                };
                 // The dialog owns the caret while it has the keyboard: it has
                 // exactly one field, and it is the window in front.
-                if self
+                let caret = if self
                     .prompt
                     .as_ref()
                     .is_some_and(|prompt| prompt.window == id)
                 {
-                    return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
-                }
-                if Some(id) == self.core.main_window_id()
+                    widget::text_input::focus(prompt::PASSPHRASE_ID.clone())
+                } else if Some(id) == self.core.main_window_id()
                     && matches!(self.screen, Screen::Locked | Screen::Unlocking)
                 {
-                    return self.update(Message::FocusPassphrase);
-                }
+                    self.update(Message::FocusPassphrase)
+                } else {
+                    Task::none()
+                };
+                return Task::batch([retry, caret]);
             }
 
             Message::WindowCloseRequested(id) => {
@@ -3887,6 +3920,34 @@ impl Exposed<'_> {
     }
 }
 
+/// What a clear timer does with what it read back from the clipboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClearDecision {
+    /// Still the secret we put there: wipe it.
+    Clear,
+    /// Something else, or nothing of ours to clear: leave it alone.
+    Leave,
+    /// Could not be read; try again once the window has the keyboard.
+    RetryWhenFocused,
+}
+
+/// `current` is what the clipboard read back as, `ours` what locket put there,
+/// and `focused` whether a locket window had the keyboard at the time.
+///
+/// On Wayland a client can read the clipboard only while one of its windows
+/// has the keyboard — and after copying a password, the window with the
+/// keyboard is the one it is being pasted into. So an unreadable clipboard
+/// while unfocused says nothing about whose it is, and the clear waits for
+/// the window to come back rather than being dropped.
+fn clear_decision(current: Option<&str>, ours: Option<&str>, focused: bool) -> ClearDecision {
+    match (current, ours) {
+        (_, None) => ClearDecision::Leave,
+        (None, Some(_)) if !focused => ClearDecision::RetryWhenFocused,
+        (Some(current), Some(ours)) if current == ours => ClearDecision::Clear,
+        _ => ClearDecision::Leave,
+    }
+}
+
 /// One step of turning the unlock dialog down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Dismissal {
@@ -4354,6 +4415,33 @@ mod tests {
         let (locked, open) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         assert!(readmit(Screen::Locked, Some(vault(&locked))).is_none());
         assert!(readmit(Screen::Browsing, Some(vault(&open))).is_some());
+    }
+
+    /// On Wayland the clipboard can be neither read nor written by a client
+    /// without the keyboard, and after copying a password the window that
+    /// has it is the one being pasted into. Not being able to look is not
+    /// "somebody copied something else".
+    #[test]
+    fn an_unreadable_clipboard_is_retried_not_forgotten() {
+        assert_eq!(
+            clear_decision(None, Some("hunter2"), false),
+            ClearDecision::RetryWhenFocused
+        );
+        assert_eq!(
+            clear_decision(Some("hunter2"), Some("hunter2"), true),
+            ClearDecision::Clear
+        );
+        assert_eq!(
+            clear_decision(Some("mine"), Some("hunter2"), true),
+            ClearDecision::Leave
+        );
+        // Focused and still nothing readable: an image, or an empty
+        // clipboard — not ours either way.
+        assert_eq!(
+            clear_decision(None, Some("hunter2"), true),
+            ClearDecision::Leave
+        );
+        assert_eq!(clear_decision(Some("x"), None, false), ClearDecision::Leave);
     }
 
     /// Refusing needs a round trip to the daemon; ending the process first

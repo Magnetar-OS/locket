@@ -195,6 +195,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Items imported in the application are available to libsecret applications,
   the browser extension, the panel's quick search and the SSH agent straight
   away. They used to appear only after the next edit or unlock.
+- A copied secret was never cleared from the clipboard if another window had
+  the keyboard when the timer ran out, which is the usual case after pasting
+  it somewhere. locket cannot touch the clipboard from the background, so it
+  now clears it as soon as you come back to the window or open the panel
+  popup, and the copy message says so.
 
 ### Security
 

@@ -17,6 +17,6 @@ search-placeholder = Search secrets
 search-no-match = Nothing matches “{ $query }”
 search-locked = Unlock to search from here.
 copy = Copy
-copied = Copied “{ $label }” — clipboard clears in { $seconds }s
+copied = Copied “{ $label }” — the clipboard clears in { $seconds }s, or once this panel is open again if it is closed then
 copied-forever = Copied “{ $label }”
 copy-failed = Could not copy “{ $label }”: it may be binary, or the vault locked.

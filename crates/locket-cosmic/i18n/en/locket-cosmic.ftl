@@ -523,7 +523,7 @@ trash-retention-detail =
 ## Toasts and messages
 
 toast-copied = { $what } copied
-toast-copied-clearing = { $what } copied — clipboard clears in { $seconds }s
+toast-copied-clearing = { $what } copied — the clipboard clears in { $seconds }s, or when you come back to locket if another window has the keyboard then
 toast-saved = Saved { $label }
 toast-trashed = Moved { $label } to the trash
 toast-restored = Restored { $label }
