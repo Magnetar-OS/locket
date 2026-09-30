@@ -511,6 +511,46 @@ mod tests {
         assert!(back.tags.contains(&"work".to_owned()), "{:?}", back.tags);
     }
 
+    /// A vault that imported a KeePass database before entries carried
+    /// their UUID holds the entry without one. If its password has changed
+    /// since, re-importing used to add it a second time; it is the same
+    /// entry, and it gains the UUID it was missing.
+    #[test]
+    fn an_entry_imported_before_uuids_is_found_even_after_a_password_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v =
+            Vault::create(dir.path().join("v.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        v.add_item_default(
+            Item::new(ItemKind::Login, "GitHub")
+                .with_secret("new")
+                .with_field(Field::text(field_names::USERNAME, "ada")),
+        );
+        let out = dir.path().join("export.kdbx");
+        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+
+        // What the importer made of this entry before it recorded UUIDs, with
+        // the password it had then.
+        let mut scratch =
+            Vault::create(dir.path().join("s.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        crate::keepass::import_kdbx(&mut scratch, &out, "kdbx-pw", None, None).unwrap();
+        let mut earlier_item = scratch.data().all_items().next().unwrap().1.clone();
+        let uuid = earlier_item.attributes.remove("keepass:uuid").unwrap();
+        earlier_item.secret = "old".into();
+
+        let mut earlier =
+            Vault::create(dir.path().join("e.vault"), "pw", KdfParams::insecure_fast()).unwrap();
+        let id = earlier.add_item_default(earlier_item);
+        let summary = crate::keepass::import_kdbx(&mut earlier, &out, "kdbx-pw", None, None).unwrap();
+        assert_eq!(summary.imported, 0, "the entry was imported a second time");
+        assert_eq!(summary.skipped_duplicate, 1);
+        assert_eq!(earlier.data().item_count(), 1);
+        assert_eq!(
+            earlier.item(id).unwrap().attributes.get("keepass:uuid"),
+            Some(&uuid),
+            "the existing item did not gain its UUID"
+        );
+    }
+
     #[test]
     fn kdbx_seals_and_reopens_with_everything_that_fits() {
         let dir = tempfile::tempdir().unwrap();

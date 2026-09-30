@@ -159,17 +159,24 @@ pub fn import_kdbx(
     collect(&db.root(), "", db.meta.recyclebin_uuid, &mut items);
 
     for item in items {
-        // Entries imported before the UUID was recorded carry every other
-        // attribute and no UUID. One of those with the same password is this
-        // entry; a same-titled entry with another password is the one that
-        // used to be lost, and imports now.
+        if crate::already_present(vault, &item.attributes) {
+            summary.skipped_duplicate += 1;
+            continue;
+        }
+        // An entry imported before the UUID was recorded carries every other
+        // attribute and no UUID. It is this entry, even if its password has
+        // changed since, and it takes the UUID now, so a same-titled entry
+        // later in the walk no longer matches it and imports as its own.
         let mut without_uuid = item.attributes.clone();
         without_uuid.remove(UUID_ATTRIBUTE);
         let imported_before = vault
             .data()
             .all_items()
-            .any(|(_, i)| i.attributes == without_uuid && i.secret == item.secret);
-        if crate::already_present(vault, &item.attributes) || imported_before {
+            .find(|(_, i)| i.attributes == without_uuid)
+            .map(|(_, i)| i.id);
+        if let Some(existing) = imported_before.and_then(|id| vault.item_mut(id)) {
+            existing.attributes = item.attributes;
+            existing.touch();
             summary.skipped_duplicate += 1;
             continue;
         }

@@ -242,6 +242,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   half-written file behind, holding some of your secrets in the clear and
   blocking a retry under the same name. The partial file is now removed, and
   CSV exports are flushed to disk like the other formats.
+- Re-importing a KeePass database that was first imported with an earlier
+  version no longer adds a second copy of entries whose passwords have
+  changed since. The existing item is recognised as the same entry, as it
+  was before.
 
 ### Security
 
