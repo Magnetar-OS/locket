@@ -201,6 +201,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   change or a KeePass export was still running left the open vault in memory
   behind the lock screen once that work finished. The vault is now dropped
   when it comes back to a locked window.
+- Locking the window now clears everything the open vault put in it. An
+  unsaved edit, a half-filled passphrase or export form, the health report
+  and any open delete dialog used to survive the lock and come back after
+  the next unlock, and an auto-type counting down still typed.
 
 ### Documentation
 

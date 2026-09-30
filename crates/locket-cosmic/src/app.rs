@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cosmic::app::context_drawer::{self, ContextDrawer};
@@ -478,6 +479,10 @@ pub struct App {
     /// user explicitly runs it; it is the one thing here that goes online.
     breaches: Option<Result<Vec<(Uuid, u64)>, String>>,
     checking_breaches: bool,
+    /// The running breach check; dropping it aborts the requests.
+    breach_check: Option<cosmic::iced::task::Handle>,
+    /// Cleared to stop an auto-type that has not finished typing.
+    autotype: Option<Arc<AtomicBool>>,
 
     /// Set when the daemon asked for an unlock on an application's behalf, so
     /// the unlock screen can say why it appeared.
@@ -511,6 +516,49 @@ impl App {
         })
     }
 
+    /// Close the vault in this window: drop it, and everything it put on
+    /// screen or that was typed beside it.
+    ///
+    /// Every way the window locks comes through here — the button, idle, a
+    /// file whose key changed underneath us, switching vaults, a worker that
+    /// died holding the vault — so none of them can leave a draft or a
+    /// half-typed passphrase behind for the next unlock.
+    fn lock_state(&mut self) {
+        self.vault = None;
+        self.screen = Screen::Locked;
+        self.core.window.show_context = false;
+        Exposed {
+            selected: &mut self.selected,
+            revealed: &mut self.revealed,
+            qr: &mut self.qr,
+            search: &mut self.search,
+            editor: &mut self.editor,
+            import: &mut self.import,
+            export: &mut self.export,
+            security: &mut self.security,
+            health: &mut self.health,
+            breaches: &mut self.breaches,
+            checking_breaches: &mut self.checking_breaches,
+            breach_check: &mut self.breach_check,
+            autotype: &mut self.autotype,
+            pending_delete: &mut self.pending_delete,
+            pending_purge: &mut self.pending_purge,
+            pending_forget: &mut self.pending_forget,
+        }
+        .forget();
+    }
+
+    /// Lock this window and put the caret in the passphrase field.
+    fn lock_window(&mut self) -> Task<Message> {
+        self.lock_state();
+        self.unlock_requested_by_app = false;
+        self.passphrase_focused = true;
+        Task::batch([
+            self.update_title(),
+            widget::text_input::focus(PASSPHRASE_ID.clone()),
+        ])
+    }
+
     /// Pick up an edit another process made to the vault file.
     ///
     /// The daemon writes the same file whenever a `libsecret` client stores
@@ -533,8 +581,7 @@ impl App {
                 // Our DEK is useless against that file, so the only honest
                 // move is back to the unlock screen.
                 tracing::warn!("could not reload the changed vault: {e}");
-                self.vault = None;
-                self.screen = Screen::Locked;
+                self.lock_state();
                 self.error = Some(fl!("error-changed-elsewhere"));
                 false
             }
@@ -1847,6 +1894,8 @@ impl cosmic::Application for App {
             health: None,
             breaches: None,
             checking_breaches: false,
+            breach_check: None,
+            autotype: None,
             security: Security::default(),
             unlock_requested_by_app: false,
             clipboard_copy: None,
@@ -2024,18 +2073,9 @@ impl cosmic::Application for App {
 
             Message::Lock => {
                 // Dropping the vault drops the data-encryption key with it.
-                self.vault = None;
-                self.screen = Screen::Locked;
-                self.selected = None;
-                self.conceal();
-                self.search.clear();
-                self.core.window.show_context = false;
-                self.unlock_requested_by_app = false;
-                self.passphrase_focused = true;
-                let title = self.update_title();
+                let locked = self.lock_window();
                 return Task::batch([
-                    title,
-                    widget::text_input::focus(PASSPHRASE_ID.clone()),
+                    locked,
                     cosmic::task::future(async {
                         daemon::lock().await;
                         Message::DaemonUnlocked(false)
@@ -2102,8 +2142,9 @@ impl cosmic::Application for App {
             Message::CopyValue(what, value) => {
                 let clear_after = self.settings.clipboard_clear_seconds;
                 // Kept so the timer can tell "our secret is still there" from
-                // "the user has copied something else since".
-                self.clipboard_copy = Some(value.clone());
+                // "the user has copied something else since" — and only when
+                // there is a timer, or it would outlive every lock.
+                self.clipboard_copy = (clear_after > 0).then(|| value.clone());
                 let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(value);
                 let notice = self.toast(if clear_after > 0 {
                     fl!("toast-copied-clearing", what = what, seconds = clear_after)
@@ -2181,7 +2222,9 @@ impl cosmic::Application for App {
             }
 
             Message::ReloadVaultFile => {
-                if self.reload_if_changed() {
+                // The poll only runs while browsing, so a locked screen here
+                // means the reload just locked the window.
+                if self.reload_if_changed() || self.screen == Screen::Locked {
                     return self.update_title();
                 }
             }
@@ -2360,7 +2403,12 @@ impl cosmic::Application for App {
                     && self.screen == Screen::Browsing
                     && self.last_activity.elapsed().as_secs() >= limit
                 {
-                    return self.update(Message::Lock);
+                    // This window only. The daemon keeps its own idle clock
+                    // with the same limit, and on that one a libsecret lookup
+                    // or an ssh signature counts as use — locking it because
+                    // nobody touched this window would lock people out
+                    // mid-`ssh`.
+                    return self.lock_window();
                 }
             }
 
@@ -2390,8 +2438,7 @@ impl cosmic::Application for App {
                 } else {
                     // Only reachable if the worker died mid-import. The file
                     // on disk is untouched, so re-unlocking recovers.
-                    self.screen = Screen::Locked;
-                    self.import = None;
+                    self.lock_state();
                     self.error = Some(fl!("error-import-task"));
                     return self.update_title();
                 }
@@ -2619,8 +2666,10 @@ impl cosmic::Application for App {
                         });
                     }
                 }
-                if self.vault.is_none() {
-                    self.screen = Screen::Locked;
+                if self.vault.is_none() && self.screen == Screen::Browsing {
+                    // The worker died holding the vault.
+                    self.lock_state();
+                    return self.update_title();
                 }
             }
 
@@ -2631,9 +2680,10 @@ impl cosmic::Application for App {
                     Some(e) => self.security.error = Some(e),
                     None => self.security.notice = Some(fl!("toast-factor-added")),
                 }
-                if self.vault.is_none() {
+                if self.vault.is_none() && self.screen == Screen::Browsing {
                     // Failing safe: without a vault there is nothing to show.
-                    self.screen = Screen::Locked;
+                    self.lock_state();
+                    return self.update_title();
                 }
             }
 
@@ -2941,14 +2991,9 @@ impl cosmic::Application for App {
                 // Switching vaults is a lock plus a different unlock target.
                 // The daemon keeps serving the system vault regardless; the
                 // Settings panel is where that distinction is reported.
-                self.vault = None;
+                self.lock_state();
                 self.vault_path = path;
                 self.vault_exists = self.vault_path.is_file();
-                self.screen = Screen::Locked;
-                self.selected = None;
-                self.conceal();
-                self.search.clear();
-                self.core.window.show_context = false;
                 self.passphrase_focused = true;
                 let title = self.update_title();
                 return Task::batch([title, widget::text_input::focus(PASSPHRASE_ID.clone())]);
@@ -3102,8 +3147,9 @@ impl cosmic::Application for App {
 
             Message::ExportFinished(slot, outcome) => {
                 self.vault = readmit(self.screen, slot.lock().ok().and_then(|mut g| g.take()));
-                if self.vault.is_none() {
-                    self.screen = Screen::Locked;
+                if self.vault.is_none() && self.screen == Screen::Browsing {
+                    // The worker died holding the vault.
+                    self.lock_state();
                 }
                 return match outcome {
                     Ok((count, path)) => {
@@ -3126,9 +3172,14 @@ impl cosmic::Application for App {
                     "toast-autotype-armed",
                     seconds = crate::autotype::COUNTDOWN_SECS
                 ));
+                // Locking clears this, and the typing stops at the next key.
+                let wanted = Arc::new(AtomicBool::new(true));
+                if let Some(earlier) = self.autotype.replace(wanted.clone()) {
+                    earlier.store(false, Ordering::SeqCst);
+                }
                 let typing = cosmic::task::future(async move {
                     Message::AutoTyped(
-                        crate::autotype::type_credentials(username, secret)
+                        crate::autotype::type_credentials(username, secret, wanted)
                             .await
                             .map(|()| label),
                     )
@@ -3137,13 +3188,20 @@ impl cosmic::Application for App {
             }
 
             Message::AutoTyped(outcome) => {
+                self.autotype = None;
                 return match outcome {
                     Ok(label) => self.toast(fl!("toast-autotype-done", label = label)),
                     Err(e) => self.toast(fl!("toast-autotype-failed", error = e)),
                 };
             }
 
-            Message::HealthReady(report) => self.health = Some(*report),
+            Message::HealthReady(report) => {
+                // A report that finishes after the window locked describes a
+                // vault that is no longer open here.
+                if self.screen == Screen::Browsing {
+                    self.health = Some(*report);
+                }
+            }
 
             Message::CheckBreaches => {
                 if self.checking_breaches {
@@ -3162,7 +3220,7 @@ impl cosmic::Application for App {
                     .collect();
                 self.checking_breaches = true;
                 self.breaches = None;
-                return cosmic::task::future(async move {
+                let (check, handle) = cosmic::task::future(async move {
                     let outcome = async {
                         let client = locket_hibp::client().map_err(|e| e.to_string())?;
                         let mut found = Vec::new();
@@ -3177,12 +3235,18 @@ impl cosmic::Application for App {
                     }
                     .await;
                     Message::BreachesChecked(outcome)
-                });
+                })
+                .abortable();
+                self.breach_check = Some(handle.abort_on_drop());
+                return check;
             }
 
             Message::BreachesChecked(outcome) => {
                 self.checking_breaches = false;
-                self.breaches = Some(outcome);
+                self.breach_check = None;
+                if self.screen == Screen::Browsing {
+                    self.breaches = Some(outcome);
+                }
             }
 
             Message::DismissConflict => {
@@ -3357,6 +3421,11 @@ impl cosmic::Application for App {
     }
 
     fn dialog(&self) -> Option<Element<'_, Self::Message>> {
+        // Every dialog here acts on the open vault. Over the unlock screen it
+        // would name an item nobody can see, and act on it after the unlock.
+        if self.screen != Screen::Browsing {
+            return None;
+        }
         if let Some(format) = self.export.pending {
             // The plaintext warning, or the kdbx passphrase form.
             let dialog = if format == ExportFormat::Kdbx {
@@ -3714,6 +3783,63 @@ impl cosmic::Application for App {
         ));
 
         Subscription::batch(subs)
+    }
+}
+
+/// Everything the window holds that came out of the open vault, or was typed
+/// while it was open — everything but the vault itself.
+///
+/// Borrowed field by field so that locking clears all of it in one place, and
+/// so a test can see that it does without a window to draw.
+struct Exposed<'a> {
+    selected: &'a mut Option<Uuid>,
+    revealed: &'a mut HashSet<String>,
+    qr: &'a mut Option<(String, widget::qr_code::Data)>,
+    search: &'a mut String,
+    editor: &'a mut Option<Editor>,
+    import: &'a mut Option<import::Import>,
+    export: &'a mut ExportFlow,
+    security: &'a mut Security,
+    health: &'a mut Option<locket_core::health::HealthReport>,
+    breaches: &'a mut Option<Result<Vec<(Uuid, u64)>, String>>,
+    checking_breaches: &'a mut bool,
+    breach_check: &'a mut Option<cosmic::iced::task::Handle>,
+    autotype: &'a mut Option<Arc<AtomicBool>>,
+    pending_delete: &'a mut Option<Uuid>,
+    pending_purge: &'a mut Option<PurgeTarget>,
+    pending_forget: &'a mut Option<Uuid>,
+}
+
+impl Exposed<'_> {
+    fn forget(self) {
+        *self.selected = None;
+        self.revealed.clear();
+        *self.qr = None;
+        self.search.clear();
+        // A draft holds the item's secret and every field in plain text, and
+        // after the next unlock it would be applied to whatever vault is open
+        // then.
+        *self.editor = None;
+        *self.import = None;
+        *self.export = ExportFlow::default();
+        self.security.pin.clear();
+        self.security.clear_passphrase_form();
+        self.security.error = None;
+        self.security.notice = None;
+        *self.health = None;
+        *self.breaches = None;
+        *self.checking_breaches = false;
+        // Dropping the handle aborts the request loop: no more hash prefixes
+        // leave the machine for a vault that is locked.
+        *self.breach_check = None;
+        // Nothing gets typed once the window has locked, however far through
+        // its countdown an auto-type was.
+        if let Some(wanted) = self.autotype.take() {
+            wanted.store(false, Ordering::SeqCst);
+        }
+        *self.pending_delete = None;
+        *self.pending_purge = None;
+        *self.pending_forget = None;
     }
 }
 
@@ -4096,5 +4222,91 @@ mod tests {
         let (locked, open) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         assert!(readmit(Screen::Locked, Some(vault(&locked))).is_none());
         assert!(readmit(Screen::Browsing, Some(vault(&open))).is_some());
+    }
+
+    /// Locking drops the vault; this is everything else that came out of it
+    /// or was typed next to it, and in-flight work that would act on it.
+    #[test]
+    fn locking_forgets_everything_the_open_vault_put_on_screen() {
+        let mut selected = Some(Uuid::nil());
+        let mut revealed = HashSet::from(["__secret".to_owned()]);
+        let mut qr = Some((
+            "totp".to_owned(),
+            widget::qr_code::Data::new("otpauth://totp/x?secret=JBSWY3DP").unwrap(),
+        ));
+        let mut search = "bank".to_owned();
+        let mut editor = Some(Editor::from_item(
+            &Item::new(ItemKind::Login, "Bank").with_secret("hunter2"),
+        ));
+        let mut import = Some(import::Import {
+            database_password: "kdbx pass".into(),
+            ..Default::default()
+        });
+        let mut export = ExportFlow {
+            pending: Some(ExportFormat::Kdbx),
+            kdbx_passphrase: "export pass".into(),
+            kdbx_confirm: "export pass".into(),
+            error: None,
+        };
+        let mut security = Security {
+            pin: "1234".into(),
+            current: "old".into(),
+            new1: "new".into(),
+            new2: "new".into(),
+            busy: Some(security::Factor::SecurityKey),
+            ..Default::default()
+        };
+        let mut health = Some(locket_core::health::HealthReport::default());
+        let mut breaches = Some(Ok(vec![(Uuid::nil(), 3)]));
+        let mut checking_breaches = true;
+        let mut breach_check = Some(cosmic::iced::Task::<()>::none().abortable().1);
+        let wanted = Arc::new(AtomicBool::new(true));
+        let mut autotype = Some(wanted.clone());
+        let mut pending_delete = Some(Uuid::nil());
+        let mut pending_purge = Some(PurgeTarget::All);
+        let mut pending_forget = Some(Uuid::nil());
+
+        Exposed {
+            selected: &mut selected,
+            revealed: &mut revealed,
+            qr: &mut qr,
+            search: &mut search,
+            editor: &mut editor,
+            import: &mut import,
+            export: &mut export,
+            security: &mut security,
+            health: &mut health,
+            breaches: &mut breaches,
+            checking_breaches: &mut checking_breaches,
+            breach_check: &mut breach_check,
+            autotype: &mut autotype,
+            pending_delete: &mut pending_delete,
+            pending_purge: &mut pending_purge,
+            pending_forget: &mut pending_forget,
+        }
+        .forget();
+
+        assert!(selected.is_none() && revealed.is_empty() && qr.is_none() && search.is_empty());
+        assert!(editor.is_none(), "an editor draft survived the lock");
+        assert!(import.is_none(), "the import form survived the lock");
+        assert!(
+            export.pending.is_none()
+                && export.kdbx_passphrase.is_empty()
+                && export.kdbx_confirm.is_empty(),
+            "the export passphrase survived the lock"
+        );
+        assert!(
+            security.pin.is_empty()
+                && security.current.is_empty()
+                && security.new1.is_empty()
+                && security.new2.is_empty(),
+            "the security form survived the lock"
+        );
+        // A worker still holds the vault; its completion clears this.
+        assert_eq!(security.busy, Some(security::Factor::SecurityKey));
+        assert!(health.is_none() && breaches.is_none() && !checking_breaches);
+        assert!(breach_check.is_none(), "the breach check kept running");
+        assert!(autotype.is_none() && !wanted.load(Ordering::SeqCst));
+        assert!(pending_delete.is_none() && pending_purge.is_none() && pending_forget.is_none());
     }
 }

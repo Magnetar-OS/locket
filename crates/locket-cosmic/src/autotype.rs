@@ -18,6 +18,8 @@ use ashpd::desktop::remote_desktop::{
 use ashpd::desktop::{PersistMode, Session};
 use ashpd::enumflags2::BitFlags;
 use locket_core::SecretString;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How long the person has to click the target field, after the portal has
 /// granted access.
@@ -50,9 +52,13 @@ fn keysym_for(c: char) -> Option<i32> {
 /// starts, so the person is never racing a timer while reading a consent
 /// prompt. `PersistMode::Application` lets the compositor remember the
 /// answer, so the dialog is a first-use cost rather than a per-use one.
+///
+/// `wanted` is cleared when the window locks; every key checks it first, so
+/// nothing is typed from a vault that has since been locked.
 pub async fn type_credentials(
     username: Option<String>,
     secret: SecretString,
+    wanted: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let proxy = RemoteDesktop::new().await.map_err(portal_error)?;
     let session = proxy
@@ -83,10 +89,10 @@ pub async fn type_credentials(
     tokio::time::sleep(std::time::Duration::from_secs(COUNTDOWN_SECS)).await;
 
     if let Some(username) = &username {
-        type_text(&proxy, &session, username).await?;
-        press(&proxy, &session, 0xff09).await?; // Tab
+        type_text(&proxy, &session, username, &wanted).await?;
+        press(&proxy, &session, 0xff09, &wanted).await?; // Tab
     }
-    type_text(&proxy, &session, secret.expose()).await?;
+    type_text(&proxy, &session, secret.expose(), &wanted).await?;
     Ok(())
 }
 
@@ -94,11 +100,12 @@ async fn type_text(
     proxy: &RemoteDesktop,
     session: &Session<RemoteDesktop>,
     text: &str,
+    wanted: &AtomicBool,
 ) -> Result<(), String> {
     for c in text.chars() {
         let keysym = keysym_for(c)
             .ok_or_else(|| format!("the value contains an untypeable character ({c:?})"))?;
-        press(proxy, session, keysym).await?;
+        press(proxy, session, keysym, wanted).await?;
     }
     Ok(())
 }
@@ -107,7 +114,11 @@ async fn press(
     proxy: &RemoteDesktop,
     session: &Session<RemoteDesktop>,
     keysym: i32,
+    wanted: &AtomicBool,
 ) -> Result<(), String> {
+    if !wanted.load(Ordering::SeqCst) {
+        return Err("the vault was locked before typing finished".into());
+    }
     proxy
         .notify_keyboard_keysym(
             session,
