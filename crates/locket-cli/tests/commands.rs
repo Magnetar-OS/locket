@@ -48,11 +48,19 @@ fn an_ambiguous_get_prints_no_secret() {
     let got = cli(&vault, &["get", "github"]);
     assert!(!got.status.success(), "an ambiguous query printed a secret");
     assert!(got.stdout.is_empty());
-    assert!(text(&got.stderr).contains("github work"), "{}", text(&got.stderr));
+    assert!(
+        text(&got.stderr).contains("github work"),
+        "{}",
+        text(&got.stderr)
+    );
 
     let got = cli(&vault, &["get", "github work"]);
     assert!(got.status.success(), "{}", text(&got.stderr));
-    assert_eq!(got.stdout.len(), 21, "a 20-character password and a newline");
+    assert_eq!(
+        got.stdout.len(),
+        21,
+        "a 20-character password and a newline"
+    );
 }
 
 /// `--memory-mib` is multiplied into KiB. An overflow used to wrap, which in a

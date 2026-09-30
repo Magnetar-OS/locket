@@ -1299,9 +1299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let m_cost = match memory_mib {
                 // Checked: an overflow used to wrap to a small, valid cost in
                 // a release build and weaken the vault without a word.
-                Some(mib) => mib
-                    .checked_mul(1024)
-                    .ok_or("--memory-mib is too large")?,
+                Some(mib) => mib.checked_mul(1024).ok_or("--memory-mib is too large")?,
                 None => defaults.m_cost,
             };
             let params = KdfParams {
