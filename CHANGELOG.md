@@ -197,6 +197,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   the exported file could be attacked with far less effort than the vault it
   came from. New exports use the same Argon2 cost as a new vault (64 MiB).
   Re-export anything you have already moved out this way.
+- Locking the window while an import, a new unlock factor, a passphrase
+  change or a KeePass export was still running left the open vault in memory
+  behind the lock screen once that work finished. The vault is now dropped
+  when it comes back to a locked window.
 
 ### Documentation
 

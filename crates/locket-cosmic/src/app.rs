@@ -2386,7 +2386,7 @@ impl cosmic::Application for App {
                 // The vault always comes home, whether or not the import
                 // worked; losing it here would strand an unlocked session.
                 if let Some(vault) = slot.lock().ok().and_then(|mut g| g.take()) {
-                    self.vault = Some(vault);
+                    self.vault = readmit(self.screen, Some(vault));
                 } else {
                     // Only reachable if the worker died mid-import. The file
                     // on disk is untouched, so re-unlocking recovers.
@@ -2607,7 +2607,7 @@ impl cosmic::Application for App {
             Message::PassphraseRotated(slot, error) => {
                 self.security.changing = false;
                 self.security.clear_passphrase_form();
-                self.vault = slot.lock().ok().and_then(|mut g| g.take());
+                self.vault = readmit(self.screen, slot.lock().ok().and_then(|mut g| g.take()));
                 match error {
                     Some(e) => self.security.error = Some(e),
                     None => {
@@ -2626,7 +2626,7 @@ impl cosmic::Application for App {
 
             Message::SecurityEnrolled(slot, error) => {
                 self.security.busy = None;
-                self.vault = slot.lock().ok().and_then(|mut g| g.take());
+                self.vault = readmit(self.screen, slot.lock().ok().and_then(|mut g| g.take()));
                 match error {
                     Some(e) => self.security.error = Some(e),
                     None => self.security.notice = Some(fl!("toast-factor-added")),
@@ -3101,7 +3101,7 @@ impl cosmic::Application for App {
             }
 
             Message::ExportFinished(slot, outcome) => {
-                self.vault = slot.lock().ok().and_then(|mut g| g.take());
+                self.vault = readmit(self.screen, slot.lock().ok().and_then(|mut g| g.take()));
                 if self.vault.is_none() {
                     self.screen = Screen::Locked;
                 }
@@ -3717,6 +3717,16 @@ impl cosmic::Application for App {
     }
 }
 
+/// Take back a vault that a worker had for the duration of its job.
+///
+/// Only into a window that is still open. The lock button stays live while a
+/// worker runs — an import can take minutes, a security key waits for a touch
+/// — and a vault handed back after the lock would sit in memory, key and all,
+/// behind a screen that says it is locked.
+fn readmit(screen: Screen, vault: Option<Vault>) -> Option<Vault> {
+    vault.filter(|_| screen == Screen::Browsing)
+}
+
 /// Put what the editor saved into the vault: over item `id`, or as a new item
 /// when there is none.
 fn apply_edit(vault: &mut Vault, id: Option<Uuid>, item: Item) -> locket_core::Result<()> {
@@ -4076,5 +4086,15 @@ mod tests {
             apply_edit(&mut vault, id, *item).is_err(),
             "an edit to a deleted item was accepted"
         );
+    }
+
+    /// Import, enrolment, a passphrase change and a kdbx export hold the
+    /// vault on a worker. Locking meanwhile must not end with the vault back
+    /// in a window that shows the unlock screen.
+    #[test]
+    fn a_vault_coming_back_from_a_worker_after_a_lock_is_dropped() {
+        let (locked, open) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        assert!(readmit(Screen::Locked, Some(vault(&locked))).is_none());
+        assert!(readmit(Screen::Browsing, Some(vault(&open))).is_some());
     }
 }
