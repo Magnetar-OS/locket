@@ -540,7 +540,8 @@ mod tests {
         let mut earlier =
             Vault::create(dir.path().join("e.vault"), "pw", KdfParams::insecure_fast()).unwrap();
         let id = earlier.add_item_default(earlier_item);
-        let summary = crate::keepass::import_kdbx(&mut earlier, &out, "kdbx-pw", None, None).unwrap();
+        let summary =
+            crate::keepass::import_kdbx(&mut earlier, &out, "kdbx-pw", None, None).unwrap();
         assert_eq!(summary.imported, 0, "the entry was imported a second time");
         assert_eq!(summary.skipped_duplicate, 1);
         assert_eq!(earlier.data().item_count(), 1);

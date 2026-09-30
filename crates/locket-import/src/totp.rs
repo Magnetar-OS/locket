@@ -103,13 +103,20 @@ fn encode(s: &str) -> String {
 
 /// Pull the issuer and account out of an `otpauth://` URI for labelling.
 fn describe(uri: &str) -> (Option<String>, String) {
+    describe_label(uri, false)
+}
+
+/// [`describe`], choosing how a `+` in the label reads. Only `false` is
+/// right; `true` is how labels were read before, and finds items imported
+/// then.
+fn describe_label(uri: &str, label_plus_is_space: bool) -> (Option<String>, String) {
     let after_scheme = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
     let path = after_scheme
         .split_once('/')
         .map(|(_, rest)| rest)
         .unwrap_or("");
     let (label, query) = path.split_once('?').unwrap_or((path, ""));
-    let label = decode(label, false);
+    let label = decode(label, label_plus_is_space);
 
     let issuer_param = query.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;
@@ -414,6 +421,35 @@ pub fn import_file(
             summary.skipped_duplicate += 1;
             continue;
         }
+        // Before a `+` in the label stayed a `+`, `ada+work@example.com` was
+        // stored as `ada work@example.com`. The same seed under the account
+        // read that way is this entry: it counts as present, and its
+        // attributes are put right.
+        let (issuer, account) = describe_label(&entry.uri, true);
+        let earlier = item_for(&Entry {
+            issuer,
+            account,
+            uri: entry.uri.clone(),
+        })
+        .attributes;
+        let imported_before = (earlier != item.attributes)
+            .then(|| {
+                vault
+                    .data()
+                    .all_items()
+                    .find(|(_, existing)| {
+                        existing.attributes == earlier
+                            && existing.field_value(field_names::TOTP) == Some(entry.uri.as_str())
+                    })
+                    .map(|(_, existing)| existing.id)
+            })
+            .flatten();
+        if let Some(existing) = imported_before.and_then(|id| vault.item_mut(id)) {
+            existing.attributes = item.attributes;
+            existing.touch();
+            summary.skipped_duplicate += 1;
+            continue;
+        }
         vault
             .add_item(target, item)
             .map_err(|e| Error::Vault(e.to_string()))?;
@@ -649,6 +685,43 @@ mod tests {
         let second = import_file(&mut v, &file, None).unwrap();
         assert_eq!(second.imported, 0);
         assert_eq!(second.skipped_duplicate, 2);
+    }
+
+    /// Before `+` survived in a label, `ada+work@example.com` was stored as
+    /// the account `ada work@example.com`. Re-importing the same list must
+    /// find that item — same seed — rather than add a second one, and put
+    /// the account right.
+    #[test]
+    fn an_account_stored_with_a_space_for_its_plus_is_found_and_corrected() {
+        let line =
+            format!("otpauth://totp/GitHub:ada+work@example.com?secret={SEED}&issuer=GitHub");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("codes.txt");
+        std::fs::write(&file, format!("{line}\n")).unwrap();
+        let mut v = Vault::create(
+            dir.path().join("v.vault"),
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+        let id = v.add_item_default(item_for(&Entry {
+            issuer: Some("GitHub".into()),
+            account: "ada work@example.com".into(),
+            uri: line.clone(),
+        }));
+
+        let summary = import_file(&mut v, &file, None).unwrap();
+        assert_eq!(summary.imported, 0, "the seed was imported a second time");
+        assert_eq!(summary.skipped_duplicate, 1);
+        assert_eq!(v.data().item_count(), 1);
+        assert_eq!(
+            v.item(id)
+                .unwrap()
+                .attributes
+                .get("totp:account")
+                .map(String::as_str),
+            Some("ada+work@example.com")
+        );
     }
 
     #[test]

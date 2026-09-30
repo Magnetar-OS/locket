@@ -246,6 +246,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   version no longer adds a second copy of entries whose passwords have
   changed since. The existing item is recognised as the same entry, as it
   was before.
+- Re-importing a list of `otpauth://` URIs no longer adds a second copy of
+  codes whose account contains a `+`, which an earlier version had imported
+  with a space in its place. The existing item is recognised and its search
+  attributes are corrected.
 
 ### Security
 
