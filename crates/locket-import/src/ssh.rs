@@ -322,6 +322,10 @@ pub fn import_dir(
     let target = crate::target_collection(vault, into_collection.unwrap_or("SSH"));
     let mut summary = ImportSummary::default();
     let mut token_bound_names = Vec::new();
+    // Imported, but not served until something is done about them; the
+    // summary names them rather than leaving `ssh-add -l` to reveal it.
+    let mut legacy_names = Vec::new();
+    let mut encrypted_names = Vec::new();
 
     for key in &keys {
         let pem = match std::fs::read_to_string(&key.path) {
@@ -338,12 +342,21 @@ pub fn import_dir(
             continue;
         }
         let token_bound = key.is_token_bound();
+        // The agent parses OpenSSH's own format only; the older PEM formats
+        // are accepted here so they are not lost, but it cannot load them.
+        let legacy = !pem.contains("BEGIN OPENSSH PRIVATE KEY");
         vault
             .add_item(target, item)
             .map_err(|e| Error::Vault(e.to_string()))?;
         summary.imported += 1;
         if token_bound {
             token_bound_names.push(key.name.clone());
+        }
+        if legacy {
+            legacy_names.push(key.name.clone());
+        }
+        if key.encrypted {
+            encrypted_names.push(key.name.clone());
         }
     }
 
@@ -354,6 +367,24 @@ pub fn import_dir(
              they authenticate only with the token present.",
             token_bound_names.len(),
             token_bound_names.join(", ")
+        ));
+    }
+
+    if !legacy_names.is_empty() {
+        summary.notes.push(format!(
+            "{} of these are in an older PEM format that locket's agent cannot \
+             load: {}. `ssh-keygen -p -f FILE` rewrites a key in OpenSSH's own \
+             format; import it again afterwards.",
+            legacy_names.len(),
+            legacy_names.join(", ")
+        ));
+    }
+    if !encrypted_names.is_empty() {
+        summary.notes.push(format!(
+            "{} of these are protected by a passphrase: {}. The agent serves \
+             them once the passphrase is stored as the item's secret.",
+            encrypted_names.len(),
+            encrypted_names.join(", ")
         ));
     }
 
@@ -489,6 +520,59 @@ ZWRlbnRpYWwtaGFuZGxlAAAAAAAAAAx0b2tlbkBsYXB0b3ABAgME\n\
             "the ordinary key was reported as token-bound: {}",
             summary.notes[0]
         );
+    }
+
+    /// Two kinds of key import without being usable straight away, and the
+    /// summary has to say which: the agent loads only OpenSSH's own format,
+    /// and an encrypted key waits for its passphrase.
+    #[test]
+    fn legacy_pem_and_encrypted_keys_are_called_out() {
+        use locket_core::{Vault, crypto::KdfParams};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("id_ed25519"), UNENCRYPTED).unwrap();
+        std::fs::write(
+            dir.path().join("old_rsa"),
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJB\n-----END RSA PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("enc_rsa"),
+            "-----BEGIN RSA PRIVATE KEY-----\n\
+             Proc-Type: 4,ENCRYPTED\n\
+             DEK-Info: AES-128-CBC,0123\n\n\
+             abc\n-----END RSA PRIVATE KEY-----\n",
+        )
+        .unwrap();
+
+        let vault_dir = tempfile::tempdir().unwrap();
+        let mut vault = Vault::create(
+            vault_dir.path().join("v.vault"),
+            "pw",
+            KdfParams::insecure_fast(),
+        )
+        .unwrap();
+        let summary = import_dir(&mut vault, dir.path(), None).unwrap();
+        assert_eq!(summary.imported, 3);
+
+        let legacy = summary
+            .notes
+            .iter()
+            .find(|n| n.contains("ssh-keygen"))
+            .expect("no note about keys the agent cannot load");
+        assert!(
+            legacy.contains("old_rsa") && legacy.contains("enc_rsa"),
+            "{legacy}"
+        );
+        assert!(!legacy.contains("id_ed25519"), "{legacy}");
+
+        let encrypted = summary
+            .notes
+            .iter()
+            .find(|n| n.contains("passphrase"))
+            .expect("no note about encrypted keys");
+        assert!(encrypted.contains("enc_rsa"), "{encrypted}");
+        assert!(!encrypted.contains("old_rsa"), "{encrypted}");
     }
 
     fn tree() -> tempfile::TempDir {

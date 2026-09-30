@@ -131,6 +131,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Importing a Proton Pass export lost two things: one-time-code seeds stored
   as extra fields on an item, and the address of every alias. Both now come
   across.
+- Importing SSH keys now says which ones will not be served straight away.
+  Keys in the older PEM formats (`BEGIN RSA PRIVATE KEY` and the like) were
+  imported but never offered by locket's agent, and passphrase-protected
+  keys waited silently for a passphrase; both are now named in the import
+  summary, with how to convert the former.
 
 ### Security
 
