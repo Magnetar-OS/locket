@@ -73,6 +73,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Merging the same diverged copy more than once no longer fills an item's
   history with copies of the same old version, pushing out the revisions it
   held before.
+- Merging a diverged copy no longer loses the earlier versions an item went
+  through on the side whose edit lost. They are kept in the item's history
+  along with its last state there.
 
 ### Security
 

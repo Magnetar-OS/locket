@@ -59,9 +59,10 @@ pub struct MergeReport {
     pub attachments_dropped: usize,
     /// Collections the incoming copy had renamed or re-aliased more recently.
     pub collections_updated: usize,
-    /// Losing sides of conflicted edits filed into the winner's history. This
-    /// is the only trace of a merge in which our edit won every conflict, and
-    /// it is a change to the vault like any other: it has to be saved.
+    /// Items whose losing side — its state, or revisions only it had recorded
+    /// — was filed into the winner's history. This is the only trace of a
+    /// merge in which our edit won every conflict, and it is a change to the
+    /// vault like any other: it has to be saved.
     pub filed: usize,
     /// Trash entries taken from the incoming copy: items only its trash held,
     /// and later deletion times for items both sides had trashed.
@@ -244,26 +245,42 @@ fn absorb_loser(winner: &mut Item, loser: &Item, report: &mut MergeReport) {
     {
         report.attachments_dropped += 1;
     }
-    if !Item::content_differs(winner, loser) {
-        return;
+    // Everything the loser could still restore is filed: the revisions it
+    // recorded on its side of the fork, and its current state when that
+    // differs. What the winner's history already holds is skipped —
+    // typically because this same copy was merged before, and filing it
+    // again would only push real revisions out of the bounded history.
+    let held = |history: &[Revision], item: &Item| {
+        history
+            .iter()
+            .any(|r| !Item::content_differs(&r.item, item))
+    };
+    let mut filed = false;
+    for revision in &loser.history {
+        if !held(&winner.history, &revision.item) {
+            winner.history.push(revision.clone());
+            filed = true;
+        }
     }
-    // Already recoverable — typically because this same copy was merged
-    // before. Filing it again would only push real revisions out of the
-    // bounded history.
-    let snapshot = loser.snapshot();
-    if winner
-        .history
-        .iter()
-        .any(|r| !Item::content_differs(&r.item, &snapshot))
-    {
-        return;
+    if filed {
+        // Newest last, as everywhere else: the two sides' revisions
+        // interleave by when each state was replaced.
+        winner.history.sort_by_key(|r| r.saved);
     }
-    winner.history.push(Revision {
-        saved: now(),
-        item: snapshot,
-    });
-    winner.trim_history();
-    report.filed += 1;
+    if Item::content_differs(winner, loser) {
+        let snapshot = loser.snapshot();
+        if !held(&winner.history, &snapshot) {
+            winner.history.push(Revision {
+                saved: now(),
+                item: snapshot,
+            });
+            filed = true;
+        }
+    }
+    if filed {
+        winner.trim_history();
+        report.filed += 1;
+    }
 }
 
 /// The collection an incoming item should land in: where the winning side had
@@ -654,6 +671,42 @@ mod tests {
             !again.changed(),
             "a repeated merge reported changes: {again}"
         );
+    }
+
+    /// Only the loser's current state used to be filed: revisions it had
+    /// recorded on its own side of the fork were dropped with it.
+    #[test]
+    fn revisions_only_the_losing_side_held_survive() {
+        let (base, id) = vault_with("Login", "original");
+        let mut a = fork(&base);
+        let mut b = fork(&base);
+        {
+            let item = &mut a.collections[0].items[0];
+            item.record_revision();
+            item.secret = "a1".into();
+            item.record_revision();
+            item.secret = "a2".into();
+            item.modified = 1_000;
+        }
+        {
+            let item = &mut b.collections[0].items[0];
+            item.secret = "b1".into();
+            item.modified = 2_000;
+        }
+
+        for (mut into, other) in [(fork(&a), fork(&b)), (fork(&b), fork(&a))] {
+            merge(&mut into, other);
+            let (_, item) = into.find_item(id).unwrap();
+            assert_eq!(item.secret.expose(), "b1");
+            let kept: Vec<&str> = item
+                .history
+                .iter()
+                .map(|r| r.item.secret.expose())
+                .collect();
+            for lost in ["original", "a1", "a2"] {
+                assert!(kept.contains(&lost), "{lost} is gone: {kept:?}");
+            }
+        }
     }
 
     #[test]
