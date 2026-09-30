@@ -117,6 +117,9 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   could not be read, such as a database volume owned by another user. Those
   directories are now skipped and named in the summary, and everything else
   imports.
+- A `pass` entry holding binary data was imported with its bytes replaced by
+  placeholder characters and counted as a success. It is now reported as
+  unreadable and left in the store as it is.
 
 ### Security
 

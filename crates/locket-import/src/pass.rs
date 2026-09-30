@@ -169,7 +169,11 @@ fn decrypt(gpg: &str, path: &Path) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    // Not lossy: replacing bytes with U+FFFD would store something that looks
+    // like the secret and is not. A `pass` entry is text by its own
+    // convention, so one that is not is reported unreadable.
+    String::from_utf8(output.stdout)
+        .map_err(|_| Error::Decrypt("the decrypted entry is not UTF-8 text".into()))
 }
 
 /// Import a whole password-store into `vault`. Does not save.
@@ -314,6 +318,35 @@ mod tests {
         let item = parse_entry("x", "");
         assert_eq!(item.secret.expose(), "");
         assert_eq!(item.label, "x");
+    }
+
+    /// A decrypted entry that is not UTF-8 used to go through a lossy
+    /// conversion and land in the vault with U+FFFD where its bytes were,
+    /// counted as imported. It is unreadable as a `pass` entry, and counted
+    /// as such.
+    #[test]
+    fn a_binary_entry_is_counted_unreadable_not_mangled() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("binary.gpg"), b"x").unwrap();
+        // Stands in for gpg: "decrypts" every entry to two bytes that are
+        // not UTF-8.
+        let fake_gpg = dir.path().join("fake-gpg");
+        std::fs::write(&fake_gpg, "#!/bin/sh\nprintf '\\377\\376'\n").unwrap();
+        std::fs::set_permissions(&fake_gpg, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut vault = Vault::create(
+            dir.path().join("v.vault"),
+            "pw",
+            locket_core::crypto::KdfParams::insecure_fast(),
+        )
+        .unwrap();
+        let summary = import_store(&mut vault, &store, fake_gpg.to_str().unwrap(), None).unwrap();
+        assert_eq!(summary.imported, 0);
+        assert_eq!(summary.skipped_unreadable, 1);
     }
 
     #[test]
