@@ -3,7 +3,7 @@
 //! The scheme is deliberately boring:
 //!
 //! * **KDF** — Argon2id derives a 32-byte *key-encryption key* (KEK) from the
-//!   user's passphrase and a per-vault random salt.
+//!   user's passphrase and a random salt of its own for each passphrase slot.
 //! * **Key wrapping** — the vault body is encrypted under a random 32-byte
 //!   *data-encryption key* (DEK); the DEK is sealed under the KEK. Changing the
 //!   passphrase therefore rewraps 32 bytes instead of re-encrypting the vault,

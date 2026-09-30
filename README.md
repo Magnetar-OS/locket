@@ -254,7 +254,7 @@ to take over from gnome-keyring.
 the vault (round-trip, passphrase change, format upgrade, no-plaintext-on-disk,
 0600 perms, a tampered collection index failing authentication), key slots and
 the rule that the last one cannot be removed, RFC 6238 TOTP vectors for
-SHA-1/256/512, the password generator's bias and composition properties, the DH
+SHA-1/256/512, the password generator's length and composition rules, the DH
 session against a simulated libsecret peer, the SSH agent's wire format, its
 lock/unlock round trip, the RSA hash the client asks for, certificate
 identities and the confirm-each-use gate, the security-key signature encoding
