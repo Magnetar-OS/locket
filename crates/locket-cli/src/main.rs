@@ -336,14 +336,14 @@ enum Command {
     /// Write every item, secrets included, to another format.
     ///
     /// The way *out*. A password manager you cannot leave is a trap, so
-    /// leaving is as supported as arriving: lossless JSON, the flat CSV every
+    /// leaving is as supported as arriving: complete JSON, the flat CSV every
     /// manager imports, or an encrypted .kdbx that KeePassXC opens directly.
     /// The plaintext formats write 0600 and tell you to delete the file,
     /// exactly as the importers say about the files they read.
     Export {
         /// Where to write. Refused if it already exists.
         file: PathBuf,
-        /// json (lossless), csv (flat; says what it dropped), or kdbx
+        /// json (every item, field and attachment), csv (flat; says what it dropped), or kdbx
         /// (encrypted, needs --kdbx-passphrase-env or a prompt).
         #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
         format: ExportFormat,
@@ -1370,7 +1370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if lossy > 0 {
                         eprintln!(
                             "{lossy} item(s) had custom fields or attachments CSV cannot \
-                             carry; use --format json for a lossless copy"
+                             carry; use --format json to keep them"
                         );
                     }
                 }

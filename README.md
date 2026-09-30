@@ -529,7 +529,9 @@ The CSV importer matches *column aliases* rather than detecting a vendor
 dialect, because every exporter names things differently and renames them
 between releases. Chrome's `name,url,username,password,note` and Bitwarden's
 `login_uri,login_username,login_password,login_totp` fall out of one table, and
-columns nothing recognises are kept as custom fields instead of being dropped.
+columns nothing recognises are kept as custom fields instead of being dropped —
+except the bookkeeping columns `type` and `reprompt`, which describe the export
+rather than the login, while `favorite` sets the item's favourite flag.
 A browser export is a plaintext copy of every credential you own, so the CLI
 tells you to delete it afterwards.
 
