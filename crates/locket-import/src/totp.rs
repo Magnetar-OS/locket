@@ -159,7 +159,7 @@ fn decode(s: &str, plus_is_space: bool) -> String {
         });
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy_owned(out)
 }
 
 // ---------------------------------------------------------------------------

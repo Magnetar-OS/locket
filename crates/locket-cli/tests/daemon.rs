@@ -101,7 +101,7 @@ async fn without_a_daemon_the_command_line_is_silent() {
     assert!(!stderr(&added).contains("daemon"), "{}", stderr(&added));
 
     let listed = cli(None, &vault, &["list"]).await;
-    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let listed = String::from_utf8_lossy_owned(listed.stdout);
     assert!(listed.contains("from the command line"), "{listed}");
     assert!(listed.contains("with no bus"), "{listed}");
 }

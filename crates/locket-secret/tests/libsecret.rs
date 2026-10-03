@@ -83,7 +83,7 @@ async fn libsecret_stores_finds_replaces_and_clears() {
     search.extend(ATTRIBUTES);
     let listed = secret_tool(&daemon, &search, None).await;
     assert!(listed.status.success(), "{}", stderr(&listed));
-    let listed = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let listed = String::from_utf8_lossy_owned(listed.stdout);
     assert_eq!(listed.matches("secret = ").count(), 1, "{listed}");
     assert!(listed.contains("label = an example"), "{listed}");
 

@@ -992,7 +992,7 @@ mod tests {
         v.add_item_default(Item::new(ItemKind::Login, "Bank").with_secret("s3kr1t-canary-value"));
         v.save().unwrap();
 
-        let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        let raw = String::from_utf8_lossy_owned(std::fs::read(&path).unwrap());
         assert!(
             !raw.contains("s3kr1t-canary-value"),
             "secret leaked in the clear"
@@ -1245,7 +1245,7 @@ mod tests {
         );
 
         // Item-level data must NOT be in the clear, only collection names.
-        let raw = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        let raw = String::from_utf8_lossy_owned(std::fs::read(&path).unwrap());
         assert!(
             raw.contains("Work"),
             "collection labels are deliberately plaintext"
