@@ -4162,7 +4162,7 @@ dependencies = [
 
 [[package]]
 name = "locket-agent"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "futures-util",
  "locket-core",
@@ -4182,7 +4182,7 @@ dependencies = [
 
 [[package]]
 name = "locket-applet"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "i18n-embed",
  "i18n-embed-fl",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "locket-cli"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "clap",
  "locket-core",
@@ -4217,7 +4217,7 @@ dependencies = [
 
 [[package]]
 name = "locket-core"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "argon2",
  "base32",
@@ -4242,7 +4242,7 @@ dependencies = [
 
 [[package]]
 name = "locket-cosmic"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "ashpd 0.13.13",
  "dirs 7.0.0",
@@ -4269,7 +4269,7 @@ dependencies = [
 
 [[package]]
 name = "locket-daemon"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "clap",
  "dirs 7.0.0",
@@ -4291,7 +4291,7 @@ dependencies = [
 
 [[package]]
 name = "locket-fido"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "base64ct",
  "ctap-hid-fido2",
@@ -4307,7 +4307,7 @@ dependencies = [
 
 [[package]]
 name = "locket-hibp"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "reqwest",
  "sha1",
@@ -4317,7 +4317,7 @@ dependencies = [
 
 [[package]]
 name = "locket-import"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "base64ct",
  "csv",
@@ -4336,14 +4336,14 @@ dependencies = [
 
 [[package]]
 name = "locket-ipc"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "locket-nmh"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "locket-core",
  "locket-secret",
@@ -4361,7 +4361,7 @@ dependencies = [
 
 [[package]]
 name = "locket-pam"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "libc",
  "locket-ipc",
@@ -4371,7 +4371,7 @@ dependencies = [
 
 [[package]]
 name = "locket-secret"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
@@ -4397,7 +4397,7 @@ dependencies = [
 
 [[package]]
 name = "locket-tpm"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "base64ct",
  "getrandom 0.4.3",
