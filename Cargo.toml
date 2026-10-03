@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 version = "2.1.0"
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.99.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Magnetar-OS/locket"
 homepage = "https://github.com/Magnetar-OS/locket"
@@ -40,8 +40,10 @@ locket-hibp = { path = "crates/locket-hibp", version = "2.1.0" }
 locket-secret = { path = "crates/locket-secret", version = "2.1.0" }
 locket-import = { path = "crates/locket-import", version = "2.1.0" }
 # `default-features = false`: locket-daemon is the only consumer and it
-# re-exports the `fido` feature under its own name. A member cannot turn
-# off an inherited default, so the default is off here and opted into there.
+# re-exports the `fido` feature under its own name, so the default is off
+# here and opted into there. When this was written a member could not turn
+# off an inherited default at all; since Cargo 1.99 an edition-2024 member
+# can, but with a single consumer the switch is simplest left here.
 locket-agent = { path = "crates/locket-agent", version = "2.1.0", default-features = false }
 locket-fido = { path = "crates/locket-fido", version = "2.1.0" }
 locket-tpm = { path = "crates/locket-tpm", version = "2.1.0" }
