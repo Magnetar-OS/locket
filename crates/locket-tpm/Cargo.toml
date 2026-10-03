@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 authors.workspace = true
 keywords = ["tpm", "tpm2", "sealing", "key-slot"]
 categories = ["cryptography", "os::linux-apis"]
