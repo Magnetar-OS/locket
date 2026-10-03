@@ -4,6 +4,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Rebuilt against the current COSMIC libraries (libcosmic `5a8bd94`).
+
 ## [2.1.0] - 2026-09-30
 
 ### Added
