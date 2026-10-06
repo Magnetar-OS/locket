@@ -19,6 +19,16 @@ tracing.workspace = true
 zeroize.workspace = true
 getrandom.workspace = true
 base64ct.workspace = true
+uuid.workspace = true
+
+tempfile = { version = "3", optional = true }
+
+[features]
+# An `swtpm` started per test: see `src/testing.rs`. Never enabled by a build
+# that ships.
+test-swtpm = ["dep:tempfile"]
 
 [dev-dependencies]
+# Enables `test-swtpm` for this crate's own tests.
+locket-tpm = { path = ".", features = ["test-swtpm"] }
 tempfile = "3"

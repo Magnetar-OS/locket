@@ -23,24 +23,33 @@
 //!
 //! # Testing
 //!
-//! Anything that talks to hardware needs a TPM the caller can open
-//! (`/dev/tpmrm0` is `root:tss 0660`, or point the TCTI at an `swtpm`
-//! simulator), so those tests are `#[ignore]`d and additionally gated on
-//! `LOCKET_TPM_TESTS=1`. The pure logic — blob framing, template attributes,
-//! factor handling — is tested unconditionally.
+//! The tests run against `swtpm`, the software TPM, which has to be
+//! installed: each test starts its own on loopback ports, with its state in
+//! a temporary directory (see [`testing`]), and never opens this machine's
+//! chip. They cover what the
+//! design rests on — a wrong PIN costs exactly one strike of the
+//! dictionary-attack counter, the lockout refuses the right PIN too, and a
+//! blob sealed by one TPM is useless to another. Two further tests talk to
+//! whatever the TCTI environment names — a real chip — and are `#[ignore]`d
+//! behind `LOCKET_TPM_TESTS=1`.
 
 #![forbid(unsafe_code)]
+
+#[cfg(feature = "test-swtpm")]
+pub mod testing;
 
 use std::str::FromStr as _;
 
 use base64ct::{Base64, Encoding};
 use locket_core::{
+    Vault,
     crypto::SymKey,
-    slots::{SlotFactor, SlotOpener, TpmParent},
+    slots::{Slot, SlotFactor, SlotOpener, TpmParent},
 };
 use tss_esapi::{
     Context, TctiNameConf,
     attributes::ObjectAttributesBuilder,
+    constants::{CapabilityType, PropertyTag},
     interface_types::{
         algorithm::{HashingAlgorithm, PublicAlgorithm},
         ecc::EccCurve,
@@ -48,13 +57,14 @@ use tss_esapi::{
         resource_handles::Hierarchy,
     },
     structures::{
-        Auth, EccScheme, KeyDerivationFunctionScheme, KeyedHashScheme, Private, Public,
-        PublicBuilder, PublicEccParametersBuilder, PublicKeyedHashParameters, RsaExponent,
+        Auth, CapabilityData, EccScheme, KeyDerivationFunctionScheme, KeyedHashScheme, Private,
+        Public, PublicBuilder, PublicEccParametersBuilder, PublicKeyedHashParameters, RsaExponent,
         SensitiveData, SymmetricDefinitionObject,
     },
     traits::{Marshall, UnMarshall},
     utils::create_restricted_decryption_rsa_public,
 };
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -72,6 +82,15 @@ pub enum Error {
 
     #[error("this slot is not a TPM slot")]
     WrongFactor,
+
+    #[error("this vault has no TPM factor")]
+    NoSlot,
+
+    #[error("this vault already has a TPM factor; remove it before adding another")]
+    AlreadyEnrolled,
+
+    #[error(transparent)]
+    Vault(#[from] locket_core::Error),
 
     #[error("a PIN is required for this slot")]
     PinRequired,
@@ -223,14 +242,205 @@ fn slot_auth(with_pin: bool, pin: Option<&str>) -> Result<Option<Auth>> {
 // TPM operations
 // ---------------------------------------------------------------------------
 
-/// Open a context against the system TPM.
-///
-/// Honours the standard TCTI environment variables so an `swtpm` simulator can
-/// be substituted for testing; with none set, it is the kernel's resource
-/// manager, `/dev/tpmrm0`.
-pub fn open_context() -> Result<Context> {
-    let tcti = tcti_from(|name| std::env::var(name).ok())?;
-    Context::new(tcti).map_err(|e| Error::NoTpm(e.to_string()))
+/// A TPM to seal to and unseal with.
+#[derive(Debug, Clone)]
+pub struct Tpm {
+    tcti: TctiNameConf,
+}
+
+impl Tpm {
+    /// This machine's TPM.
+    ///
+    /// Honours the standard TCTI environment variables, so a simulator can be
+    /// named from outside; with none set it is the kernel's resource manager,
+    /// `/dev/tpmrm0`.
+    pub fn system() -> Result<Self> {
+        Ok(Self {
+            tcti: tcti_from(|name| std::env::var(name).ok())?,
+        })
+    }
+
+    /// The TPM a TCTI configuration names, e.g.
+    /// `swtpm:host=127.0.0.1,port=2321`.
+    pub fn at(tcti: &str) -> Result<Self> {
+        Ok(Self {
+            tcti: tcti_from(|_| Some(tcti.to_owned()))?,
+        })
+    }
+
+    /// Open a context against this TPM.
+    pub fn context(&self) -> Result<Context> {
+        Context::new(self.tcti.clone()).map_err(|e| Error::NoTpm(e.to_string()))
+    }
+
+    /// Seal a fresh random secret to this TPM.
+    ///
+    /// Returns the slot metadata to store in the vault and the key-encryption
+    /// key to enrol with; hand the latter to `Vault::add_slot` and drop it.
+    /// It can always be recovered later with [`Tpm::unseal`].
+    pub fn enroll(&self, pin: Option<&str>) -> Result<(SlotFactor, SymKey)> {
+        let mut secret = Zeroizing::new(vec![0u8; SEALED_SECRET_LEN]);
+        getrandom::fill(&mut secret).map_err(|e| Error::Other(e.to_string()))?;
+
+        let with_pin = pin.is_some_and(|p| !p.is_empty());
+        let auth = auth_from_pin(pin)?;
+        let sensitive =
+            SensitiveData::try_from(secret.to_vec()).map_err(|e| Error::Other(e.to_string()))?;
+
+        let mut context = self.context()?;
+        let (public, private) = context.execute_with_nullauth_session(|ctx| {
+            let primary = ctx.create_primary(
+                Hierarchy::Owner,
+                primary_template(DEFAULT_PARENT)?,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            let sealed = ctx.create(
+                primary.key_handle,
+                sealed_template(with_pin)?,
+                auth,
+                Some(sensitive),
+                None,
+                None,
+            )?;
+            Ok::<_, Error>((sealed.out_public, sealed.out_private))
+        })?;
+
+        let factor = SlotFactor::Tpm2 {
+            // `Public` is a structure and marshalls; `Private` is already an
+            // opaque TPM-encrypted buffer, so its bytes go through verbatim.
+            sealed: pack(&public.marshall()?, private.value()),
+            parent: DEFAULT_PARENT,
+            // PCR binding is a separate decision from the PIN and is
+            // deliberately not taken here: binding to firmware measurements
+            // means a BIOS update locks you out of your own vault.
+            pcrs: Vec::new(),
+            with_pin,
+        };
+
+        let kek = SymKey::try_from_slice(&secret).map_err(|e| Error::Other(e.to_string()))?;
+        Ok((factor, kek))
+    }
+
+    /// Add a TPM factor to an open vault: seal a new key under `pin` and
+    /// enrol it. Returns the new slot's id.
+    ///
+    /// Two rules are kept here, so that every way of adding the factor keeps
+    /// them. The PIN is required: without one the chip releases the key to
+    /// anything on the machine that asks, and its lockout never comes into
+    /// play. And a vault gets one TPM factor: unlocking tries the PIN on
+    /// every TPM slot, and each one it does not fit costs a strike.
+    pub fn enroll_into(&self, vault: &mut Vault, pin: &str) -> Result<Uuid> {
+        if pin.is_empty() {
+            return Err(Error::PinRequired);
+        }
+        if vault
+            .slots()
+            .iter()
+            .any(|slot| matches!(slot.factor, SlotFactor::Tpm2 { .. }))
+        {
+            return Err(Error::AlreadyEnrolled);
+        }
+        let (factor, kek) = self.enroll(Some(pin))?;
+        Ok(vault.add_slot("TPM 2.0 (PIN)", factor, &kek)?)
+    }
+
+    /// Recover a sealed slot's key-encryption key.
+    ///
+    /// A wrong PIN costs one strike of the chip's dictionary-attack counter,
+    /// which every object on that TPM shares.
+    pub fn unseal(&self, factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
+        let SlotFactor::Tpm2 {
+            sealed,
+            with_pin,
+            parent,
+            pcrs,
+        } = factor
+        else {
+            return Err(Error::WrongFactor);
+        };
+
+        // No PCR policy is ever built, so a slot that lists PCRs would be
+        // unsealed on its PIN alone while claiming more. Refuse it, and before
+        // the TPM is opened: nothing here needs the chip to know that.
+        if !pcrs.is_empty() {
+            return Err(Error::Other(format!(
+                "this slot is bound to PCRs {pcrs:?}, and PCR policies are not supported"
+            )));
+        }
+
+        // Check this before touching the TPM: a needless failed unseal costs
+        // a dictionary-attack strike against the whole device.
+        if *with_pin && pin.is_none_or(str::is_empty) {
+            return Err(Error::PinRequired);
+        }
+
+        let (public_bytes, private_bytes) = unpack(sealed)?;
+        let public = Public::unmarshall(&public_bytes).map_err(|_| Error::MalformedBlob)?;
+        let private = Private::try_from(private_bytes).map_err(|_| Error::MalformedBlob)?;
+        let auth = slot_auth(*with_pin, pin)?;
+
+        let mut context = self.context()?;
+        let data = context.execute_with_nullauth_session(|ctx| {
+            let primary = ctx.create_primary(
+                Hierarchy::Owner,
+                primary_template(*parent)?,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            let handle = ctx.load(primary.key_handle, private, public)?;
+            if let Some(auth) = auth {
+                ctx.tr_set_auth(handle.into(), auth)?;
+            }
+            ctx.unseal(handle.into()).map_err(Error::from)
+        })?;
+
+        SymKey::try_from_slice(data.value()).map_err(|e| Error::Other(e.to_string()))
+    }
+
+    /// The key of the vault's TPM factor: what [`Tpm::unseal`] returns for the
+    /// first TPM slot among `slots` that `pin` releases.
+    ///
+    /// For a caller that needs the key itself rather than an open vault — to
+    /// open its own copy and hand the same key to the daemon. Each TPM slot
+    /// the PIN does not fit costs a strike, which is why the application
+    /// enrols one TPM factor per vault.
+    pub fn unlock_key(&self, slots: &[Slot], pin: Option<&str>) -> Result<SymKey> {
+        let mut refused = Error::NoSlot;
+        for slot in slots {
+            if !matches!(slot.factor, SlotFactor::Tpm2 { .. }) {
+                continue;
+            }
+            match self.unseal(&slot.factor, pin) {
+                Ok(key) => return Ok(key),
+                Err(e) => refused = e,
+            }
+        }
+        Err(refused)
+    }
+
+    /// How many failed authorisations this TPM is counting toward lockout.
+    pub fn lockout_counter(&self) -> Result<u32> {
+        let mut context = self.context()?;
+        let (data, _more) = context.get_capability(
+            CapabilityType::TpmProperties,
+            PropertyTag::LockoutCounter.into(),
+            1,
+        )?;
+        match data {
+            CapabilityData::TpmProperties(properties) => properties
+                .find(PropertyTag::LockoutCounter)
+                .map(|property| property.value())
+                .ok_or_else(|| Error::Other("the TPM did not report its lockout counter".into())),
+            _ => Err(Error::Other(
+                "the TPM answered a property query with something else".into(),
+            )),
+        }
+    }
 }
 
 /// Which TPM to open, given a way to read an environment variable.
@@ -249,117 +459,36 @@ fn tcti_from(var: impl Fn(&str) -> Option<String>) -> Result<TctiNameConf> {
         .map_err(|e| Error::NoTpm(format!("no usable TCTI `{named}`: {e}")))
 }
 
-/// Seal a fresh random secret to this TPM.
-///
-/// Returns the slot metadata to store in the vault and the key-encryption key
-/// to enrol with; hand the latter to `Vault::add_slot` and drop it. It can
-/// always be recovered later with [`unseal`].
+/// [`Tpm::enroll`] on this machine's TPM.
 pub fn enroll(pin: Option<&str>) -> Result<(SlotFactor, SymKey)> {
-    let mut secret = Zeroizing::new(vec![0u8; SEALED_SECRET_LEN]);
-    getrandom::fill(&mut secret).map_err(|e| Error::Other(e.to_string()))?;
-
-    let with_pin = pin.is_some_and(|p| !p.is_empty());
-    let auth = auth_from_pin(pin)?;
-    let sensitive =
-        SensitiveData::try_from(secret.to_vec()).map_err(|e| Error::Other(e.to_string()))?;
-
-    let mut context = open_context()?;
-    let (public, private) = context.execute_with_nullauth_session(|ctx| {
-        let primary = ctx.create_primary(
-            Hierarchy::Owner,
-            primary_template(DEFAULT_PARENT)?,
-            None,
-            None,
-            None,
-            None,
-        )?;
-        let sealed = ctx.create(
-            primary.key_handle,
-            sealed_template(with_pin)?,
-            auth,
-            Some(sensitive),
-            None,
-            None,
-        )?;
-        Ok::<_, Error>((sealed.out_public, sealed.out_private))
-    })?;
-
-    let factor = SlotFactor::Tpm2 {
-        // `Public` is a structure and marshalls; `Private` is already an
-        // opaque TPM-encrypted buffer, so its bytes go through verbatim.
-        sealed: pack(&public.marshall()?, private.value()),
-        parent: DEFAULT_PARENT,
-        // PCR binding is a separate decision from the PIN and is deliberately
-        // not taken here: binding to firmware measurements means a BIOS update
-        // locks you out of your own vault.
-        pcrs: Vec::new(),
-        with_pin,
-    };
-
-    let kek = SymKey::try_from_slice(&secret).map_err(|e| Error::Other(e.to_string()))?;
-    Ok((factor, kek))
+    Tpm::system()?.enroll(pin)
 }
 
-/// Recover a sealed slot's key-encryption key.
+/// [`Tpm::unseal`] on this machine's TPM.
 pub fn unseal(factor: &SlotFactor, pin: Option<&str>) -> Result<SymKey> {
-    let SlotFactor::Tpm2 {
-        sealed,
-        with_pin,
-        parent,
-        pcrs,
-    } = factor
-    else {
-        return Err(Error::WrongFactor);
-    };
-
-    // No PCR policy is ever built, so a slot that lists PCRs would be
-    // unsealed on its PIN alone while claiming more. Refuse it, and before
-    // the TPM is opened: nothing here needs the chip to know that.
-    if !pcrs.is_empty() {
-        return Err(Error::Other(format!(
-            "this slot is bound to PCRs {pcrs:?}, and PCR policies are not supported"
-        )));
-    }
-
-    // Check this before touching the TPM: a needless failed unseal costs a
-    // dictionary-attack strike against the whole device.
-    if *with_pin && pin.is_none_or(str::is_empty) {
-        return Err(Error::PinRequired);
-    }
-
-    let (public_bytes, private_bytes) = unpack(sealed)?;
-    let public = Public::unmarshall(&public_bytes).map_err(|_| Error::MalformedBlob)?;
-    let private = Private::try_from(private_bytes).map_err(|_| Error::MalformedBlob)?;
-    let auth = slot_auth(*with_pin, pin)?;
-
-    let mut context = open_context()?;
-    let data = context.execute_with_nullauth_session(|ctx| {
-        let primary = ctx.create_primary(
-            Hierarchy::Owner,
-            primary_template(*parent)?,
-            None,
-            None,
-            None,
-            None,
-        )?;
-        let handle = ctx.load(primary.key_handle, private, public)?;
-        if let Some(auth) = auth {
-            ctx.tr_set_auth(handle.into(), auth)?;
-        }
-        ctx.unseal(handle.into()).map_err(Error::from)
-    })?;
-
-    SymKey::try_from_slice(data.value()).map_err(|e| Error::Other(e.to_string()))
+    Tpm::system()?.unseal(factor, pin)
 }
 
 /// A [`SlotOpener`] that unseals TPM slots.
 pub struct TpmOpener {
+    /// `None` is this machine's TPM, found when a slot is opened.
+    tpm: Option<Tpm>,
     pin: Option<Zeroizing<String>>,
 }
 
 impl TpmOpener {
+    /// Open with this machine's TPM.
     pub fn new(pin: Option<String>) -> Self {
         Self {
+            tpm: None,
+            pin: pin.map(Zeroizing::new),
+        }
+    }
+
+    /// Open with a particular TPM.
+    pub fn on(tpm: Tpm, pin: Option<String>) -> Self {
+        Self {
+            tpm: Some(tpm),
             pin: pin.map(Zeroizing::new),
         }
     }
@@ -370,7 +499,12 @@ impl SlotOpener for TpmOpener {
         if !matches!(factor, SlotFactor::Tpm2 { .. }) {
             return Ok(None);
         }
-        match unseal(factor, self.pin.as_deref().map(String::as_str)) {
+        let pin = self.pin.as_deref().map(String::as_str);
+        let unsealed = match &self.tpm {
+            Some(tpm) => tpm.unseal(factor, pin),
+            None => unseal(factor, pin),
+        };
+        match unsealed {
             Ok(key) => Ok(Some(key)),
             // Report as "this factor did not open it" rather than a hard
             // error, so a multi-slot vault can fall through to another factor.
@@ -523,6 +657,155 @@ mod tests {
         assert!(slot_auth(true, Some("1234")).unwrap().is_some());
     }
 
+    // -- against a software TPM ---------------------------------------------
+
+    use crate::testing::Swtpm;
+    use locket_core::{
+        crypto::KdfParams,
+        slots::{RawKeyOpener, SlotKind},
+    };
+
+    /// The property the PIN rests on: a wrong one is refused *and counted*,
+    /// once, by the chip — and a missing one is refused before the chip is
+    /// asked, so it costs nothing.
+    #[test]
+    fn a_wrong_pin_is_refused_and_costs_exactly_one_strike() {
+        let swtpm = Swtpm::start();
+        let tpm = swtpm.tpm();
+        let (factor, kek) = tpm.enroll(Some("246810")).expect("enrolment failed");
+        assert_eq!(tpm.lockout_counter().unwrap(), 0);
+
+        let unsealed = tpm.unseal(&factor, Some("246810")).expect("unseal failed");
+        assert_eq!(kek.expose(), unsealed.expose());
+        assert_eq!(
+            tpm.lockout_counter().unwrap(),
+            0,
+            "the right PIN was counted"
+        );
+
+        assert!(matches!(tpm.unseal(&factor, None), Err(Error::PinRequired)));
+        assert_eq!(
+            tpm.lockout_counter().unwrap(),
+            0,
+            "a missing PIN was counted"
+        );
+
+        assert!(
+            matches!(tpm.unseal(&factor, Some("000000")), Err(Error::Tpm(_))),
+            "a wrong PIN unsealed"
+        );
+        assert_eq!(tpm.lockout_counter().unwrap(), 1);
+
+        // The strike is not cleared by the right PIN: it is the chip's count.
+        assert!(tpm.unseal(&factor, Some("246810")).is_ok());
+        assert_eq!(tpm.lockout_counter().unwrap(), 1);
+    }
+
+    /// What the lockout costs, and why a passphrase slot always stays: after
+    /// the chip's limit of wrong PINs — three on `swtpm` — the right one is
+    /// refused as well.
+    #[test]
+    fn enough_wrong_pins_lock_the_chip_against_the_right_one_too() {
+        let swtpm = Swtpm::start();
+        let tpm = swtpm.tpm();
+        let (factor, _kek) = tpm.enroll(Some("246810")).unwrap();
+
+        for _ in 0..3 {
+            assert!(tpm.unseal(&factor, Some("000000")).is_err());
+        }
+        let refused = tpm.unseal(&factor, Some("246810"));
+        assert!(
+            matches!(&refused, Err(Error::Tpm(why)) if why.contains("lockout")),
+            "{refused:?}"
+        );
+    }
+
+    /// The sealed blob is in the vault file, which may be copied. It opens
+    /// nothing anywhere but on the TPM that made it.
+    #[test]
+    fn a_blob_sealed_by_one_tpm_is_useless_to_another() {
+        let ours = Swtpm::start();
+        let (factor, _kek) = ours.tpm().enroll(Some("246810")).unwrap();
+
+        let theirs = Swtpm::start();
+        assert!(
+            theirs.tpm().unseal(&factor, Some("246810")).is_err(),
+            "another TPM unsealed the blob"
+        );
+        assert!(ours.tpm().unseal(&factor, Some("246810")).is_ok());
+    }
+
+    /// The whole life of a TPM factor on a vault: added, used to unlock with
+    /// no passphrase, kept through a passphrase change, and removed.
+    #[test]
+    fn a_tpm_factor_unlocks_a_vault_through_a_rekey_and_until_removed() {
+        let swtpm = Swtpm::start();
+        let tpm = swtpm.tpm();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v.vault");
+        let opener = |pin: &str| TpmOpener::on(tpm.clone(), Some(pin.to_owned()));
+
+        let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        vault.add_item_default(locket_core::Item::new(
+            locket_core::ItemKind::Note,
+            "inside",
+        ));
+        vault.save().unwrap();
+        assert!(matches!(
+            tpm.enroll_into(&mut vault, ""),
+            Err(Error::PinRequired)
+        ));
+        let slot = tpm.enroll_into(&mut vault, "1357").unwrap();
+        // One TPM factor to a vault: a second would cost a strike at every
+        // unlock, for whichever of the two the PIN typed did not fit.
+        assert!(matches!(
+            tpm.enroll_into(&mut vault, "8642"),
+            Err(Error::AlreadyEnrolled)
+        ));
+        drop(vault);
+
+        // The PIN alone opens it; a wrong one does not, and says no more.
+        let opened = Vault::open_with(&path, &opener("1357")).unwrap();
+        assert_eq!(opened.data().item_count(), 1);
+        assert!(matches!(
+            Vault::open_with(&path, &opener("9999")),
+            Err(locket_core::Error::WrongPassphrase)
+        ));
+
+        // The key itself, for a caller that has a daemon to pass it on to.
+        let slots = Vault::read_slots(&path).unwrap();
+        let key = tpm.unlock_key(&slots, Some("1357")).unwrap();
+        let by_key = RawKeyOpener {
+            kind: SlotKind::Tpm2,
+            key,
+        };
+        assert!(Vault::open_with(&path, &by_key).is_ok());
+
+        // Opened with the TPM, the passphrase can be replaced — the way back
+        // in for someone who has forgotten it — and the TPM factor stays.
+        let mut vault = Vault::open_with(&path, &opener("1357")).unwrap();
+        vault
+            .change_passphrase("a new passphrase", KdfParams::insecure_fast())
+            .unwrap();
+        drop(vault);
+        assert!(Vault::open(&path, "pw").is_err());
+        assert!(Vault::open(&path, "a new passphrase").is_ok());
+        assert!(Vault::open_with(&path, &opener("1357")).is_ok());
+
+        // Removed, it opens nothing; the passphrase still does.
+        let mut vault = Vault::open(&path, "a new passphrase").unwrap();
+        vault.remove_slot(slot).unwrap();
+        drop(vault);
+        assert!(Vault::open_with(&path, &opener("1357")).is_err());
+        assert!(matches!(
+            tpm.unlock_key(&Vault::read_slots(&path).unwrap(), Some("1357")),
+            Err(Error::NoSlot)
+        ));
+        assert!(Vault::open(&path, "a new passphrase").is_ok());
+    }
+
+    // -- against whatever the TCTI environment names: a real chip ------------
+
     #[test]
     #[ignore = "requires a TPM; set LOCKET_TPM_TESTS=1"]
     fn seal_and_unseal_against_real_hardware() {
@@ -544,8 +827,6 @@ mod tests {
         if !hardware_tests_enabled() {
             return;
         }
-        use locket_core::{Vault, crypto::KdfParams};
-
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.vault");
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();

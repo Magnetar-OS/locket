@@ -4304,10 +4304,12 @@ dependencies = [
  "base64ct",
  "getrandom 0.4.3",
  "locket-core",
+ "locket-tpm",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "tss-esapi",
+ "uuid",
  "zeroize",
 ]
 

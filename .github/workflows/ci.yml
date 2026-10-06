@@ -26,15 +26,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # `dbus-daemon` and `secret-tool` are programs the tests run: each bus
-      # test starts a private bus, and the libsecret tests drive the daemon
-      # with libsecret's own command line.
+      # `dbus-daemon`, `secret-tool` and `swtpm` are programs the tests run:
+      # each bus test starts a private bus, the libsecret tests drive the
+      # daemon with libsecret's own command line, and the TPM tests each start
+      # a software TPM (libtss2-dev brings the library that talks to it).
       - name: Install system libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libtss2-dev libudev-dev libssl-dev libpam0g-dev \
-            dbus libsecret-tools
+            dbus libsecret-tools swtpm
       # No toolchain action: rustup is preinstalled on the runner and reads
       # `rust-toolchain.toml` itself, so the version and its components are
       # named in one place instead of drifting apart from CI.
