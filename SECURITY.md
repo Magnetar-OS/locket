@@ -64,13 +64,16 @@ Anything that lets code or a person reach secrets they should not:
 ## What has and has not been verified
 
 Verified against the real software that consumes it — `libsecret`, a sandboxed
-Flatpak through `xdg-desktop-portal`, OpenSSH, `pamtester`, a real TPM — and
-covered by the test suite. See the Verified section of the README, which says
+Flatpak through `xdg-desktop-portal`, OpenSSH, `pamtester`, a real TPM for
+enrolment and `swtpm` for unlocking — and covered by the test suite. See the Verified section of the README, which says
 in each case what was actually run.
 
 **Not verified:** anything involving a FIDO2 token on hardware. The code paths
 exist and are unit-tested against a software stand-in; no physical token has
-ever been attached. There has been no external review and no reproducible-build
+ever been attached, which is why a security-key factor cannot be added from
+the application. Unlocking with a TPM factor has been run against `swtpm`
+only; the window's and the unlock dialog's own controls for it have not been
+driven at all. There has been no external review and no reproducible-build
 story. Fuzzing exists but is bounded rather than a campaign: five targets over
 the vault parser, the SSH agent wire protocol, the Secret Service session
 transport and two importers, run for a minute each on every CI pass — no

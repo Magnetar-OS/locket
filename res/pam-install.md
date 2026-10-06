@@ -60,6 +60,13 @@ the old one opens the vault before re-wrapping the key under the new one, so a
 password change by someone who never knew the vault passphrase changes
 nothing.
 
+A vault with a TPM or security-key factor is still unlocked here by its
+passphrase factor and by nothing else. The module has one string, the login
+password; offered to the TPM as a PIN it would cost the chip a lockout strike
+at every login where the two differ, and a security key needs a touch that a
+session opening has nowhere to ask for. A password change re-wraps the
+passphrase factor and leaves the hardware ones as they were.
+
 There is deliberately no `sudo` entry. Authorising privilege escalation from
 locket is a different module with a much higher bar — see the TPM section in
 the main README for why that needs hardware-anchored verification first.

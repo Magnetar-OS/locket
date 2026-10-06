@@ -113,6 +113,8 @@ pub enum Message {
     PassphraseChanged(SecretString),
     ConfirmChanged(SecretString),
     ToggleShowPassphrase,
+    /// Unlock with a hardware factor instead of the passphrase, or go back.
+    UnlockWith(Option<security::Factor>),
     UnlockSubmit,
     /// The vault-opening task finished. The vault travels in a shared slot
     /// because `Vault` is deliberately not `Clone` and messages must be.
@@ -439,6 +441,13 @@ pub struct App {
     vault: Option<Vault>,
     screen: Screen,
 
+    /// The hardware factors the vault file says it can be unlocked with,
+    /// read from its header whenever the unlock screen is about to show.
+    hardware: Vec<security::Factor>,
+    /// The one the unlock screen is using; `None` is the passphrase.
+    unlock_with: Option<security::Factor>,
+    /// What is typed on the unlock screen: the passphrase, or the PIN of the
+    /// factor above.
     passphrase: SecretString,
     confirm: SecretString,
     show_passphrase: bool,
@@ -559,6 +568,15 @@ impl App {
             pending_forget: &mut self.pending_forget,
         }
         .forget();
+        self.offer_unlock_factors();
+    }
+
+    /// Start the unlock screen from the passphrase, offering whatever
+    /// hardware factors the vault file has now — one may have been added or
+    /// removed while it was open, or the file may be a different one.
+    fn offer_unlock_factors(&mut self) {
+        self.unlock_with = None;
+        self.hardware = security::enrolled(&self.vault_path);
     }
 
     /// Lock this window and put the caret in the passphrase field.
@@ -816,13 +834,14 @@ impl App {
             return Self::raise_window(prompt.window);
         }
 
-        let mut settings = Self::window_settings(prompt::SIZE);
+        let hardware = security::enrolled(&self.vault_path);
+        let mut settings = Self::window_settings(prompt::size(&hardware));
         settings.resizable = false;
         // Dismissing runs through `update`: the dialog may be the only window
         // this process has, and then closing it is the process ending.
         settings.exit_on_close_request = false;
         let (id, opened) = cosmic::iced::window::open(settings);
-        self.prompt = Some(Prompt::new(id));
+        self.prompt = Some(Prompt::new(id, hardware));
         Task::batch([
             self.set_window_title(fl!("app-title"), id),
             opened.map(|_| cosmic::Action::App(Message::Prompt(prompt::Message::Focus))),
@@ -921,6 +940,24 @@ impl App {
                 }
             }
 
+            prompt::Message::UnlockWith(factor) => {
+                if let Some(prompt) = self.prompt.as_mut().filter(|prompt| !prompt.busy) {
+                    prompt.unlock_with = factor;
+                    // What was typed was for the other factor.
+                    prompt.passphrase = SecretString::default();
+                    prompt.error = None;
+                }
+                return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
+            }
+
+            prompt::Message::Refused(why) => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.busy = false;
+                    prompt.error = Some(why);
+                }
+                return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
+            }
+
             prompt::Message::Focus => {
                 return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
             }
@@ -937,12 +974,15 @@ impl App {
                 if prompt.busy {
                     return Task::none();
                 }
-                if prompt.passphrase.is_empty() {
-                    prompt.error = Some(fl!("error-enter-passphrase"));
+                if let Some(missing) =
+                    security::unlock_input_missing(prompt.unlock_with, &prompt.passphrase)
+                {
+                    prompt.error = Some(missing);
                     return Task::none();
                 }
                 prompt.busy = true;
                 prompt.error = None;
+                let unlock_with = prompt.unlock_with;
                 let passphrase = prompt.take_passphrase();
 
                 // When the window behind this dialog is locked, the same
@@ -951,6 +991,45 @@ impl App {
                 // passphrase to the daemon, and this is that in reverse.
                 let path = self.vault_path.clone();
                 let here = self.vault.is_none() && self.core.main_window_id().is_some();
+
+                if let Some(factor) = unlock_with {
+                    // The device is asked once, here, and the key it releases
+                    // opens both: the daemon talks to no TPM or token itself.
+                    return cosmic::task::future(async move {
+                        let asked = {
+                            let path = path.clone();
+                            tokio::task::spawn_blocking(move || {
+                                security::slot_key(&path, factor, passphrase.expose())
+                            })
+                            .await
+                        };
+                        let key = match asked {
+                            Ok(Ok(key)) => key,
+                            Ok(Err(why)) => return Message::Prompt(prompt::Message::Refused(why)),
+                            Err(e) => {
+                                return Message::Prompt(prompt::Message::Refused(fl!(
+                                    "error-unlock-task",
+                                    error = e.to_string()
+                                )));
+                            }
+                        };
+                        let unlocked = daemon::unlock_with_key(factor.kind(), key.clone()).await
+                            == daemon::Reply::Done;
+                        let vault = if unlocked && here {
+                            let opener = locket_core::slots::RawKeyOpener {
+                                kind: factor.kind(),
+                                key,
+                            };
+                            Vault::open_with(&path, &opener).ok()
+                        } else {
+                            None
+                        };
+                        Message::Prompt(prompt::Message::Answered(
+                            unlocked,
+                            Arc::new(Mutex::new(vault)),
+                        ))
+                    });
+                }
 
                 return cosmic::task::future(async move {
                     let for_daemon = passphrase.clone();
@@ -976,7 +1055,12 @@ impl App {
                 if !unlocked {
                     if let Some(prompt) = self.prompt.as_mut() {
                         prompt.busy = false;
-                        prompt.error = Some(fl!("prompt-refused"));
+                        prompt.error = Some(match prompt.unlock_with {
+                            None => fl!("prompt-refused"),
+                            // The device released the key; it is the daemon
+                            // that did not take it.
+                            Some(_) => fl!("prompt-refused-daemon"),
+                        });
                     }
                     return widget::text_input::focus(prompt::PASSPHRASE_ID.clone());
                 }
@@ -1031,12 +1115,17 @@ impl App {
         } else {
             fl!("unlock-title")
         };
+        // Only an existing vault has factors to choose between.
+        let unlock_with = self.unlock_with.filter(|_| !creating);
         let blurb = if creating {
             fl!("unlock-create-blurb")
-        } else if self.unlock_requested_by_app {
-            fl!("unlock-app-blurb")
         } else {
-            fl!("unlock-blurb")
+            match unlock_with {
+                Some(security::Factor::TpmPin) => fl!("unlock-tpm-blurb"),
+                Some(security::Factor::SecurityKey) => fl!("unlock-security-key-blurb"),
+                None if self.unlock_requested_by_app => fl!("unlock-app-blurb"),
+                None => fl!("unlock-blurb"),
+            }
         };
 
         let mut form = widget::column::with_capacity(6)
@@ -1056,7 +1145,7 @@ impl App {
                     if self.passphrase_focused {
                         String::new()
                     } else {
-                        fl!("unlock-passphrase")
+                        security::unlock_placeholder(unlock_with)
                     },
                     self.passphrase.expose(),
                     Some(Message::ToggleShowPassphrase),
@@ -1133,6 +1222,9 @@ impl App {
         let busy = self.screen == Screen::Unlocking;
         let action = widget::button::suggested(if creating {
             fl!("unlock-create-button")
+        } else if busy && unlock_with == Some(security::Factor::SecurityKey) {
+            // The one wait here that is for the person, not the machine.
+            fl!("unlock-touch-key")
         } else if busy {
             fl!("unlock-working")
         } else {
@@ -1143,6 +1235,16 @@ impl App {
         } else {
             Element::from(action.on_press(Message::UnlockSubmit))
         });
+
+        // The vault's other factors, when it has any: a PIN its TPM checks, a
+        // security key.
+        if !creating
+            && !busy
+            && let Some(switches) =
+                security::unlock_switches(&self.hardware, unlock_with, Message::UnlockWith)
+        {
+            form = form.push(switches);
+        }
 
         // The menu bar is hidden while locked, so without this there is no
         // way to reach a vault that lives somewhere else — the screen would
@@ -1922,6 +2024,7 @@ impl cosmic::Application for App {
         let config = config::config();
         let settings = config.as_ref().map(Settings::load).unwrap_or_default();
         let vault_exists = flags.vault_path.is_file();
+        let hardware = security::enrolled(&flags.vault_path);
         let prompting = flags.is_prompt();
 
         let mut app = App {
@@ -1961,6 +2064,8 @@ impl cosmic::Application for App {
             autotype: None,
             security: Security::default(),
             unlock_requested_by_app: false,
+            hardware,
+            unlock_with: None,
             clipboard_copy: None,
             clipboard_due: false,
             clipboard_generation: 0,
@@ -2051,14 +2156,66 @@ impl cosmic::Application for App {
             }
             Message::ToggleShowPassphrase => self.show_passphrase = !self.show_passphrase,
 
+            Message::UnlockWith(factor) => {
+                if self.screen != Screen::Locked {
+                    return Task::none();
+                }
+                self.unlock_with = factor;
+                // What was typed was for the other factor.
+                self.passphrase = SecretString::default();
+                self.error = None;
+                self.passphrase_focused = true;
+                return widget::text_input::focus(PASSPHRASE_ID.clone());
+            }
+
             Message::UnlockSubmit => {
                 if self.screen == Screen::Unlocking {
                     return Task::none();
                 }
                 let creating = !self.vault_exists;
-                if self.passphrase.is_empty() {
-                    self.error = Some(fl!("error-enter-passphrase"));
+                let unlock_with = self.unlock_with.filter(|_| !creating);
+                if let Some(missing) = security::unlock_input_missing(unlock_with, &self.passphrase)
+                {
+                    self.error = Some(missing);
                     return Task::none();
+                }
+                if let Some(factor) = unlock_with {
+                    let path = self.vault_path.clone();
+                    let pin = std::mem::take(&mut self.passphrase);
+                    self.screen = Screen::Unlocking;
+                    self.error = None;
+
+                    // The TPM takes the better part of a second and a
+                    // security key waits for a touch: neither on the UI
+                    // thread. The key the device releases opens this window's
+                    // copy and is then handed to the daemon, so one PIN or
+                    // one touch unlocks both.
+                    return cosmic::task::future(async move {
+                        let outcome = tokio::task::spawn_blocking(move || {
+                            security::open(&path, factor, pin.expose())
+                        })
+                        .await;
+                        match outcome {
+                            Ok(Ok((vault, key))) => {
+                                let forwarded = daemon::unlock_with_key(factor.kind(), key).await;
+                                Message::VaultOpened(
+                                    Arc::new(Mutex::new(Some(vault))),
+                                    None,
+                                    forwarded,
+                                )
+                            }
+                            Ok(Err(e)) => Message::VaultOpened(
+                                Arc::new(Mutex::new(None)),
+                                Some(e),
+                                daemon::Reply::NoDaemon,
+                            ),
+                            Err(e) => Message::VaultOpened(
+                                Arc::new(Mutex::new(None)),
+                                Some(fl!("error-unlock-task", error = e.to_string())),
+                                daemon::Reply::NoDaemon,
+                            ),
+                        }
+                    });
                 }
                 if creating && self.passphrase != self.confirm {
                     self.error = Some(fl!("error-passphrases-differ"));
@@ -3128,6 +3285,7 @@ impl cosmic::Application for App {
                 self.lock_state();
                 self.vault_path = path;
                 self.vault_exists = self.vault_path.is_file();
+                self.offer_unlock_factors();
                 self.passphrase_focused = true;
                 let title = self.update_title();
                 return Task::batch([title, widget::text_input::focus(PASSPHRASE_ID.clone())]);

@@ -21,6 +21,7 @@ use cosmic::widget;
 use locket_core::{SecretString, Vault};
 
 use crate::fl;
+use crate::security::{self, Factor};
 
 /// The dialog's size.
 ///
@@ -28,6 +29,16 @@ use crate::fl;
 /// than English: it holds one field and three buttons, and a resize handle on
 /// that is a control nobody reaches for.
 pub const SIZE: cosmic::iced::Size = cosmic::iced::Size::new(460.0, 330.0);
+
+/// The dialog's size for a vault with these hardware factors: taller by the
+/// row that offers them and the longer text that explains one.
+pub fn size(hardware: &[Factor]) -> cosmic::iced::Size {
+    if hardware.is_empty() {
+        SIZE
+    } else {
+        cosmic::iced::Size::new(SIZE.width, SIZE.height + 70.0)
+    }
+}
 
 /// The passphrase field, so the dialog can take the caret as it appears.
 pub static PASSPHRASE_ID: LazyLock<widget::Id> =
@@ -37,7 +48,11 @@ pub static PASSPHRASE_ID: LazyLock<widget::Id> =
 pub enum Message {
     PassphraseChanged(SecretString),
     ToggleShow,
+    /// Answer with a hardware factor instead of the passphrase, or go back.
+    UnlockWith(Option<Factor>),
     Submit,
+    /// The TPM or the security key did not release a key; carries why.
+    Refused(String),
     /// The daemon answered: `true` when the passphrase opened the vault. When
     /// the window behind was locked too, its own vault comes back in the slot
     /// — shared because `Vault` is deliberately not `Clone` and messages must
@@ -60,6 +75,11 @@ pub enum Message {
 pub struct Prompt {
     /// The window it lives in.
     pub window: window::Id,
+    /// The hardware factors the vault can be unlocked with.
+    pub hardware: Vec<Factor>,
+    /// The one being used; `None` is the passphrase.
+    pub unlock_with: Option<Factor>,
+    /// What was typed: the passphrase, or the PIN of the factor above.
     pub passphrase: SecretString,
     pub show_passphrase: bool,
     /// Set while the passphrase is with the daemon. Argon2id is deliberately
@@ -69,9 +89,11 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    pub fn new(window: window::Id) -> Self {
+    pub fn new(window: window::Id, hardware: Vec<Factor>) -> Self {
         Self {
             window,
+            hardware,
+            unlock_with: None,
             passphrase: SecretString::default(),
             show_passphrase: false,
             busy: false,
@@ -98,7 +120,7 @@ impl Prompt {
             .spacing(spacing.space_xxs)
             .push(
                 widget::text_input::secure_input(
-                    fl!("unlock-passphrase"),
+                    security::unlock_placeholder(self.unlock_with),
                     self.passphrase.expose(),
                     Some(Message::ToggleShow),
                     !self.show_passphrase,
@@ -115,16 +137,26 @@ impl Prompt {
             ));
         }
 
-        let unlock = widget::button::suggested(if self.busy {
-            fl!("unlock-working")
-        } else {
-            fl!("unlock-button")
+        if let Some(switches) =
+            security::unlock_switches(&self.hardware, self.unlock_with, Message::UnlockWith)
+        {
+            field = field.push(switches);
+        }
+
+        let unlock = widget::button::suggested(match (self.busy, self.unlock_with) {
+            (true, Some(Factor::SecurityKey)) => fl!("unlock-touch-key"),
+            (true, _) => fl!("unlock-working"),
+            (false, _) => fl!("unlock-button"),
         });
 
         let dialog = widget::dialog()
             .icon(widget::icon::from_name("dialog-password-symbolic").size(48))
             .title(fl!("prompt-title"))
-            .body(fl!("prompt-body"))
+            .body(match self.unlock_with {
+                None => fl!("prompt-body"),
+                Some(Factor::TpmPin) => fl!("prompt-body-tpm"),
+                Some(Factor::SecurityKey) => fl!("prompt-body-security-key"),
+            })
             .control(field)
             // Leftmost, away from the two answers: it is a way out of the
             // dialog, not a third thing to do with the passphrase.

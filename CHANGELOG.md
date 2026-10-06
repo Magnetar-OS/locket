@@ -6,13 +6,22 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Added
 
+- A TPM factor unlocks the vault. Where the vault has one, the unlock screen
+  and the dialog an application's request raises offer "Use the TPM PIN"
+  beside the passphrase, and `locket-cli` takes `--unlock-with tpm` (with
+  `--pin-env`) on any command. The TPM is asked once; the key it releases
+  opens the window's copy and is handed to `locketd` through the new
+  `org.locket.Manager1.UnlockWithKey`, so libsecret applications, the browser
+  extension and the SSH agent are unlocked by the same PIN. The **Security**
+  page offers to add a TPM PIN again, now that one opens something.
+- A security-key factor added by an earlier version unlocks the same way —
+  "Use a security key", `--unlock-with security-key`. This has been tested
+  against a token in software only, never a real key, so adding one is still
+  not offered.
 - `locket-cli slots add-tpm` and `locket-cli slots rm <id>`: unlock factors
   can be added and removed from a terminal, under the same rules as the
   application. `locket-cli --unlock-with tpm passwd` sets a new passphrase
   for someone who has forgotten theirs.
-- `locket-cli --unlock-with tpm` (with `--pin-env`) opens the vault with
-  its TPM factor on any command, and `--unlock-with security-key` with a
-  security-key factor added by an earlier version.
 
 ### Changed
 
@@ -25,6 +34,13 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   other, and each one's SSH agent served the keys the other had stored.
   `locket-agent`'s public API names `ssh-key` types, so this is a breaking
   change for anything that builds on that crate.
+- The last passphrase can no longer be removed by anything: the rule the
+  Security page applied is now `locket-core`'s. A vault gets one TPM factor,
+  and it needs a PIN, wherever it is added from.
+- `locket-tpm` and `locket-fido` gained `Tpm` and `Authenticator`: the device
+  a factor is sealed to or asked of can be named, which is what lets the
+  tests run against a software TPM and a software token. `open_context()` is
+  now `Tpm::context()`.
 - `locket_import::export::{to_json, to_csv, to_kdbx}` take an `Existing`
   argument saying whether a file already at the path is refused or replaced.
   Breaking for anything calling the library; the command line and the
@@ -46,6 +62,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   P-521 — and then refused every request: the SSH library was built without
   its curve implementations, so a key that `ssh-add -l` showed could not log
   in anywhere.
+- A security-key factor is asked for under the relying party recorded with
+  it, not always locket's own.
 - An export or a saved attachment that fails part-way leaves nothing behind.
   A KDBX export cut short by a full disk used to stay where it was going — an
   encrypted database nothing could open, under the name of the backup — and

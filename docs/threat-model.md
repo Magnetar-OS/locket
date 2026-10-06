@@ -1,6 +1,6 @@
 # Threat model
 
-**September 2026 · vault format 4**
+**October 2026 · vault format 4**
 
 What each piece of locket trusts, what can reach it, and what an attacker in
 each position can and cannot do. Written to be the document an external
@@ -28,9 +28,9 @@ model underneath it.
 | Component | Holds the DEK? | Trusts | Reached by |
 |---|---|---|---|
 | `locket-core` | in memory, while open | nothing — no I/O, no D-Bus, no UI | linked into everything below |
-| `locketd` | **yes**, while unlocked | the vault file, the session bus | every client below |
-| `locket` (GUI) | yes, while its window is unlocked — it opens the vault file itself, with or without a daemon | the vault file, `cosmic-config`, the daemon's `VaultLocked` announcements | the person at the keyboard |
-| `locket-cli` | yes, while it runs | the vault file only; it reads nothing from the daemon, and tells a running one to re-read the file after a write | a terminal |
+| `locketd` | **yes**, while unlocked | the vault file, the session bus; it talks to no TPM and no security key | every client below |
+| `locket` (GUI) | yes, while its window is unlocked — it opens the vault file itself, with or without a daemon | the vault file, `cosmic-config`, the daemon's `VaultLocked` announcements, and the TPM or token it asks for a slot's key | the person at the keyboard |
+| `locket-cli` | yes, while it runs | the vault file only, and the TPM or token when told to unlock with one; it reads nothing from the daemon, and tells a running one to re-read the file after a write | a terminal |
 | `pam_locket.so` | no | the unlock socket's location — a 0700 directory in the user's 0700 `XDG_RUNTIME_DIR`; no peer credentials are checked | the login stack, as root |
 | SSH agent (in `locketd`) | via the daemon | nothing about its callers | any process running as you |
 | Secret portal backend | via the daemon | `xdg-desktop-portal` to name the app id | sandboxed applications |
@@ -76,6 +76,22 @@ vault exists at all, its approximate size, and when it was last written.
 **Can** brute-force a weak passphrase, at Argon2id's price. This is the
 attack the strength meter on vault creation exists to make less likely.
 
+**Cannot** do anything with a TPM factor's sealed blob, which is in the file:
+it unseals only on the TPM that made it (tested: a second software TPM
+refuses it). **Can** see that the vault has a TPM or security-key factor,
+and the token's credential id and salt — the slots are in the header, in the
+clear, because the unlock screen has to offer them before anything is
+unlocked.
+
+With the file *and the machine* the TPM factor is a PIN and a counter. The
+chip counts wrong PINs — one strike each, tested against `swtpm` — and stops
+answering at its limit, the right PIN included, until its recovery time has
+passed. How many guesses that leaves an attacker is the chip's number, not
+locket's: 3 on `swtpm`, 32 with a two-hour decay on the AMD fTPM this was
+developed on. A PIN-less TPM factor cannot be made; nothing would stand
+behind it. PCR binding is not used, so the factor does not notice a changed
+boot chain.
+
 ### B. A process running as you, vault **locked**
 
 **Cannot** get a secret. The daemon holds no key; the Secret Service answers
@@ -88,6 +104,13 @@ can position or dress up. One dialog serves every request made while it is up,
 so asking repeatedly does not stack them; behind a locked screen no dialog is
 raised at all and the request is refused.
 **Can** see the collection index and the fact that a vault exists.
+
+**Can**, if you are in the `tss` group, try TPM PINs against the chip itself
+with the sealed blob from the vault file — locket is not in that path and
+cannot rate-limit it. The chip does: each wrong PIN is a strike, and the
+price of the protection is that such a process can spend your strikes and
+put the TPM into lockout for everything that uses it. That is the reason
+the passphrase factor can never be removed.
 
 ### C. A process running as you, vault **unlocked**
 
@@ -118,6 +141,12 @@ What is still true in this position:
   set-environment LD_PRELOAD=…`) before the dialog starts — which subverts
   the daemon itself at its next start just as well — or one that can inject
   input into the compositor.
+- **A hardware factor's key crosses the session bus once per unlock.** The
+  window or the dialog has the TPM or the token release the slot's key and
+  hands it to the daemon through `Manager1.UnlockWithKey`, as it hands a
+  passphrase through `Unlock`. Whatever can watch that bus learns a key that
+  opens this vault file, as it would learn the passphrase; a PIN never
+  crosses it.
 - **Locking is the defence**, which is why it happens on idle, on session
   lock, on the compositor raising `LockedHint`, and on suspend. **Unlocking
   the screen does not undo it.** The lock screen's password never reaches
@@ -131,7 +160,8 @@ What is still true in this position:
   authenticates no caller: a process running as you can turn the idle lock
   off (`SetAutoLock(0)`), lock the vault, refuse a pending unlock
   (`CancelUnlock`), and try passphrases through `Unlock` or the unlock
-  socket at Argon2id's cost per guess, unthrottled. Locking on session lock
+  socket at Argon2id's cost per guess, unthrottled — or 256-bit slot keys
+  through `UnlockWithKey`, to no purpose. Locking on session lock
   and suspend is not a setting and cannot be turned off this way. None of
   this reveals a secret it could not already read in this position.
 
@@ -247,7 +277,23 @@ change to the model:
 Carried from the security policy, and the honest limit of everything above:
 
 - **No FIDO2 hardware has ever been attached.** Slot and `sk-` agent paths
-  are implemented and unit-tested against a software token only.
+  are implemented and unit-tested against a software token only; a
+  security-key factor can therefore unlock but not be added.
+- **Unlocking with a TPM factor has only met `swtpm`.** The enrolment path
+  ran against a real AMD fTPM when it was written; the unlock path added
+  since was run against the software TPM, and the buttons that reach it in
+  the window and the unlock dialog have not been driven by anyone.
+- **RSA timing (RUSTSEC-2023-0071).** The advisory is open against every
+  release of the `rsa` crate, the release candidate locket builds with
+  included, so `cargo audit` reports it and will until upstream closes it.
+  The crate is used for one thing here, the SSH agent's RSA signatures. Of
+  what the advisory lists as outstanding (read 2026-10-06), two items —
+  PKCS#1 v1.5 padding checks that are not constant-time, and implicit
+  rejection — concern RSA *decryption*, which locket never performs; the
+  third, blinding on the crate's default code path, is why the agent signs
+  through the randomised signer, which blinds every private-key operation
+  with a fresh factor. That has not been measured here, only read in the
+  crate's source. An Ed25519 or ECDSA key is not affected at all.
 - **No external review.** One author, no audit.
 - **Fuzzing is bounded, not a campaign.** Five targets over the vault
   parser, the agent wire protocol, the session transport and two importers,

@@ -270,9 +270,11 @@ browser host's origin matching, and the GUI's editor and import state machines.
 The Secret Service objects are exercised over a real message bus — a private
 `dbus-daemon` each test starts for itself, never the session's — by a raw
 client, by libsecret's own `secret-tool`, and by `locket-cli` run beside a
-daemon. All of that runs without hardware. The TPM and FIDO2 round trips are
-`#[ignore]`d behind environment variables because they need a chip and a touch
-— the TPM ones have been run against a real AMD fTPM and `swtpm` (see
+daemon. All of that runs without hardware. TPM factors are exercised against
+`swtpm`, a software TPM each test starts for itself, and security-key factors
+against a token in software; the tests that need a real chip or a real token
+and a touch are `#[ignore]`d behind environment variables — the TPM ones have
+been run against a real AMD fTPM (see
 [On authorising `sudo`](#on-authorising-sudo)); the FIDO2 ones have not been
 run at all.
 
@@ -401,7 +403,7 @@ binaries actually link against, read off `ldd` rather than guessed:
 
 ```sh
 cargo build --release          # ~4 minutes cold, ~75 MB of binaries
-cargo test --workspace         # no hardware needed; TPM and FIDO2 tests are #[ignore]d
+cargo test --workspace         # no hardware needed; wants dbus-daemon, secret-tool and swtpm
 ```
 
 The tests also run two programs: `dbus-daemon` (Arch `dbus`, Debian `dbus`) for
@@ -1073,35 +1075,107 @@ every time the two processes were both open.
 
 ## Managing unlock factors
 
-**Hardware factors are enrolled nowhere today.** The vault format, the TPM and
-FIDO2 crates and their tests can seal the key to a TPM or a security key and
-open the vault with it — the run below did exactly that — but nothing a person
-uses unlocks that way yet: not the window, not PAM, not the unlock socket. A
-factor that cannot open anything only adds a way into the file, so the
-**Security** page no longer offers to add one and says why; a hardware slot
-added by an earlier version is still listed and can be removed. A TPM factor
-also needs a PIN now: without one the chip hands the key to anything on the
-machine that asks.
+A vault opens with its passphrase, and with whatever hardware factors have
+been added beside it. **A TPM factor can be added and unlocks the vault. A
+security-key factor unlocks the vault but cannot be added yet** — see
+[Security keys (FIDO2)](#security-keys-fido2) for why.
 
-The **Security** page lists every slot, changes the passphrase and removes
-slots. Two rules are enforced there rather than left to judgement:
+### Unlocking with one
 
-* A passphrase slot can never be the last one removed. Hardware is additive, so
-  a dead motherboard or a lost token must not be a lost vault — the button says
-  "Required" rather than silently failing.
-* The screen states what a TPM PIN actually rests on: the chip's lockout, not
-  the PIN's length, and that lockout is device-wide.
+| Where | How |
+|---|---|
+| The window's unlock screen | "Use the TPM PIN" / "Use a security key" appear under the passphrase field when the vault file has such a factor |
+| The dialog an application's request raises | the same two choices |
+| `locket-cli` | `--unlock-with tpm` or `--unlock-with security-key` on any command, with `--pin-env` to take the PIN from the environment |
+| Login (`pam_locket.so`) | **not at all** — the passphrase factor only, see below |
 
-When enrolment comes back, it runs on a worker thread: a TPM seal takes the
-better part of a second and a security key takes as long as it takes someone
-to touch it, so the vault is moved into the worker rather than the window
-freezing.
+The device is asked once. The window, the dialog or the command line has the
+TPM or the token release the key of the vault's slot, opens its own copy of
+the vault with it, and — the window and the dialog — hands the same key to
+`locketd` over `org.locket.Manager1.UnlockWithKey`, so one PIN or one touch
+unlocks libsecret applications, the browser extension and the SSH agent as
+well. `locketd` itself talks to no TPM and no token. The key crosses the
+session bus exactly as the passphrase does through `Unlock`.
 
-Hardware support is behind cargo features (`tpm`, `fido`, both on by default),
-because `tss-esapi` needs libtss2 and `ctap-hid-fido2` needs hidapi. Without
-them the GUI still builds and says the factor is unavailable in this build.
+Which factors a vault has is in its header, in the clear, so the unlock
+screen can offer the right ones before anything is unlocked. Reaching the
+TPM needs membership of the `tss` group (`/dev/tpmrm0` is `root:tss 0660`).
 
-Verified against the real AMD fTPM, through the same code path the GUI calls:
+**Login does not use hardware factors, on purpose.** `pam_locket.so` holds
+one string, the login password. Trying it as a TPM PIN would cost the chip a
+lockout strike at every login where the two differ — after a password
+change, say, which nothing can follow through to a PIN — and the lockout is
+shared with everything else on the machine that uses the TPM; three wrong
+tries is the whole budget on some chips. A security key needs a touch, and a
+session opening has nowhere to ask for one. So login keeps unlocking with the
+passphrase factor when the login password is the vault passphrase, and a
+password change re-wraps that factor only; both were run against a vault that
+also had a hardware factor, which kept working.
+
+### Adding, removing, re-keying
+
+The **Security** page lists every factor, adds a TPM PIN, changes the
+passphrase and removes factors. The command line does the same:
+
+```sh
+locket-cli slots                      # list
+locket-cli slots add-tpm              # asks for the new factor's PIN, twice
+locket-cli slots rm <id>              # by the id `slots` prints
+locket-cli --unlock-with tpm passwd   # forgot the passphrase: set a new one
+```
+
+Rules that hold whichever of them is used — they live in `locket-core` and
+`locket-tpm`, not in the screen:
+
+* **The last passphrase cannot be removed.** Hardware is additive: a dead
+  motherboard or a lost token must not be a lost vault. The page says
+  "Required" where the button would be.
+* **A TPM factor needs a PIN.** Without one the chip hands the key to
+  anything on the machine that asks, and its lockout never comes into play.
+* **One TPM factor per vault.** Unlocking tries the PIN on every TPM slot,
+  and each one it does not fit costs a strike.
+* **Changing the passphrase leaves hardware factors alone.** Each slot wraps
+  the same vault key under its own, so a new passphrase re-wraps one slot —
+  from the Security page, `passwd`, or a login password change followed by
+  PAM. To change a TPM PIN, remove the factor and add it again.
+* **The window still asks for the current passphrase before changing it**, an
+  unlocked window not being authority to lock its owner out. The command
+  line, opened with a hardware factor, will set a new one: that is the way
+  back in for someone who has forgotten theirs, and whoever can do it could
+  already read everything.
+
+The screen states what a TPM PIN actually rests on: the chip's lockout, not
+the PIN's length, and that lockout is device-wide. Adding a factor runs on a
+worker thread — a TPM seal takes the better part of a second — so the vault
+is moved into the worker rather than the window freezing.
+
+Hardware support is behind cargo features (`tpm`, `fido`, both on by default,
+in the application and in `locket-cli`), because `tss-esapi` needs libtss2 and
+`ctap-hid-fido2` needs hidapi. Without them everything still builds and says
+the factor is unavailable in this build.
+
+### What was run
+
+Against `swtpm` 0.10.2, the software TPM, which the test suite starts for
+itself — a fresh one per test, on loopback ports, its state in a temporary
+directory:
+
+* `locket-tpm`: a wrong PIN is refused and costs exactly one strike of the
+  dictionary-attack counter, a missing PIN costs none, and the right PIN
+  afterwards does not clear the strike; three wrong PINs lock the chip
+  against the right one too; a blob sealed by one TPM does not unseal on
+  another; a vault is opened by PIN alone, has its passphrase replaced while
+  open that way, still opens by PIN, and stops when the factor is removed.
+* `locket-cli`: `slots add-tpm`, `--unlock-with tpm`, `passwd` from a TPM
+  unlock, `slots rm`, and each refusal above, as a person would type them.
+* The daemon: the key a TPM released, sent over a private bus, unlocks it;
+  a wrong key, a short key and a key under the wrong factor's name do not.
+  The login path (unlock and password change over the unlock socket) beside
+  a hardware factor.
+
+**Not run:** the window's and the dialog's own buttons — no window was put on
+this desktop — and nothing in this round touched the machine's real TPM. The
+enrolment code was run against the real AMD fTPM when it was written:
 
 ```
 slots before:  Passphrase        argon2id m=65536KiB t=3 p=4
@@ -1126,9 +1200,25 @@ Credentials are created under the relying-party id `locket.local`, which is
 deliberately not a real domain: `hmac-secret` is scoped per (rp_id, credential),
 so a locket credential cannot be exercised by a website.
 
-**Not verified on hardware** — no FIDO2 token is attached to this machine. The
-round-trip tests are `#[ignore]`d behind `LOCKET_FIDO_TESTS=1` (plus
-`LOCKET_FIDO_PIN` if your token has one); they need a physical touch.
+**Not verified on hardware** — no FIDO2 token has ever been attached to the
+machine this was written on, and a token cannot be simulated there without
+root (a virtual HID device needs `/dev/uhid`). So:
+
+* Unlocking with a security-key factor is wired everywhere a TPM factor is —
+  the window, the dialog, `locket-cli --unlock-with security-key`, the key
+  handed on to the daemon — and the slot logic is tested against a token in
+  software that behaves as CTAP 2.1 specifies for `hmac-secret`: a secret per
+  credential, a different one once the user is verified by PIN, nothing for a
+  credential it did not make or for another relying party. Two tokens on one
+  vault, a passphrase change and removing a lost token's factor are covered.
+* What that leaves untested is the USB conversation itself. Until it has met
+  a real key, **adding a security-key factor is not offered** — not on the
+  Security page, not on the command line. A factor added by a version that
+  did offer it is listed, unlocks, and can be removed.
+
+The tests that talk to a real token are `#[ignore]`d behind
+`LOCKET_FIDO_TESTS=1` (plus `LOCKET_FIDO_PIN` if your token has one); they
+need a physical touch.
 
 ## Security keys over SSH
 
@@ -1220,16 +1310,18 @@ security here.
 real vault all pass, and the chip's dictionary-attack counter incremented
 exactly once per wrong PIN, which is the property the whole design rests on.
 
-The tests are `#[ignore]`d behind `LOCKET_TPM_TESTS=1` and a TCTI:
+The tests start `swtpm` themselves, so it has to be installed; nothing else
+is needed, and none of them opens the machine's own chip. Two further tests
+talk to whatever TPM the TCTI environment names — a real one — and are
+`#[ignore]`d behind `LOCKET_TPM_TESTS=1`:
 
 ```sh
-swtpm socket --tpm2 --tpmstate dir=/tmp/tpm --ctrl type=tcp,port=2322 \
-  --server type=tcp,port=2321 --flags not-need-init,startup-clear &
-TCTI="swtpm:host=localhost,port=2321" LOCKET_TPM_TESTS=1 \
-  cargo test -p locket-tpm -- --ignored
+cargo test -p locket-tpm                                   # against swtpm
+LOCKET_TPM_TESTS=1 cargo test -p locket-tpm -- --ignored   # against /dev/tpmrm0
 ```
 
-The lockout claim is demonstrated by `examples/da_probe.rs`. With the
+The lockout claim is a test (`enough_wrong_pins_lock_the_chip_against_the_right_one_too`)
+and, for a chip of your own choosing, `examples/da_probe.rs`. With the
 simulator's `MAX_AUTH_FAIL = 3`, two wrong PINs increment the DA counter and
 the third puts the TPM in lockout — after which **the correct PIN is also
 refused** until recovery. Lockout is device-wide, so this is not free: it is

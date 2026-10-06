@@ -1,14 +1,11 @@
-//! Enrolling and removing unlock factors.
+//! Unlock factors: adding and removing them, and unlocking with one.
 //!
-//! Until now a TPM PIN or a security key could only be added from code, which
-//! made the hardware work unreachable for anyone actually using locket. This
-//! is the screen that fixes that.
-//!
-//! Two rules are enforced here rather than left to the user's judgement:
+//! Two rules hold here, and in the crates underneath so that the command
+//! line keeps them too:
 //!
 //! * **The passphrase always stays.** Hardware factors are additive. A dead
-//!   motherboard or a lost token must not be a lost vault, so a passphrase
-//!   slot can never be the one you remove.
+//!   motherboard or a lost token must not be a lost vault, so the last
+//!   passphrase slot can never be removed (`Vault::remove_slot`).
 //! * **Enrolment is never silent about what it costs.** A TPM PIN is only as
 //!   good as the chip's dictionary-attack lockout, and that lockout is
 //!   device-wide — the screen says so, because someone choosing a 4-digit PIN
@@ -18,7 +15,11 @@ use crate::fl;
 use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
-use locket_core::{SecretString, Vault, slots::SlotFactor};
+use locket_core::{
+    SecretString, Vault,
+    crypto::SymKey,
+    slots::{SlotFactor, SlotKind},
+};
 use uuid::Uuid;
 
 /// A factor the user can add, and whether this build can add it.
@@ -43,6 +44,144 @@ impl Factor {
             Factor::SecurityKey => cfg!(feature = "fido"),
         }
     }
+
+    /// The kind of slot this factor opens.
+    pub const fn kind(self) -> SlotKind {
+        match self {
+            Factor::TpmPin => SlotKind::Tpm2,
+            Factor::SecurityKey => SlotKind::Fido2,
+        }
+    }
+}
+
+/// The hardware factors the vault at `path` can be unlocked with here: the
+/// ones it has a slot for and this build can talk to. Read from the file's
+/// header, so it is known before anything is unlocked.
+pub fn enrolled(path: &std::path::Path) -> Vec<Factor> {
+    let Ok(slots) = Vault::read_slots(path) else {
+        // No vault yet, or one that cannot be read: the unlock screen says
+        // which when the passphrase is tried.
+        return Vec::new();
+    };
+    [Factor::TpmPin, Factor::SecurityKey]
+        .into_iter()
+        .filter(|factor| {
+            factor.compiled_in() && slots.iter().any(|slot| slot.factor.kind() == factor.kind())
+        })
+        .collect()
+}
+
+/// Have `factor`'s device release the key of the vault's slot for it.
+///
+/// Blocking: a TPM takes the better part of a second, and a security key
+/// waits for a touch. The key is returned rather than an open vault because
+/// two things need opening with it — this window's copy and the daemon's.
+pub fn slot_key(path: &std::path::Path, factor: Factor, pin: &str) -> Result<SymKey, String> {
+    let refused = |error: String| {
+        fl!(
+            "unlock-hardware-refused",
+            factor = factor.label(),
+            error = error
+        )
+    };
+    let slots = Vault::read_slots(path).map_err(|e| refused(e.to_string()))?;
+    match factor {
+        Factor::TpmPin => tpm_key(&slots, pin),
+        Factor::SecurityKey => security_key_key(&slots, pin),
+    }
+    .map_err(refused)
+}
+
+/// Open the vault at `path` with a hardware factor. Blocking, like
+/// [`slot_key`], whose key it also returns — for the daemon.
+pub fn open(path: &std::path::Path, factor: Factor, pin: &str) -> Result<(Vault, SymKey), String> {
+    let key = slot_key(path, factor, pin)?;
+    let opener = locket_core::slots::RawKeyOpener {
+        kind: factor.kind(),
+        key: key.clone(),
+    };
+    let vault = Vault::open_with(path, &opener).map_err(|e| {
+        fl!(
+            "unlock-hardware-refused",
+            factor = factor.label(),
+            error = e.to_string()
+        )
+    })?;
+    Ok((vault, key))
+}
+
+/// What the secret field of an unlock form is asking for.
+pub fn unlock_placeholder(with: Option<Factor>) -> String {
+    match with {
+        None => fl!("unlock-passphrase"),
+        Some(Factor::TpmPin) => fl!("unlock-tpm-pin"),
+        Some(Factor::SecurityKey) => fl!("unlock-security-key-pin"),
+    }
+}
+
+/// Whether an unlock form can be submitted with this in its secret field.
+///
+/// A security key may have no PIN at all, so its field may be empty. A TPM
+/// factor always has one, and trying the chip without it would be refused
+/// anyway.
+pub fn unlock_input_missing(with: Option<Factor>, input: &SecretString) -> Option<String> {
+    match with {
+        None if input.is_empty() => Some(fl!("error-enter-passphrase")),
+        Some(Factor::TpmPin) if input.is_empty() => Some(fl!("error-enter-pin")),
+        _ => None,
+    }
+}
+
+/// The other ways `hardware` says this vault can be unlocked, as a row of
+/// text buttons; `None` when the passphrase is the only one.
+pub fn unlock_switches<'a, M: Clone + 'static>(
+    hardware: &[Factor],
+    current: Option<Factor>,
+    pick: impl Fn(Option<Factor>) -> M,
+) -> Option<Element<'a, M>> {
+    if hardware.is_empty() {
+        return None;
+    }
+    let mut row = widget::row::with_capacity(hardware.len() + 1)
+        .spacing(cosmic::theme::spacing().space_xs)
+        .align_y(Alignment::Center);
+    if current.is_some() {
+        row = row.push(widget::button::text(fl!("unlock-with-passphrase")).on_press(pick(None)));
+    }
+    for &factor in hardware {
+        if current == Some(factor) {
+            continue;
+        }
+        let label = match factor {
+            Factor::TpmPin => fl!("unlock-with-tpm"),
+            Factor::SecurityKey => fl!("unlock-with-security-key"),
+        };
+        row = row.push(widget::button::text(label).on_press(pick(Some(factor))));
+    }
+    Some(row.into())
+}
+
+#[cfg(feature = "tpm")]
+fn tpm_key(slots: &[locket_core::slots::Slot], pin: &str) -> Result<SymKey, String> {
+    locket_tpm::Tpm::system()
+        .and_then(|tpm| tpm.unlock_key(slots, Some(pin)))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(feature = "tpm"))]
+fn tpm_key(_slots: &[locket_core::slots::Slot], _pin: &str) -> Result<SymKey, String> {
+    Err(fl!("error-no-tpm-support"))
+}
+
+#[cfg(feature = "fido")]
+fn security_key_key(slots: &[locket_core::slots::Slot], pin: &str) -> Result<SymKey, String> {
+    let pin = Some(pin).filter(|pin| !pin.is_empty());
+    locket_fido::unlock_key(slots, pin).map_err(|e| e.to_string())
+}
+
+#[cfg(not(feature = "fido"))]
+fn security_key_key(_slots: &[locket_core::slots::Slot], _pin: &str) -> Result<SymKey, String> {
+    Err(fl!("error-no-fido-support"))
 }
 
 /// Human description of a slot, for the list.
@@ -82,29 +221,16 @@ pub fn describe(factor: &SlotFactor) -> String {
     }
 }
 
-/// Whether removing this slot would leave the vault without a passphrase.
-///
-/// Losing every passphrase slot means the vault can only ever be opened by a
-/// device that might break, which is not a state a user should be able to
-/// reach by clicking a button.
-pub fn is_last_passphrase(vault: &Vault, slot_id: Uuid) -> bool {
-    let passphrase_slots: Vec<_> = vault
-        .slots()
-        .iter()
-        .filter(|s| matches!(s.factor, SlotFactor::Passphrase { .. }))
-        .collect();
-    passphrase_slots.len() == 1 && passphrase_slots[0].id == slot_id
-}
-
 /// The factors the page offers to add.
 ///
-/// None, for now. Enrolment works, but nothing in locket opens the vault
-/// with a TPM or security-key slot yet — the window, the daemon and PAM all
-/// unlock with the passphrase — so offering it would add a factor that
-/// unlocks nothing. The enrolment code stays for when that is wired, and
-/// slots enrolled earlier are still listed and removable.
+/// A TPM PIN, which the window, the unlock dialog and the command line can
+/// all unlock with. Not a security key: unlocking with one is wired the same
+/// way and tested against a token in software, but it has never been run
+/// against a real key, and adding a factor is not the moment to find out.
+/// A security-key slot enrolled by an earlier version is listed, unlocks,
+/// and can be removed.
 pub fn offered_factors() -> &'static [Factor] {
-    &[]
+    &[Factor::TpmPin]
 }
 
 /// The PIN a TPM slot is sealed under, which is required.
@@ -123,10 +249,12 @@ pub fn tpm_pin(pin: &str) -> Result<&str, String> {
 #[cfg(feature = "tpm")]
 pub fn enroll_tpm(vault: &mut Vault, pin: &str) -> Result<Uuid, String> {
     let pin = tpm_pin(pin)?;
-    let (factor, kek) = locket_tpm::enroll(Some(pin)).map_err(|e| e.to_string())?;
-    vault
-        .add_slot("TPM 2.0 (PIN)", factor, &kek)
-        .map_err(|e| e.to_string())
+    locket_tpm::Tpm::system()
+        .and_then(|tpm| tpm.enroll_into(vault, pin))
+        .map_err(|e| match e {
+            locket_tpm::Error::AlreadyEnrolled => fl!("error-tpm-already-enrolled"),
+            e => e.to_string(),
+        })
 }
 
 #[cfg(not(feature = "tpm"))]
@@ -257,7 +385,7 @@ impl Security {
 
         let mut list = widget::list_column();
         for slot in vault.slots() {
-            let last_passphrase = is_last_passphrase(vault, slot.id);
+            let last_passphrase = vault.is_last_passphrase(slot.id);
             let row = widget::row::with_capacity(3)
                 .spacing(spacing.space_s)
                 .align_y(Alignment::Center)
@@ -267,7 +395,7 @@ impl Security {
                         .push(widget::text::caption(describe(&slot.factor)))
                         .width(Length::Fill),
                 )
-                .push(if last_passphrase || vault.slots().len() == 1 {
+                .push(if last_passphrase {
                     // Explain the greyed-out button rather than just disabling it.
                     Element::from(widget::text::caption(fl!("security-required")))
                 } else {
@@ -285,12 +413,7 @@ impl Security {
             .push(widget::divider::horizontal::default())
             .push(widget::text::caption_heading(fl!("security-add-heading")));
 
-        if offered_factors().is_empty() {
-            column = column.push(
-                widget::text::body(fl!("security-hardware-unavailable"))
-                    .wrapping(cosmic::iced::core::text::Wrapping::WordOrGlyph),
-            );
-        } else {
+        {
             column = column.push(
                 widget::text_input::secure_input(
                     fl!("security-pin-placeholder"),
@@ -327,6 +450,12 @@ impl Security {
 
             // The honest caveat, where someone choosing a PIN will read it.
             column = column.push(widget::text::caption(fl!("security-tpm-caveat")));
+            if !offered_factors().contains(&Factor::SecurityKey) {
+                column = column.push(
+                    widget::text::caption(fl!("security-key-unavailable"))
+                        .wrapping(cosmic::iced::core::text::Wrapping::WordOrGlyph),
+                );
+            }
         }
 
         // -- change the passphrase -------------------------------------------
@@ -393,55 +522,20 @@ impl Security {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use locket_core::crypto::{KdfParams, SymKey};
+    use locket_core::crypto::KdfParams;
 
     fn vault(dir: &tempfile::TempDir) -> Vault {
         Vault::create(dir.path().join("v.vault"), "pw", KdfParams::insecure_fast()).unwrap()
     }
 
-    #[test]
-    fn the_only_passphrase_is_flagged_as_unremovable() {
-        let dir = tempfile::tempdir().unwrap();
-        let v = vault(&dir);
-        let only = v.slots()[0].id;
-        assert!(is_last_passphrase(&v, only));
-    }
-
-    #[test]
-    fn a_hardware_slot_does_not_make_the_passphrase_removable() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut v = vault(&dir);
-        let passphrase_slot = v.slots()[0].id;
-
-        v.add_slot(
-            "TPM 2.0",
-            SlotFactor::Tpm2 {
-                sealed: "AAAA".into(),
-                parent: Default::default(),
-                pcrs: vec![],
-                with_pin: true,
-            },
-            &SymKey::random().unwrap(),
-        )
-        .unwrap();
-
-        // Two slots now, but removing the passphrase would leave only hardware.
-        assert!(
-            is_last_passphrase(&v, passphrase_slot),
-            "the last passphrase became removable once hardware was added"
-        );
-        // The hardware slot itself is fair game.
-        let tpm_slot = v.slots()[1].id;
-        assert!(!is_last_passphrase(&v, tpm_slot));
-    }
-
+    /// The page asks the vault which slot is the last passphrase; with a
+    /// second passphrase slot, neither is.
     #[test]
     fn a_second_passphrase_makes_the_first_removable() {
         let dir = tempfile::tempdir().unwrap();
         let mut v = vault(&dir);
         let first = v.slots()[0].id;
-        // change_passphrase replaces rather than adds, so build the situation
-        // directly: two passphrase slots means neither is the last one.
+        assert!(v.is_last_passphrase(first));
         v.add_slot(
             "Recovery phrase",
             SlotFactor::Passphrase {
@@ -451,7 +545,7 @@ mod tests {
             &SymKey::random().unwrap(),
         )
         .unwrap();
-        assert!(!is_last_passphrase(&v, first));
+        assert!(!v.is_last_passphrase(first));
     }
 
     /// Fluent wraps every interpolated value in bidi isolation marks
@@ -492,11 +586,52 @@ mod tests {
         assert!(fido.contains("presence only"), "{fido}");
     }
 
-    /// Nothing in locket opens the vault with a TPM or security-key slot yet,
-    /// so enrolling one would add a factor that cannot unlock anything.
+    /// A TPM factor can be added now that it unlocks. A security key
+    /// cannot: unlocking with one has only ever met a token in software.
     #[test]
-    fn hardware_enrolment_is_not_offered_until_it_can_unlock() {
-        assert!(offered_factors().is_empty(), "{:?}", offered_factors());
+    fn only_a_factor_whose_unlock_has_met_a_device_is_offered() {
+        assert_eq!(offered_factors(), [Factor::TpmPin]);
+    }
+
+    /// The unlock screen offers a hardware factor because the vault file
+    /// says it has one — read without unlocking anything.
+    #[test]
+    fn the_factors_a_vault_can_be_unlocked_with_come_from_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = vault(&dir);
+        let path = v.path().to_owned();
+        assert!(enrolled(&path).is_empty());
+        assert!(enrolled(&dir.path().join("absent.vault")).is_empty());
+
+        v.add_slot(
+            "TPM 2.0 (PIN)",
+            SlotFactor::Tpm2 {
+                sealed: "AAAA".into(),
+                parent: Default::default(),
+                pcrs: vec![],
+                with_pin: true,
+            },
+            &SymKey::random().unwrap(),
+        )
+        .unwrap();
+        v.add_slot(
+            "Security key",
+            SlotFactor::Fido2 {
+                credential_id: "AAAA".into(),
+                salt: locket_core::slots::base64_encode(&[0u8; 32]),
+                rp_id: "locket.local".into(),
+                user_verification: false,
+            },
+            &SymKey::random().unwrap(),
+        )
+        .unwrap();
+        drop(v);
+
+        let expected: Vec<Factor> = [Factor::TpmPin, Factor::SecurityKey]
+            .into_iter()
+            .filter(|factor| factor.compiled_in())
+            .collect();
+        assert_eq!(enrolled(&path), expected);
     }
 
     /// A TPM slot with no PIN releases its key to anything on the machine

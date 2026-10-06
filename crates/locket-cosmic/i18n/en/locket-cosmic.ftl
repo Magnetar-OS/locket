@@ -12,9 +12,9 @@ app-comment = Passwords, keys and secrets for the COSMIC desktop
 
 security-title = Unlock factors
 security-blurb =
-    Your passphrase opens the vault. A TPM or security-key factor added in an
-    earlier version is kept alongside it, never instead of it, but locket
-    cannot unlock with one yet.
+    Your passphrase opens the vault. A TPM factor adds a second way in — a PIN
+    this machine's TPM checks — alongside the passphrase, never instead of it:
+    the last passphrase cannot be removed.
 security-dismiss = Dismiss
 security-locked = Unlock the vault to manage factors.
 security-sealing = Sealing a key to the TPM…
@@ -22,9 +22,10 @@ security-touch-key = Waiting for you to touch your security key…
 security-required = Required
 security-remove = Remove
 security-add-heading = Add a factor
-security-hardware-unavailable = Unlocking with a TPM or a security key is not available yet: nothing in locket can open the vault with one, so neither can be added here. A factor added earlier is listed above and can be removed.
+security-key-unavailable = A security key cannot be added here yet. Unlocking with one is written and tested against a token in software, but has never been run against a real key. A security-key factor added by an earlier version is listed above, can unlock the vault, and can be removed.
+error-tpm-already-enrolled = This vault already has a TPM factor. Remove it before adding another: every TPM factor the PIN you type does not fit costs one of the chip's attempts.
 error-tpm-pin-required = A TPM factor needs a PIN. Without one the chip hands the key to anything on this machine that asks, and its lockout never comes into play.
-security-pin-placeholder = PIN (optional)
+security-pin-placeholder = PIN for the new factor
 security-add-factor = Add { $factor }
 security-sealing-short = Sealing…
 security-touch-short = Touch your key…
@@ -304,6 +305,15 @@ unlock-create-blurb =
 unlock-app-blurb =
     An application asked for a secret from your vault. Unlock to let it through.
 unlock-blurb = Enter your passphrase to unlock the vault.
+unlock-tpm-blurb = Enter the PIN of this vault's TPM factor. A wrong PIN counts toward the chip's lockout.
+unlock-security-key-blurb = Plug in your security key, enter its PIN if it has one, and touch the key when it asks.
+unlock-tpm-pin = TPM PIN
+unlock-security-key-pin = Security key PIN, if it has one
+unlock-with-passphrase = Use the passphrase
+unlock-with-tpm = Use the TPM PIN
+unlock-with-security-key = Use a security key
+unlock-touch-key = Touch your security key…
+unlock-hardware-refused = { $factor } did not open the vault: { $error }
 unlock-passphrase = Passphrase
 unlock-confirm = Confirm passphrase
 unlock-create-button = Create vault
@@ -317,8 +327,11 @@ prompt-title = An application wants a secret
 # One line on purpose: a Fluent value broken across source lines keeps those
 # breaks, and the dialog is narrow enough to need its own wrapping.
 prompt-body = Something asked for a secret from your vault. Enter your passphrase to let it through.
+prompt-body-tpm = Something asked for a secret from your vault. Enter your TPM PIN to let it through.
+prompt-body-security-key = Something asked for a secret from your vault. Enter your security key's PIN, if it has one, and touch the key to let it through.
 prompt-open-window = Open locket
 prompt-refused = That passphrase did not open the vault.
+prompt-refused-daemon = locketd did not unlock with it.
 
 
 ## Sidebar categories
@@ -549,7 +562,7 @@ toast-merge-attachments =
     their other changes are in the item's history.
 toast-imported = Imported { $summary }
 toast-unlocked-others = Unlocked for other applications too
-toast-daemon-kept-locked = locketd did not take this passphrase, so other applications still see a locked vault.
+toast-daemon-kept-locked = locketd did not unlock with it, so other applications still see a locked vault.
 toast-daemon-kept-unlocked = locketd could not be locked, so other applications can still read secrets.
 toast-factor-removed = Factor removed.
 toast-factor-added = Factor added. Your passphrase still works.
@@ -559,6 +572,7 @@ toast-qr-failed = Could not build a QR code: { $error }
 ## Errors
 
 error-enter-passphrase = Enter a passphrase.
+error-enter-pin = Enter the PIN.
 error-passphrases-differ = The two passphrases do not match.
 error-open-failed = Could not open the vault.
 error-unlock-task = unlock task failed: { $error }

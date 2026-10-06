@@ -156,6 +156,32 @@ pub async fn unlock(passphrase: locket_core::SecretString) -> Reply {
     }
 }
 
+/// Hand the daemon the key a TPM or a security key released for one of the
+/// vault's slots, so the PIN or the touch that opened this window opens the
+/// daemon too.
+pub async fn unlock_with_key(
+    kind: locket_core::slots::SlotKind,
+    key: locket_core::crypto::SymKey,
+) -> Reply {
+    let Some((_connection, proxy)) = client::connect().await else {
+        return Reply::NoDaemon;
+    };
+    match proxy.unlock_with_key(kind.name(), key.expose()).await {
+        Ok(true) => {
+            tracing::info!("daemon unlocked with the {} factor", kind.label());
+            Reply::Done
+        }
+        Ok(false) => {
+            tracing::warn!("daemon rejected the {} factor's key", kind.label());
+            Reply::Refused
+        }
+        Err(e) => {
+            tracing::warn!("could not unlock the daemon: {e}");
+            Reply::Refused
+        }
+    }
+}
+
 /// Tell the daemon the person dismissed its unlock request, so the
 /// application that asked is refused now instead of after a timeout.
 pub async fn cancel_unlock() {
