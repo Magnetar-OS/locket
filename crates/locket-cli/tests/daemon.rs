@@ -12,6 +12,13 @@ use std::time::{Duration, Instant};
 
 use locket_secret::testing::{Daemon, PASSPHRASE, PrivateBus};
 
+/// An address nothing listens on, for a run that is to find no bus.
+///
+/// Leaving the variable out does not do that: without it zbus falls back to
+/// `/run/user/<uid>/bus`, which on a desktop is the session bus of whoever
+/// runs the tests, with their real daemon on it.
+const NO_BUS: &str = "unix:path=/nonexistent/locket-tests/bus";
+
 /// Run `locket-cli` with an environment holding the given bus address and
 /// nothing else, so it cannot find the session bus of whoever runs the tests.
 async fn cli(bus: Option<&str>, vault: &Path, args: &[&str]) -> Output {
@@ -26,10 +33,8 @@ async fn cli(bus: Option<&str>, vault: &Path, args: &[&str]) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .env("DBUS_SESSION_BUS_ADDRESS", bus.unwrap_or(NO_BUS))
         .kill_on_drop(true);
-    if let Some(address) = bus {
-        command.env("DBUS_SESSION_BUS_ADDRESS", address);
-    }
     tokio::time::timeout(Duration::from_secs(60), command.output())
         .await
         .expect("locket-cli did not finish")

@@ -1,12 +1,18 @@
 //! `locket-cli` commands against a vault in a temporary directory.
 //!
-//! No bus is given to these runs: the environment is emptied, so the tool
-//! finds no session bus and no daemon, which it treats as the ordinary case.
+//! No bus is given to these runs: the environment is emptied and the bus
+//! address points at nothing, so the tool finds no session bus and no daemon,
+//! which it treats as the ordinary case.
 
 use std::path::Path;
 use std::process::{Output, Stdio};
 
 const PASSPHRASE: &str = "correct horse battery";
+
+/// An address nothing listens on. An emptied environment alone is not "no
+/// bus": without the variable zbus falls back to `/run/user/<uid>/bus`, the
+/// session bus of whoever runs the tests, with their real daemon on it.
+const NO_BUS: &str = "unix:path=/nonexistent/locket-tests/bus";
 
 fn cli(vault: &Path, args: &[&str]) -> Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_locket-cli"))
@@ -16,6 +22,7 @@ fn cli(vault: &Path, args: &[&str]) -> Output {
         .args(args)
         .env_clear()
         .env("LOCKET_TEST_PASSPHRASE", PASSPHRASE)
+        .env("DBUS_SESSION_BUS_ADDRESS", NO_BUS)
         .stdin(Stdio::null())
         .output()
         .unwrap()
