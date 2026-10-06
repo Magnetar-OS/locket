@@ -4102,9 +4102,11 @@ version = "2.1.1"
 dependencies = [
  "clap",
  "locket-core",
+ "locket-fido",
  "locket-hibp",
  "locket-import",
  "locket-secret",
+ "locket-tpm",
  "rpassword",
  "serde_json",
  "tempfile",

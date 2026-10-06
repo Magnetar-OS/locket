@@ -146,3 +146,45 @@ async fn a_write_does_not_start_a_daemon() {
     );
     assert!(!started.exists(), "saving started the daemon");
 }
+
+/// What the unlock dialog does with a TPM factor, end to end but for the
+/// window: a software TPM releases the slot's key for the PIN, and that key,
+/// sent to the daemon, unlocks it for its clients. A wrong PIN releases
+/// nothing to send.
+#[tokio::test]
+async fn the_key_a_tpm_releases_unlocks_the_daemon() {
+    use locket_core::{Item, ItemKind, Vault, crypto::KdfParams};
+
+    let swtpm = locket_tpm::testing::Swtpm::start();
+    let tpm = swtpm.tpm();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.vault");
+    let mut vault = Vault::create(&path, PASSPHRASE, KdfParams::insecure_fast()).unwrap();
+    vault.add_item_default(Item::new(ItemKind::Login, "behind the PIN").with_secret("hunter2"));
+    vault.save().unwrap();
+    tpm.enroll_into(&mut vault, "24680").unwrap();
+    drop(vault);
+
+    let daemon = Daemon::start_locked(dir, path.clone()).await;
+    let client = daemon.client().await;
+    let manager = client.manager().await;
+
+    // The dialog's side: read the slots from the locked file, ask the TPM.
+    let slots = Vault::read_slots(&path).unwrap();
+    assert!(tpm.unlock_key(&slots, Some("13579")).is_err());
+    assert!(daemon.state.lock().await.is_locked());
+
+    let key = tpm.unlock_key(&slots, Some("24680")).unwrap();
+    let opened: bool = manager
+        .call("UnlockWithKey", &("tpm2", key.expose().to_vec()))
+        .await
+        .unwrap();
+    assert!(opened, "the daemon refused the key the TPM released");
+
+    let paths = client.search_all().await.unwrap();
+    assert_eq!(paths.len(), 1);
+    assert_eq!(
+        client.item_label(&paths[0]).await.unwrap(),
+        "behind the PIN"
+    );
+}

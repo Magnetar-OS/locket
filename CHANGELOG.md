@@ -4,6 +4,16 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Added
+
+- `locket-cli slots add-tpm` and `locket-cli slots rm <id>`: unlock factors
+  can be added and removed from a terminal, under the same rules as the
+  application. `locket-cli --unlock-with tpm passwd` sets a new passphrase
+  for someone who has forgotten theirs.
+- `locket-cli --unlock-with tpm` (with `--pin-env`) opens the vault with
+  its TPM factor on any command, and `--unlock-with security-key` with a
+  security-key factor added by an earlier version.
+
 ### Changed
 
 - The cryptography libraries moved to the current RustCrypto generation:

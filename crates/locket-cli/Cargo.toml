@@ -15,8 +15,18 @@ readme = "README.md"
 name = "locket-cli"
 path = "src/main.rs"
 
+[features]
+# Opening the vault with a hardware factor. Optional at build time for the
+# same reason as in the application: tss-esapi needs libtss2 and
+# ctap-hid-fido2 needs hidapi.
+default = ["tpm", "fido"]
+tpm = ["dep:locket-tpm"]
+fido = ["dep:locket-fido"]
+
 [dependencies]
 locket-core.workspace = true
+locket-tpm = { workspace = true, optional = true }
+locket-fido = { workspace = true, optional = true }
 locket-hibp.workspace = true
 locket-secret.workspace = true
 locket-import.workspace = true
@@ -35,3 +45,5 @@ rpassword = "7"
 tempfile = "3"
 # A private bus with a daemon's objects on it; see locket_secret::testing.
 locket-secret = { workspace = true, features = ["test-bus"] }
+# A software TPM per test; see locket_tpm::testing.
+locket-tpm = { workspace = true, features = ["test-swtpm"] }

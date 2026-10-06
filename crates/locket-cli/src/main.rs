@@ -16,10 +16,12 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use locket_core::{
     Vault,
-    crypto::KdfParams,
+    crypto::{KdfParams, SymKey},
     generator::{self, PasswordRecipe},
     model::{Field, Item, ItemKind, field_names},
+    slots::{RawKeyOpener, Slot, SlotKind},
 };
+use zeroize::Zeroizing;
 
 #[derive(Parser)]
 #[command(name = "locket-cli", version, about = "locket command line interface")]
@@ -31,6 +33,20 @@ struct Args {
     /// Read the passphrase from this environment variable instead of the tty.
     #[arg(long, global = true, value_name = "VAR")]
     passphrase_env: Option<String>,
+
+    /// Open the vault with this factor instead of the passphrase.
+    ///
+    /// `tpm` asks for the factor's PIN and this machine's TPM releases the
+    /// key; `security-key` asks for the token's PIN, if it has one, and then
+    /// for a touch. Either opens a vault whose passphrase is not to hand —
+    /// `passwd` then sets a new one.
+    #[arg(long, global = true, value_enum, default_value_t = UnlockWith::Passphrase)]
+    unlock_with: UnlockWith,
+
+    /// Read the TPM or security-key PIN from this environment variable
+    /// instead of the tty.
+    #[arg(long, global = true, value_name = "VAR")]
+    pin_env: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -164,8 +180,11 @@ enum Command {
         dry_run: bool,
     },
 
-    /// List the vault's unlock factors.
-    Slots,
+    /// List the vault's unlock factors, add a TPM factor, or remove one.
+    Slots {
+        #[command(subcommand)]
+        command: Option<SlotsCommand>,
+    },
     /// Import every readable secret from a running Secret Service.
     ///
     /// Reads from gnome-keyring by default. Idempotent: an item whose
@@ -415,6 +434,28 @@ enum TrashCommand {
 }
 
 #[derive(Subcommand)]
+enum SlotsCommand {
+    /// Seal the vault key to this machine's TPM, released by a PIN.
+    ///
+    /// Adds a way in; the passphrase keeps working. What holds a short PIN
+    /// up is the chip's lockout after a handful of wrong ones — which is
+    /// shared by everything else on the machine that uses the TPM.
+    AddTpm {
+        /// Read the new factor's PIN from this environment variable instead
+        /// of the tty.
+        #[arg(long, value_name = "VAR")]
+        new_pin_env: Option<String>,
+    },
+    /// Remove a factor, by the id `slots` prints.
+    ///
+    /// The last passphrase cannot be removed: hardware breaks and gets lost.
+    Rm {
+        /// The factor's id.
+        id: uuid::Uuid,
+    },
+}
+
+#[derive(Subcommand)]
 enum AttachCommand {
     /// Attach a file to an item.
     Add {
@@ -535,11 +576,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(p) => p,
         None => Vault::default_path()?,
     };
-    let passphrase = match &args.passphrase_env {
-        Some(var) => {
-            std::env::var(var).map_err(|_| format!("environment variable `{var}` is not set"))?
+    let unlock = match args.unlock_with {
+        UnlockWith::Passphrase => Unlock::Passphrase(Zeroizing::new(match &args.passphrase_env {
+            Some(var) => std::env::var(var)
+                .map_err(|_| format!("environment variable `{var}` is not set"))?,
+            None => rpassword::prompt_password(format!("Passphrase for {}: ", path.display()))?,
+        })),
+        hardware => {
+            if matches!(args.command, Command::Init) {
+                return Err(
+                    "a new vault starts with a passphrase; add hardware factors to it \
+                            afterwards"
+                        .into(),
+                );
+            }
+            hardware_key(hardware, &path, args.pin_env.as_deref())?
         }
-        None => rpassword::prompt_password(format!("Passphrase for {}: ", path.display()))?,
     };
 
     match args.command {
@@ -549,12 +601,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if path.exists() {
                 return Err(format!("{} already exists", path.display()).into());
             }
-            let vault = Vault::create(&path, &passphrase, KdfParams::default())?;
+            let vault = Vault::create(&path, unlock.passphrase("init")?, KdfParams::default())?;
             println!("created {}", vault.path().display());
         }
 
         Command::List { query, json } => {
-            let vault = Vault::open(&path, &passphrase)?;
+            let vault = unlock.open(&path)?;
             let needle = query.unwrap_or_default();
             let mut found = 0;
             for (collection, item) in vault.data().all_items() {
@@ -593,7 +645,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Get { query, field } => {
-            let vault = Vault::open(&path, &passphrase)?;
+            let vault = unlock.open(&path)?;
             // Resolved like every other command: a query that fits more than
             // one item is refused, not settled by whichever comes first — a
             // script would otherwise be handed another item's secret.
@@ -622,7 +674,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             favorite,
             expires,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let id = find_item(&vault, &query)?;
 
             // Read the new secret before taking the mutable borrow, so a
@@ -703,7 +755,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             yes,
             permanent,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let id = find_item(&vault, &query)?;
             let label = vault
                 .item(id)
@@ -737,7 +789,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Trash(cmd) => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             match cmd {
                 TrashCommand::List => {
                     if vault.data().trash.is_empty() {
@@ -832,7 +884,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             restore,
             forget,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let id = find_item(&vault, &query)?;
 
             if forget {
@@ -876,7 +928,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::Attach(cmd) => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             match cmd {
                 AttachCommand::Add { query, file } => {
                     let id = find_item(&vault, &query)?;
@@ -944,7 +996,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             check_breaches,
             json,
         } => {
-            let vault = Vault::open(&path, &passphrase)?;
+            let vault = unlock.open(&path)?;
             let report = locket_core::health::report(vault.data(), locket_core::model::now());
 
             // The breach check runs over every scoreable text secret, not
@@ -1040,7 +1092,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             other_passphrase_env,
             dry_run,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
 
             // Two forks of one vault usually share a passphrase, so try the
             // one we already have before asking again.
@@ -1050,7 +1102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|_| format!("environment variable `{var}` is not set"))?;
                     Vault::open(&other, &pw)?
                 }
-                None => Vault::open(&other, &passphrase).or_else(|_| {
+                None => unlock.open(&other).or_else(|_| {
                     let pw = rpassword::prompt_password(format!(
                         "Passphrase for {}: ",
                         other.display()
@@ -1084,8 +1136,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Command::Slots => {
-            let vault = Vault::open(&path, &passphrase)?;
+        Command::Slots { command: None } => {
+            let vault = unlock.open(&path)?;
             for slot in vault.slots() {
                 let detail = match &slot.factor {
                     locket_core::slots::SlotFactor::Passphrase { params, .. } => {
@@ -1118,13 +1170,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Command::Slots {
+            command: Some(SlotsCommand::AddTpm { new_pin_env }),
+        } => {
+            let mut vault = unlock.open(&path)?;
+            let pin = Zeroizing::new(match &new_pin_env {
+                Some(var) => std::env::var(var)
+                    .map_err(|_| format!("environment variable `{var}` is not set"))?,
+                None => {
+                    let first =
+                        Zeroizing::new(rpassword::prompt_password("PIN for the TPM factor: ")?);
+                    let again = Zeroizing::new(rpassword::prompt_password("Again: ")?);
+                    if *first != *again {
+                        return Err("the two PINs do not match".into());
+                    }
+                    first.to_string()
+                }
+            });
+            let id = add_tpm_factor(&mut vault, &pin)?;
+            notify_daemon(vault.path());
+            println!("added TPM factor {id}; the passphrase still opens the vault");
+            eprintln!(
+                "A wrong PIN counts toward this TPM's lockout, which everything else \
+                 using the chip shares. `tpm2_getcap properties-variable` shows its limits."
+            );
+        }
+
+        Command::Slots {
+            command: Some(SlotsCommand::Rm { id }),
+        } => {
+            let mut vault = unlock.open(&path)?;
+            let label = vault
+                .slots()
+                .iter()
+                .find(|slot| slot.id == id)
+                .map(|slot| slot.label.clone())
+                .ok_or_else(|| format!("no factor {id}; `slots` lists them"))?;
+            vault.remove_slot(id).map_err(|e| e.to_string())?;
+            notify_daemon(vault.path());
+            println!("removed factor {id} ({label})");
+        }
+
         Command::Import {
             from,
             into,
             dry_run,
             replace,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let before = vault.data().item_count();
 
             let summary = tokio::runtime::Runtime::new()?.block_on(
@@ -1145,7 +1238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportPass { store, gpg, into } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let store = match store {
                 Some(s) => s,
                 None => locket_import::pass::default_store_dir()
@@ -1163,7 +1256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keyfile,
             into,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let db_pw = match &db_passphrase_env {
                 Some(var) => std::env::var(var)
                     .map_err(|_| format!("environment variable `{var}` is not set"))?,
@@ -1183,7 +1276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportBitwarden { file, into } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary =
                 locket_import::bitwarden::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
@@ -1195,7 +1288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportOnepassword { file, into } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary =
                 locket_import::onepassword::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
@@ -1207,7 +1300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportProtonpass { file, into } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary =
                 locket_import::protonpass::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
@@ -1219,7 +1312,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportCsv { file, into } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary = locket_import::csv::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
             report(&summary, &file);
@@ -1237,7 +1330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..
         } => {
             let grouping = group_by.into();
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary =
                 locket_import::dotenv::import_dir(&mut vault, &dir, grouping, into.as_deref())?;
             save(&mut vault)?;
@@ -1253,7 +1346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(d) => d,
                 None => return Err("no ~/.ssh; pass --dir".into()),
             };
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary = locket_import::ssh::import_dir(&mut vault, &dir, into.as_deref())?;
             save(&mut vault)?;
             report(&summary, &dir);
@@ -1270,7 +1363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(h) => h,
                 None => return Err("cannot find your home directory".into()),
             };
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary =
                 locket_import::cloud::import_home(&mut vault, &home, &sqlite, into.as_deref())?;
             save(&mut vault)?;
@@ -1282,7 +1375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Command::ImportTotp { file, into } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let summary = locket_import::totp::import_file(&mut vault, &file, into.as_deref())?;
             save(&mut vault)?;
             report(&summary, &file);
@@ -1299,7 +1392,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             parallelism,
             rederive_only,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let defaults = KdfParams::default();
             let m_cost = match memory_mib {
                 // Checked: an overflow used to wrap to a small, valid cost in
@@ -1314,7 +1407,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             let new = if rederive_only {
-                passphrase.clone()
+                unlock.passphrase("passwd --rederive-only")?.to_owned()
             } else {
                 match &new_passphrase_env {
                     Some(var) => std::env::var(var)
@@ -1365,7 +1458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      which is encrypted)"
                     .into());
             }
-            let vault = Vault::open(&path, &passphrase)?;
+            let vault = unlock.open(&path)?;
             match format {
                 export::Format::Json => {
                     let count = export::to_json(&vault, &file, export::Existing::Refuse)?;
@@ -1418,7 +1511,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             generate,
             length,
         } => {
-            let mut vault = Vault::open(&path, &passphrase)?;
+            let mut vault = unlock.open(&path)?;
             let recipe = PasswordRecipe {
                 length,
                 ..Default::default()
@@ -1474,6 +1567,127 @@ fn report(summary: &locket_import::ImportSummary, source: &std::path::Path) {
     for note in &summary.notes {
         eprintln!("\n{note}");
     }
+}
+
+/// How the vault is being opened for this run.
+enum Unlock {
+    Passphrase(Zeroizing<String>),
+    /// A slot key a TPM or a security key released.
+    Key {
+        kind: SlotKind,
+        key: SymKey,
+    },
+}
+
+impl Unlock {
+    fn open(&self, path: &std::path::Path) -> locket_core::Result<Vault> {
+        match self {
+            Unlock::Passphrase(passphrase) => Vault::open(path, passphrase),
+            Unlock::Key { kind, key } => Vault::open_with(
+                path,
+                &RawKeyOpener {
+                    kind: *kind,
+                    key: key.clone(),
+                },
+            ),
+        }
+    }
+
+    /// The passphrase itself, for the few things that need the words rather
+    /// than an open vault.
+    fn passphrase(&self, what: &str) -> Result<&str, String> {
+        match self {
+            Unlock::Passphrase(passphrase) => Ok(passphrase),
+            Unlock::Key { .. } => Err(format!(
+                "`{what}` needs the passphrase; run it without --unlock-with"
+            )),
+        }
+    }
+}
+
+/// Have a TPM or a security key release the key of the vault's slot for it.
+fn hardware_key(
+    with: UnlockWith,
+    path: &std::path::Path,
+    pin_env: Option<&str>,
+) -> Result<Unlock, Box<dyn std::error::Error>> {
+    let (kind, name) = match with {
+        UnlockWith::Passphrase => unreachable!("the passphrase is not hardware"),
+        UnlockWith::Tpm => (SlotKind::Tpm2, "TPM"),
+        UnlockWith::SecurityKey => (SlotKind::Fido2, "security-key"),
+    };
+    // Before asking for a PIN that there would be nothing to try on.
+    let slots = Vault::read_slots(path)?;
+    if !slots.iter().any(|slot| slot.factor.kind() == kind) {
+        return Err(format!("{} has no {name} factor", path.display()).into());
+    }
+
+    let pin = Zeroizing::new(match pin_env {
+        Some(var) => {
+            std::env::var(var).map_err(|_| format!("environment variable `{var}` is not set"))?
+        }
+        None => rpassword::prompt_password(match with {
+            UnlockWith::SecurityKey => "Security key PIN (empty if it has none): ",
+            _ => "TPM PIN: ",
+        })?,
+    });
+    let key = match with {
+        UnlockWith::Tpm => tpm_key(&slots, &pin)?,
+        _ => {
+            eprintln!("touch your security key…");
+            security_key_key(&slots, Some(pin.as_str()).filter(|pin| !pin.is_empty()))?
+        }
+    };
+    Ok(Unlock::Key { kind, key })
+}
+
+#[cfg(feature = "tpm")]
+fn tpm_key(slots: &[Slot], pin: &str) -> Result<SymKey, Box<dyn std::error::Error>> {
+    if pin.is_empty() {
+        // Refused here rather than by the chip, where it would cost a strike.
+        return Err("a TPM factor is released by its PIN".into());
+    }
+    // As text: an error leaving `main` is printed in its debug form, which
+    // for these is a variant name.
+    locket_tpm::Tpm::system()
+        .and_then(|tpm| tpm.unlock_key(slots, Some(pin)))
+        .map_err(|e| e.to_string().into())
+}
+
+#[cfg(not(feature = "tpm"))]
+fn tpm_key(_slots: &[Slot], _pin: &str) -> Result<SymKey, Box<dyn std::error::Error>> {
+    Err("this build has no TPM support".into())
+}
+
+#[cfg(feature = "tpm")]
+fn add_tpm_factor(vault: &mut Vault, pin: &str) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
+    locket_tpm::Tpm::system()
+        .and_then(|tpm| tpm.enroll_into(vault, pin))
+        .map_err(|e| e.to_string().into())
+}
+
+#[cfg(not(feature = "tpm"))]
+fn add_tpm_factor(
+    _vault: &mut Vault,
+    _pin: &str,
+) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
+    Err("this build has no TPM support".into())
+}
+
+#[cfg(feature = "fido")]
+fn security_key_key(
+    slots: &[Slot],
+    pin: Option<&str>,
+) -> Result<SymKey, Box<dyn std::error::Error>> {
+    locket_fido::unlock_key(slots, pin).map_err(|e| e.to_string().into())
+}
+
+#[cfg(not(feature = "fido"))]
+fn security_key_key(
+    _slots: &[Slot],
+    _pin: Option<&str>,
+) -> Result<SymKey, Box<dyn std::error::Error>> {
+    Err("this build has no security-key support".into())
 }
 
 /// Write the vault, then tell a running daemon that it changed.
@@ -1604,6 +1818,14 @@ fn find_item(vault: &Vault, query: &str) -> Result<uuid::Uuid, Box<dyn std::erro
             Err("be more specific, or use one of those ids".into())
         }
     }
+}
+
+/// Which factor opens the vault.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum UnlockWith {
+    Passphrase,
+    Tpm,
+    SecurityKey,
 }
 
 /// CLI spelling of [`locket_import::export::Format`].

@@ -15,6 +15,12 @@ const PASSPHRASE: &str = "correct horse battery";
 const NO_BUS: &str = "unix:path=/nonexistent/locket-tests/bus";
 
 fn cli(vault: &Path, args: &[&str]) -> Output {
+    cli_with(vault, args, &[])
+}
+
+/// [`cli`] with more in its environment; a later entry replaces an earlier
+/// one of the same name, the passphrase included.
+fn cli_with(vault: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_locket-cli"))
         .arg("--vault")
         .arg(vault)
@@ -24,6 +30,7 @@ fn cli(vault: &Path, args: &[&str]) -> Output {
         .env("LOCKET_TEST_PASSPHRASE", PASSPHRASE)
         .env("LOCKET_TEST_KDBX_PASSPHRASE", "for the database")
         .env("DBUS_SESSION_BUS_ADDRESS", NO_BUS)
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .output()
         .unwrap()
@@ -323,4 +330,135 @@ fn a_write_that_fails_part_way_leaves_no_file() {
         assert!(written.status.success(), "{}", text(&written.stderr));
         assert!(std::fs::metadata(path).unwrap().len() > 1024);
     }
+}
+
+/// A TPM factor from the command line, against a software TPM: added, used
+/// to open the vault with no passphrase, used to set a new passphrase in
+/// place of a forgotten one, and removed. Nothing but the application could
+/// add or remove a factor before, and nothing at all could unlock with one.
+#[test]
+fn a_tpm_factor_is_added_unlocks_and_is_removed() {
+    let swtpm = locket_tpm::testing::Swtpm::start();
+    let (dir, vault) = vault_with(&["github"]);
+    let on_tpm = |args: &[&str], extra: &[(&str, &str)]| {
+        let mut env = vec![
+            ("TCTI", swtpm.tcti()),
+            ("LOCKET_TEST_PIN", "135790"),
+            ("LOCKET_TEST_WRONG_PIN", "000000"),
+            ("LOCKET_TEST_EMPTY", ""),
+            ("LOCKET_TEST_NEW", "a new passphrase"),
+        ];
+        env.extend_from_slice(extra);
+        cli_with(&vault, args, &env)
+    };
+    const BY_PIN: [&str; 4] = ["--unlock-with", "tpm", "--pin-env", "LOCKET_TEST_PIN"];
+    let by_pin = |args: &[&str]| on_tpm(&[&BY_PIN[..], args].concat(), &[]);
+
+    // No factor yet: said before any PIN is asked for or tried.
+    let none = by_pin(&["list"]);
+    assert!(!none.status.success());
+    assert!(
+        text(&none.stderr).contains("no TPM factor"),
+        "{}",
+        text(&none.stderr)
+    );
+
+    // A factor needs a PIN; then one is added, and only one.
+    let empty = on_tpm(
+        &["slots", "add-tpm", "--new-pin-env", "LOCKET_TEST_EMPTY"],
+        &[],
+    );
+    assert!(
+        !empty.status.success(),
+        "a TPM factor was added without a PIN"
+    );
+    let added = on_tpm(
+        &["slots", "add-tpm", "--new-pin-env", "LOCKET_TEST_PIN"],
+        &[],
+    );
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    let again = on_tpm(
+        &["slots", "add-tpm", "--new-pin-env", "LOCKET_TEST_PIN"],
+        &[],
+    );
+    assert!(!again.status.success(), "a second TPM factor was added");
+    assert!(text(&again.stderr).contains("already has a TPM factor"));
+
+    let listed = text(&cli(&vault, &["slots"]).stdout);
+    let id_of = |what: &str| {
+        listed
+            .lines()
+            .find(|line| line.contains(what))
+            .and_then(|line| line.split_whitespace().next())
+            .unwrap_or_else(|| panic!("no {what} slot in:\n{listed}"))
+            .to_owned()
+    };
+    let (passphrase_slot, tpm_slot) = (id_of("argon2id"), id_of("TPM 2.0 + PIN"));
+
+    // The PIN opens the vault with no passphrase given; a wrong one, and
+    // none, do not.
+    let secret = cli(&vault, &["get", "github"]);
+    let by_tpm = by_pin(&["get", "github"]);
+    assert!(by_tpm.status.success(), "{}", text(&by_tpm.stderr));
+    assert_eq!(by_tpm.stdout, secret.stdout);
+    for wrong in ["LOCKET_TEST_WRONG_PIN", "LOCKET_TEST_EMPTY"] {
+        let refused = on_tpm(
+            &["--unlock-with", "tpm", "--pin-env", wrong, "get", "github"],
+            &[],
+        );
+        assert!(!refused.status.success(), "{wrong} opened the vault");
+        assert!(refused.stdout.is_empty());
+    }
+
+    // What needs the passphrase itself says so, and a factor the vault does
+    // not have is not looked for on the bus.
+    let rederive = by_pin(&["passwd", "--rederive-only"]);
+    assert!(!rederive.status.success());
+    assert!(text(&rederive.stderr).contains("needs the passphrase"));
+    let token = on_tpm(&["--unlock-with", "security-key", "list"], &[]);
+    assert!(!token.status.success());
+    assert!(text(&token.stderr).contains("no security-key factor"));
+    let init = on_tpm(&["--unlock-with", "tpm", "init"], &[]);
+    assert!(!init.status.success());
+
+    // The passphrase forgotten: the TPM factor lets a new one be set, and
+    // goes on opening the vault afterwards.
+    let reset = by_pin(&["passwd", "--new-passphrase-env", "LOCKET_TEST_NEW"]);
+    assert!(reset.status.success(), "{}", text(&reset.stderr));
+    assert!(
+        !cli(&vault, &["list"]).status.success(),
+        "the old passphrase still opens it"
+    );
+    let renewed = [("LOCKET_TEST_PASSPHRASE", "a new passphrase")];
+    assert!(on_tpm(&["list"], &renewed).status.success());
+    assert_eq!(by_pin(&["get", "github"]).stdout, secret.stdout);
+
+    // The last passphrase stays; the TPM factor goes, and with it the PIN.
+    let passphrase_slot =
+        id_of_passphrase_after_rekey(&on_tpm(&["slots"], &renewed), &passphrase_slot);
+    let kept = on_tpm(&["slots", "rm", &passphrase_slot], &renewed);
+    assert!(!kept.status.success(), "the only passphrase was removed");
+    let removed = on_tpm(&["slots", "rm", &tpm_slot], &renewed);
+    assert!(removed.status.success(), "{}", text(&removed.stderr));
+    assert!(
+        !by_pin(&["list"]).status.success(),
+        "a removed factor still opens the vault"
+    );
+    assert!(on_tpm(&["list"], &renewed).status.success());
+    drop(dir);
+}
+
+/// The passphrase slot's id after a passphrase change, which replaces the
+/// slot: whichever listed slot is the Argon2id one. `before` is the id it
+/// had, to show the change really made a new slot.
+fn id_of_passphrase_after_rekey(slots: &Output, before: &str) -> String {
+    let listed = text(&slots.stdout);
+    let id = listed
+        .lines()
+        .find(|line| line.contains("argon2id"))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no passphrase slot in:\n{listed}"))
+        .to_owned();
+    assert_ne!(id, before, "the passphrase slot was not re-made");
+    id
 }
