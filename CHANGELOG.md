@@ -32,6 +32,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Fixed
 
+- The SSH agent signs with ECDSA keys. It listed them — P-256, P-384 and
+  P-521 — and then refused every request: the SSH library was built without
+  its curve implementations, so a key that `ssh-add -l` showed could not log
+  in anywhere.
 - An export or a saved attachment that fails part-way leaves nothing behind.
   A KDBX export cut short by a full disk used to stay where it was going — an
   encrypted database nothing could open, under the name of the backup — and

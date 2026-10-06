@@ -964,6 +964,45 @@ mod tests {
         );
     }
 
+    /// Every ECDSA curve OpenSSH writes keys for. These went untested while
+    /// Ed25519 and RSA each had a test of their own.
+    #[test]
+    fn an_ecdsa_key_of_each_curve_signs_and_the_signature_verifies() {
+        use ssh_key::EcdsaCurve;
+
+        for curve in [
+            EcdsaCurve::NistP256,
+            EcdsaCurve::NistP384,
+            EcdsaCurve::NistP521,
+        ] {
+            let algorithm = Algorithm::Ecdsa { curve };
+            let key = PrivateKey::random(&mut crate::test_rng(), algorithm.clone()).unwrap();
+            let pem = key.to_openssh(LineEnding::LF).unwrap();
+            let agent_key = AgentKey::from_openssh(&pem, None, Some("ecdsa")).unwrap();
+            let blob = agent_key.public_blob.clone();
+            let public = ssh_key::PublicKey::from_bytes(&blob).unwrap();
+            let mut agent = Agent::with_keys(vec![agent_key]);
+
+            let sig_blob = sign_through(&mut agent, &blob, b"data to be signed")
+                .unwrap_or_else(|| panic!("{curve:?}: the agent refused to sign"));
+            let mut inner = Reader::new(&sig_blob);
+            assert_eq!(inner.read_utf8().unwrap(), algorithm.as_str());
+            let raw = inner.read_string().unwrap();
+            assert!(inner.is_empty());
+
+            let signature = Signature::new(algorithm, raw.to_vec()).unwrap();
+            assert!(
+                <ssh_key::PublicKey as signature::Verifier<Signature>>::verify(
+                    &public,
+                    b"data to be signed",
+                    &signature
+                )
+                .is_ok(),
+                "{curve:?}: the signature did not verify against the advertised key"
+            );
+        }
+    }
+
     #[test]
     fn refuses_to_sign_for_an_unknown_key() {
         let mut agent = Agent::with_keys(vec![test_key("a")]);
