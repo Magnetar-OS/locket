@@ -24,3 +24,5 @@ base64ct.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# The software token in the tests computes what a real one does.
+hmac.workspace = true

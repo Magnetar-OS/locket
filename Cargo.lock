@@ -4199,6 +4199,7 @@ dependencies = [
  "ctap-hid-fido2",
  "getrandom 0.4.3",
  "hkdf",
+ "hmac",
  "locket-core",
  "sha2",
  "tempfile",
