@@ -18,10 +18,8 @@ dirs.workspace = true
 base64ct.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# On the newer RustCrypto generation (aes 0.9, cbc 0.2, hmac 0.13) beside the
-# workspace's held block. 0.14+ declares only those ranges, so nothing unifies
-# across the two generations the way 0.13.25's wide aes range once did, and a
-# plain caret requirement is safe again.
+# On the same RustCrypto generation as the workspace (aes 0.9, cbc 0.2,
+# hmac 0.13), so the two share one copy of each.
 keepass = { version = "0.15", features = ["save_kdbx4"] }
 # 1Password's .1pux and Proton Pass's export are both zip envelopes around
 # JSON. Deflate only — that is what both exporters write.

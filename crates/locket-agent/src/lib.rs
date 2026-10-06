@@ -41,3 +41,9 @@ pub use error::{Error, Result};
 /// OpenSSH uses 256 KiB; anything larger is a client bug or an attempt to make
 /// the daemon allocate without bound.
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024;
+
+/// The system RNG, for tests that generate keys.
+#[cfg(test)]
+pub(crate) fn test_rng() -> impl ssh_key::rand_core::CryptoRng {
+    ssh_key::rand_core::UnwrapErr(getrandom::SysRng)
+}

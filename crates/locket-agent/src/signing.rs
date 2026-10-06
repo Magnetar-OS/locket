@@ -7,18 +7,15 @@
 //! server asks for `rsa-sha2-256` or `-512` and rejects a signature that comes
 //! back under a different name.
 //!
-//! `ssh-key` cannot do any of this for us. A key loaded from a file has
-//! algorithm `Rsa { hash: None }` — no hash was recorded, because the file
-//! does not carry one — and both its signer and its own conversion into the
-//! `rsa` crate fail with a bare "cryptographic error" in that state. So the
-//! keypair's components are handed to `rsa` directly and the hash is chosen
-//! per request.
+//! `ssh-key` does not make that choice for us: its own RSA signer signs with
+//! SHA-512 whatever the client asked for, and unblinded. So the keypair is
+//! converted to an `rsa` private key, the hash is chosen per request, and the
+//! signature is made with a blinding factor.
 
-use rsa::BigUint;
+use getrandom::SysRng;
 use rsa::pkcs1v15::SigningKey;
-use rsa::rand_core::CryptoRngCore;
+use rsa::rand_core::TryCryptoRng;
 use signature::{RandomizedSigner, SignatureEncoding};
-use ssh_key::Mpint;
 use ssh_key::private::RsaKeypair;
 
 use crate::error::{Error, Result};
@@ -66,7 +63,7 @@ impl RsaHash {
 ///
 /// Returns the raw signature; the caller wraps it with the algorithm name.
 pub fn rsa_signature(keypair: &RsaKeypair, data: &[u8], hash: RsaHash) -> Result<Vec<u8>> {
-    rsa_signature_with(&mut rsa::rand_core::OsRng, keypair, data, hash)
+    rsa_signature_with(&mut SysRng, keypair, data, hash)
 }
 
 /// [`rsa_signature`], drawing the blinding factor from `rng`.
@@ -74,12 +71,12 @@ pub fn rsa_signature(keypair: &RsaKeypair, data: &[u8], hash: RsaHash) -> Result
 /// Signed through the *randomised* signer on purpose. PKCS#1 v1.5 signing
 /// needs no randomness and the plain `Signer` uses none — which in the `rsa`
 /// crate means the private-key exponentiation runs unblinded, on arithmetic
-/// that is not constant-time (RUSTSEC-2023-0071). An agent signs data its
-/// callers choose, for anything that can reach its socket, a forwarded one
-/// included; with a fresh blinding factor per signature, how long one took
-/// says nothing about the key.
+/// whose timing RUSTSEC-2023-0071 is about. An agent signs data its callers
+/// choose, for anything that can reach its socket, a forwarded one included;
+/// with a fresh blinding factor per signature, how long one took says
+/// nothing about the key.
 fn rsa_signature_with(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl TryCryptoRng,
     keypair: &RsaKeypair,
     data: &[u8],
     hash: RsaHash,
@@ -105,38 +102,31 @@ fn rsa_signature_with(
     Ok(signature)
 }
 
-/// Rebuild an `rsa` private key from the SSH keypair's components.
+/// The `rsa` private key an SSH keypair describes.
 fn private_key(keypair: &RsaKeypair) -> Result<rsa::RsaPrivateKey> {
-    let big = |m: &Mpint, what: &'static str| -> Result<BigUint> {
-        m.as_positive_bytes()
-            .map(BigUint::from_bytes_be)
-            .ok_or_else(|| {
-                Error::BadKey(format!("RSA component `{what}` is not a positive integer"))
-            })
-    };
-
-    rsa::RsaPrivateKey::from_components(
-        big(&keypair.public.n, "n")?,
-        big(&keypair.public.e, "e")?,
-        big(&keypair.private.d, "d")?,
-        vec![big(&keypair.private.p, "p")?, big(&keypair.private.q, "q")?],
-    )
-    .map_err(|e| Error::BadKey(format!("RSA key components do not form a usable key: {e}")))
+    rsa::RsaPrivateKey::try_from(keypair).map_err(|e| {
+        Error::BadKey(format!(
+            "the RSA key's components do not form a usable key: {e}"
+        ))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ssh_key::{Algorithm, PrivateKey, rand_core::OsRng};
+    use ssh_key::PrivateKey;
+    use ssh_key::private::KeypairData;
 
-    /// Key generation dominates this test's runtime; `ssh-key` picks the size.
+    /// Key generation dominates this test's runtime, so the key is the
+    /// smallest size still in ordinary use rather than `ssh-key`'s default.
     fn rsa_key() -> PrivateKey {
-        PrivateKey::random(&mut OsRng, Algorithm::Rsa { hash: None }).unwrap()
+        let keypair = RsaKeypair::random(&mut crate::test_rng(), 2048).unwrap();
+        PrivateKey::new(KeypairData::Rsa(keypair), "").unwrap()
     }
 
     fn keypair(key: &PrivateKey) -> &RsaKeypair {
         match key.key_data() {
-            ssh_key::private::KeypairData::Rsa(kp) => kp,
+            KeypairData::Rsa(kp) => kp,
             _ => panic!("not an RSA key"),
         }
     }
@@ -196,22 +186,10 @@ mod tests {
     /// with the agent's lock held instead of answering `SSH_AGENT_FAILURE`.
     #[test]
     fn a_key_too_small_for_the_hash_is_an_error_not_a_panic() {
-        use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-
-        let small = rsa::RsaPrivateKey::new(&mut OsRng, 512).unwrap();
-        let mpint = |n: &BigUint| Mpint::from_positive_bytes(&n.to_bytes_be()).unwrap();
-        let kp = RsaKeypair {
-            public: ssh_key::public::RsaPublicKey {
-                e: mpint(small.e()),
-                n: mpint(small.n()),
-            },
-            private: ssh_key::private::RsaPrivateKey {
-                d: mpint(small.d()),
-                iqmp: mpint(&small.crt_coefficient().unwrap()),
-                p: mpint(&small.primes()[0]),
-                q: mpint(&small.primes()[1]),
-            },
-        };
+        // Below the size the crate will generate without being told it is
+        // on purpose; such keys still exist in files.
+        let small = rsa::RsaPrivateKey::new_unchecked(&mut crate::test_rng(), 512).unwrap();
+        let kp = RsaKeypair::try_from(&small).unwrap();
 
         assert!(matches!(
             rsa_signature(&kp, b"message", RsaHash::Sha512),
@@ -221,37 +199,35 @@ mod tests {
         assert!(rsa_signature(&kp, b"message", RsaHash::Sha256).is_ok());
     }
 
-    /// An RNG that counts what is drawn from it.
+    /// The system RNG, counting what is drawn from it.
     struct Counting {
         drawn: usize,
     }
 
-    impl rsa::rand_core::RngCore for Counting {
-        fn next_u32(&mut self) -> u32 {
+    impl rsa::rand_core::TryRng for Counting {
+        type Error = getrandom::Error;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
             self.drawn += 4;
-            OsRng.next_u32()
+            SysRng.try_next_u32()
         }
-        fn next_u64(&mut self) -> u64 {
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
             self.drawn += 8;
-            OsRng.next_u64()
+            SysRng.try_next_u64()
         }
-        fn fill_bytes(&mut self, dest: &mut [u8]) {
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
             self.drawn += dest.len();
-            OsRng.fill_bytes(dest);
-        }
-        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
-            self.drawn += dest.len();
-            OsRng.try_fill_bytes(dest)
+            SysRng.try_fill_bytes(dest)
         }
     }
 
-    impl rsa::rand_core::CryptoRng for Counting {}
+    impl TryCryptoRng for Counting {}
 
     /// The private-key operation has to be blinded: anything that can reach
     /// the agent socket — a forwarded one included — can ask for signatures
-    /// over data it chose and time them, and the `rsa` crate's arithmetic is
-    /// not constant-time (RUSTSEC-2023-0071). `Signer::try_sign` does not
-    /// blind; only the randomised signer does. A PKCS#1 v1.5 signature is the
+    /// over data it chose and time them, which is the position
+    /// RUSTSEC-2023-0071 is about. `Signer::try_sign` does not blind; only the
+    /// randomised signer does. A PKCS#1 v1.5 signature is the
     /// same bytes either way, so what shows the difference is whether
     /// randomness was drawn while making it.
     #[test]

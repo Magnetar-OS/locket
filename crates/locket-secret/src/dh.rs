@@ -20,7 +20,7 @@
 //! can already see your D-Bus traffic. The vault at rest is XChaCha20-Poly1305
 //! under Argon2id (see `locket_core::crypto`).
 
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::Pkcs7};
 use hkdf::Hkdf;
 use num_bigint::BigUint;
 use sha2::Sha256;
@@ -123,7 +123,7 @@ pub fn encrypt(key: &[u8; AES_KEY_LEN], plaintext: &[u8]) -> Result<(Vec<u8>, Ve
     let mut iv = [0u8; IV_LEN];
     getrandom::fill(&mut iv).map_err(|e| Error::Crypto(e.to_string()))?;
     let ciphertext =
-        Aes128CbcEnc::new(key.into(), &iv.into()).encrypt_padded_vec_mut::<Pkcs7>(plaintext);
+        Aes128CbcEnc::new(key.into(), &iv.into()).encrypt_padded_vec::<Pkcs7>(plaintext);
     Ok((iv.to_vec(), ciphertext))
 }
 
@@ -136,7 +136,7 @@ pub fn decrypt(key: &[u8; AES_KEY_LEN], iv: &[u8], ciphertext: &[u8]) -> Result<
         ))
     })?;
     Aes128CbcDec::new(key.into(), &iv.into())
-        .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+        .decrypt_padded_vec::<Pkcs7>(ciphertext)
         .map_err(|_| Error::Crypto("secret failed to decrypt (bad padding or wrong key)".into()))
 }
 

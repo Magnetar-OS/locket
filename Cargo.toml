@@ -54,45 +54,22 @@ futures-util = "0.3"
 zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 # --- Crypto ----------------------------------------------------------------
-# HELD BACK DELIBERATELY — do not `cargo upgrade --incompatible` these.
-#
-# argon2, chacha20poly1305, aes, cbc, hmac, sha2, sha1, hkdf, signature and
-# rsa form one RustCrypto generation (aead 0.5 / cipher 0.4 / digest 0.10 /
-# signature 2). Newer releases of all of them exist; what holds the block is
-# the SSH side, which has no stable release on the new generation as of
-# 2026-09-28:
-#
-#   * ssh-key 0.6.7 (newest stable; 0.7 is still a release candidate)
-#     implements `Signer<Signature>` from signature 2. Bumping to signature 3
-#     breaks the SSH agent with no forward fix.
-#   * rsa 0.9.10 (newest stable; 0.10 is still a release candidate) is the
-#     generation ssh-key's own RSA support is built on.
-#
-# argon2 is no longer a reason on its own — 0.6.0 is stable on digest 0.11 —
-# but it moves with the rest. Upgrading anyway compiles nothing: aes 0.9/cbc
-# 0.2 drop `encrypt_padded_vec_mut`, and hmac 0.13 moves `new_from_slice` from
-# `Mac` to `KeyInit`. Revisit when ssh-key 0.7 and rsa 0.10 are stable, and
-# move the whole block together. (The lock already carries the newer
-# generation beside this one, through keepass; holding this block is what
-# keeps the vault and agent code on the older one.)
-#
-# These carry exact `=` requirements on purpose: `cargo upgrade` treats a
-# pinned requirement as opt-out and skips it even with `--incompatible`
-# (`--pinned` defaults to `ignore`), so the set cannot drift apart by accident.
-# Everything NOT entangled with digest/signature is kept current — see
-# getrandom 0.4 and num-bigint 0.5 below.
-argon2 = { version = "=0.5.3", features = ["alloc", "password-hash"] }
-chacha20poly1305 = { version = "=0.10.1", features = ["alloc"] }
+# One RustCrypto generation throughout (digest 0.11 / cipher 0.5 / aead 0.6 /
+# signature 3) — the one keepass is on too, so the lock holds a single copy
+# of each crate. Stable releases on ordinary caret requirements; the two
+# exceptions are in the SSH block below.
+argon2 = { version = "0.6", features = ["alloc", "password-hash"] }
+chacha20poly1305 = { version = "0.11", features = ["alloc"] }
 getrandom = "0.4"
 zeroize = { version = "1.9", features = ["derive", "alloc"] }
 subtle = "2.6"
-sha2 = "=0.10.9"
-sha1 = "=0.10.7"
-hmac = "=0.12.1"
-hkdf = "=0.12.4"
+sha2 = "0.11"
+sha1 = "0.11"
+hmac = "0.13"
+hkdf = "0.13"
 # Secret Service's `dh-ietf1024-sha256-aes128-cbc-pkcs7` session transport.
-aes = "=0.8.4"
-cbc = { version = "=0.1.2", features = ["alloc", "block-padding"] }
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
 num-bigint = "0.5"
 base32 = "0.5"
 base64ct = { version = "1.8", features = ["alloc"] }
@@ -112,16 +89,32 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 ] }
 
 # --- SSH -------------------------------------------------------------------
-# Same generation as ssh-key's own `rsa`, so an RSA keypair converts across
-# without a second copy of the crate. Held with the block above.
-# `sha1`/`sha2` here pull in the OID association those digests need to be
-# usable as PKCS#1 v1.5 hashes; SHA-1 is only ever used when a client asks for
-# `ssh-rsa` explicitly.
-rsa = { version = "=0.9.10", features = ["sha1", "sha2"] }
-ssh-key = { version = "=0.6.7", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std", "getrandom"] }
-# `rand_core` for `RandomizedSigner`: RSA signatures are made through it so
-# that the private-key operation is blinded (see locket-agent's `signing`).
-signature = { version = "=2.2.0", features = ["rand_core"] }
+# RELEASE CANDIDATES, PINNED EXACTLY — these two only.
+#
+# As of 2026-10-06 neither crate has a stable release on this generation:
+# ssh-key 0.6.7 (2024-10-15) and rsa 0.9.10 are the newest stable, both on
+# the previous one, and staying on them held argon2, chacha20poly1305, aes,
+# cbc, hmac, hkdf, sha1, sha2 and signature back with them while the lock
+# carried both generations. The block was moved once it resolved as one, the
+# agent's tests passed, and vaults and SSH keys had been read both ways
+# against the released 2.1.1 on temporary vaults (ssh-key 0.7.0-rc.11 of
+# 2026-06-29, rsa 0.10.0-rc.19 of 2026-10-06).
+#
+# `=` because release candidates promise each other nothing: `cargo update`
+# must not carry the tree from one to the next unreviewed, and ssh-key's own
+# requirement (`rsa ^0.10.0-rc.18`) would allow it. Raise the two together,
+# re-run that check, and drop the `=` when the stable releases exist. (rsa
+# brings pkcs1 0.8.0-rc.5 with it; the lock holds that one.)
+#
+# rsa is here for one operation: the agent's RSA signatures, which are made
+# blinded — see locket-agent's `signing`. RUSTSEC-2023-0071 lists every
+# version of the crate, these included. Its `sha1`/`sha2` features bring the
+# OID association those digests need as PKCS#1 v1.5 hashes; SHA-1 is only
+# ever used when a client asks for `ssh-rsa` explicitly.
+rsa = { version = "=0.10.0-rc.19", features = ["sha1", "sha2"] }
+ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519", "rsa", "ecdsa", "encryption", "alloc", "std", "getrandom"] }
+# `rand_core` for `RandomizedSigner`, which is how those signatures are made.
+signature = { version = "3", features = ["rand_core"] }
 
 # --- Serialization / errors / logging --------------------------------------
 serde = { version = "1", features = ["derive"] }

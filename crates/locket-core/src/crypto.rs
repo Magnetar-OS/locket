@@ -17,7 +17,7 @@
 //! cannot downgrade the KDF parameters without invalidating the tag.
 
 use chacha20poly1305::{
-    Key, XChaCha20Poly1305, XNonce,
+    XChaCha20Poly1305,
     aead::{Aead, KeyInit, Payload},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -149,7 +149,7 @@ impl SymKey {
     }
 
     fn cipher(&self) -> XChaCha20Poly1305 {
-        XChaCha20Poly1305::new(Key::from_slice(&self.0))
+        XChaCha20Poly1305::new((&self.0).into())
     }
 
     /// Encrypt `plaintext`, binding `aad` into the authentication tag.
@@ -162,7 +162,7 @@ impl SymKey {
         let ciphertext = self
             .cipher()
             .encrypt(
-                XNonce::from_slice(&nonce),
+                (&nonce).into(),
                 Payload {
                     msg: plaintext,
                     aad,
@@ -179,7 +179,7 @@ impl SymKey {
     pub fn open(&self, nonce: &[u8; NONCE_LEN], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         self.cipher()
             .decrypt(
-                XNonce::from_slice(nonce),
+                nonce.into(),
                 Payload {
                     msg: ciphertext,
                     aad,

@@ -26,6 +26,9 @@ rsa.workspace = true
 sha2.workspace = true
 sha1.workspace = true
 signature.workspace = true
+# The system RNG, in the form the RustCrypto traits take: RSA signatures are
+# blinded with it.
+getrandom = { workspace = true, features = ["sys_rng"] }
 tokio.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
@@ -35,3 +38,6 @@ subtle.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# `hazmat` for `RsaPrivateKey::new_unchecked`: one test needs a key smaller
+# than the crate will generate otherwise.
+rsa = { workspace = true, features = ["hazmat"] }

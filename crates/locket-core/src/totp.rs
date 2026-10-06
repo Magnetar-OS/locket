@@ -1,6 +1,6 @@
 //! RFC 6238 TOTP, and the `otpauth://` URI format authenticator apps use.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Sha256, Sha512};
 
 use crate::{Error, Result};

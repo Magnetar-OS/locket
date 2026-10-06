@@ -223,11 +223,9 @@ mod tests {
     fn security_key() -> AgentKey {
         use ssh_key::{private, public};
 
-        let credential = ssh_key::PrivateKey::random(
-            &mut ssh_key::rand_core::OsRng,
-            ssh_key::Algorithm::Ed25519,
-        )
-        .unwrap();
+        let credential =
+            ssh_key::PrivateKey::random(&mut crate::test_rng(), ssh_key::Algorithm::Ed25519)
+                .unwrap();
         let public::KeyData::Ed25519(point) = credential.public_key().key_data() else {
             panic!("expected an ed25519 key");
         };
@@ -293,11 +291,9 @@ mod tests {
     /// every Secret Service call hung until the daemon was restarted.
     #[tokio::test]
     async fn locking_during_a_confirmation_neither_deadlocks_nor_signs() {
-        let mut key = ssh_key::PrivateKey::random(
-            &mut ssh_key::rand_core::OsRng,
-            ssh_key::Algorithm::Ed25519,
-        )
-        .unwrap();
+        let mut key =
+            ssh_key::PrivateKey::random(&mut crate::test_rng(), ssh_key::Algorithm::Ed25519)
+                .unwrap();
         key.set_comment("gated");
         let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
         let key = AgentKey::from_openssh(&pem, None, None)

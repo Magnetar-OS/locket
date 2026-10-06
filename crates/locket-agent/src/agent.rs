@@ -79,7 +79,7 @@ impl AgentKey {
         let comment = comment
             .map(str::to_owned)
             .filter(|c| !c.is_empty())
-            .unwrap_or_else(|| key.comment().to_owned());
+            .unwrap_or_else(|| key.comment().to_string());
         let token = token_key(key.key_data());
 
         Ok(Self {
@@ -188,7 +188,7 @@ impl AgentKey {
         let Some(token) = self.token.as_ref() else {
             let (algorithm, raw) = match self.key.key_data() {
                 // RSA is signed here rather than through `ssh-key`, which
-                // cannot pick a hash — see [`crate::signing`].
+                // neither picks the hash nor blinds — see [`crate::signing`].
                 KeypairData::Rsa(keypair) => {
                     let hash = RsaHash::from_flags(flags);
                     tracing::debug!("signing with {} for `{}`", hash.algorithm(), self.comment);
@@ -780,7 +780,6 @@ mod tests {
         Algorithm, LineEnding,
         private::{self, KeypairData},
         public,
-        rand_core::OsRng,
         sha2::{Digest, Sha256},
     };
     use std::sync::Mutex;
@@ -848,7 +847,7 @@ mod tests {
 
     /// An `sk-ssh-ed25519` identity plus the software token that backs it.
     fn security_key(flags: u8) -> (AgentKey, Arc<FakeToken>) {
-        let credential = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let credential = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         let public::KeyData::Ed25519(point) = credential.public_key().key_data() else {
             panic!("expected an ed25519 key");
         };
@@ -883,7 +882,7 @@ mod tests {
     }
 
     fn test_key(comment: &str) -> AgentKey {
-        let mut key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let mut key = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         key.set_comment(comment);
         let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
         AgentKey::from_openssh(&pem, None, Some(comment)).unwrap()
@@ -1065,7 +1064,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("v.vault");
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
-        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let key = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         vault.add_item_default(
             Item::new(ItemKind::SshKey, "build server").with_field(Field::new(
                 field_names::PRIVATE_KEY,
@@ -1105,7 +1104,7 @@ mod tests {
         agent.reload_from_vault(&vault);
         assert_eq!(agent.len(), 0);
 
-        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let key = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         vault.add_item_default(
             Item::new(ItemKind::SshKey, "added later").with_field(Field::new(
                 field_names::PRIVATE_KEY,
@@ -1119,9 +1118,10 @@ mod tests {
 
     #[test]
     fn an_rsa_key_signs_under_the_algorithm_the_client_asked_for() {
-        // `ssh-key` cannot sign RSA at all from a file-loaded key, so this is
-        // the regression guard for the whole `signing` module being wired in.
-        let key = PrivateKey::random(&mut OsRng, Algorithm::Rsa { hash: None }).unwrap();
+        // `ssh-key`'s own signer answers every request with rsa-sha2-512, so
+        // this is the regression guard for the `signing` module being wired in.
+        let key =
+            PrivateKey::random(&mut crate::test_rng(), Algorithm::Rsa { hash: None }).unwrap();
         let pem = key.to_openssh(LineEnding::LF).unwrap();
         let agent_key = AgentKey::from_openssh(&pem, None, Some("rsa")).unwrap();
         let blob = agent_key.public_blob.clone();
@@ -1156,11 +1156,11 @@ mod tests {
     fn certified_key(valid_from: u64, valid_until: u64) -> (AgentKey, ssh_key::Certificate) {
         use ssh_key::certificate;
 
-        let ca = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-        let user = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let ca = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
+        let user = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
 
         let mut builder = certificate::Builder::new_with_random_nonce(
-            &mut OsRng,
+            &mut crate::test_rng(),
             user.public_key(),
             valid_from,
             valid_until,
@@ -1283,7 +1283,7 @@ mod tests {
         let path = dir.path().join("v.vault");
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
 
-        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let key = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         vault.add_item_default(
             Item::new(ItemKind::SshKey, "certified")
                 .with_field(Field::new(
@@ -1387,7 +1387,7 @@ mod tests {
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
 
         for (label, value) in [("gated", "yes"), ("also-gated", "TRUE"), ("open", "no")] {
-            let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+            let key = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
             vault.add_item_default(
                 Item::new(ItemKind::SshKey, label)
                     .with_field(Field::new(
@@ -1530,7 +1530,7 @@ mod tests {
         let path = dir.path().join("v.vault");
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
 
-        let credential = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let credential = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         let public::KeyData::Ed25519(point) = credential.public_key().key_data() else {
             panic!("expected an ed25519 key");
         };
@@ -1571,7 +1571,7 @@ mod tests {
         let path = dir.path().join("v.vault");
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
 
-        let credential = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let credential = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         let public::KeyData::Ed25519(point) = credential.public_key().key_data() else {
             panic!("expected an ed25519 key");
         };
@@ -1615,7 +1615,7 @@ mod tests {
         let path = dir.path().join("v.vault");
         let mut vault = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
 
-        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let key = PrivateKey::random(&mut crate::test_rng(), Algorithm::Ed25519).unwrap();
         let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
 
         vault.add_item_default(

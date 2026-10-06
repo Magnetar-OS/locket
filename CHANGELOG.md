@@ -6,6 +6,15 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Changed
 
+- The cryptography libraries moved to the current RustCrypto generation:
+  argon2 0.6, chacha20poly1305 0.11, aes 0.9, cbc 0.2, hmac 0.13, hkdf 0.13,
+  sha1 and sha2 0.11, signature 3. The SSH side has no stable release there
+  yet, so `ssh-key` and `rsa` are pinned to the release candidates
+  0.7.0-rc.11 and 0.10.0-rc.19. The vault format is unchanged: vaults written
+  by 2.1.1 and by this version were opened, edited and re-keyed by each
+  other, and each one's SSH agent served the keys the other had stored.
+  `locket-agent`'s public API names `ssh-key` types, so this is a breaking
+  change for anything that builds on that crate.
 - `locket_import::export::{to_json, to_csv, to_kdbx}` take an `Existing`
   argument saying whether a file already at the path is refused or replaced.
   Breaking for anything calling the library; the command line and the

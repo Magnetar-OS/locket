@@ -221,7 +221,7 @@ fn ecdsa_der_to_ssh(der: &[u8]) -> Result<Vec<u8>> {
             // DER integers are signed; a negative r or s is not a signature.
             return Err(bad("negative integer"));
         }
-        let m = Mpint::from_positive_bytes(raw).map_err(|e| bad(&e.to_string()))?;
+        let m = Mpint::from_positive_bytes(raw);
         if m.as_bytes().is_empty() {
             // Zero is a valid mpint and not a valid signature component.
             return Err(bad("zero integer"));
@@ -236,9 +236,8 @@ fn ecdsa_der_to_ssh(der: &[u8]) -> Result<Vec<u8>> {
     }
 
     // `Mpint` has already applied SSH's sign-padding rule, so its bytes are
-    // exactly the `string` payload. Writing it here rather than through
-    // `ssh_encoding::Encode` keeps this crate off ssh-key's own (older)
-    // encoding version.
+    // exactly the `string` payload, written with this crate's own writer
+    // like the rest of the wire format.
     let mut out = Writer::new();
     out.write_string(r.as_bytes()).write_string(s.as_bytes());
     Ok(out.into_bytes())
