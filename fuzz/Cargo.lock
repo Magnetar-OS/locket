@@ -527,9 +527,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "03bb0e1cc970d482d121d9a1744999169b69a07470b3d644a7894e53fcaf4574"
 dependencies = [
  "cmov",
 ]
@@ -1342,7 +1342,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "locket-agent"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "futures-util",
  "locket-core",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "locket-core"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "argon2",
  "base32",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "locket-import"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "base64ct",
  "csv",
@@ -1414,14 +1414,14 @@ dependencies = [
 
 [[package]]
 name = "locket-ipc"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "locket-secret"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
@@ -1714,9 +1714,9 @@ dependencies = [
 
 [[package]]
 name = "powerfmt"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
+checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
 
 [[package]]
 name = "ppv-lite86"
@@ -2693,18 +2693,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6df92bf3d9227be3d53173901ddbffac2babc27ae50f397776ffd6dc33f800cb"
+checksum = "6400fc4bb7426f6faac3fb07566122bb18622e3022bd2c36426a92ed489b1dbe"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.59"
+version = "0.8.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac4f328cf2f05d084e496c3e9c3f33ed0a183656a16e1fcec4d464d8373aec82"
+checksum = "99c27cc7525bad4df59a45e073c45b2c2aa820efb588234cc23a547ec69a34db"
 dependencies = [
  "proc-macro2",
  "quote",
