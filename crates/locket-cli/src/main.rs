@@ -916,7 +916,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .find(|a| a.name == name || a.id.to_string() == name)
                         .ok_or_else(|| format!("no attachment `{name}` on {}", item.label))?;
                     let out = out.unwrap_or_else(|| PathBuf::from(&attachment.name));
-                    write_new_0600(&out, attachment.data.expose())?;
+                    locket_import::export::write_bytes(
+                        &out,
+                        locket_import::export::Existing::Refuse,
+                        attachment.data.expose(),
+                    )?;
                     println!("wrote {} ({} bytes)", out.display(), attachment.size());
                 }
                 AttachCommand::Rm { query, name } => {
@@ -1364,11 +1368,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let vault = Vault::open(&path, &passphrase)?;
             match format {
                 export::Format::Json => {
-                    let count = export::to_json(&vault, &file)?;
+                    let count = export::to_json(&vault, &file, export::Existing::Refuse)?;
                     println!("exported {count} item(s) to {}", file.display());
                 }
                 export::Format::Csv => {
-                    let (count, lossy) = export::to_csv(&vault, &file)?;
+                    let (count, lossy) = export::to_csv(&vault, &file, export::Existing::Refuse)?;
                     println!("exported {count} item(s) to {}", file.display());
                     if lossy > 0 {
                         eprintln!(
@@ -1391,7 +1395,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             first
                         }
                     };
-                    let count = export::to_kdbx(&vault, &file, &kdbx_pw)?;
+                    let count = export::to_kdbx(&vault, &file, &kdbx_pw, export::Existing::Refuse)?;
                     println!(
                         "exported {count} item(s) to {} (KDBX 4, encrypted)",
                         file.display()
@@ -1549,24 +1553,6 @@ fn mime_for(name: &str) -> &'static str {
         Some("json") => "application/json",
         _ => "application/octet-stream",
     }
-}
-
-/// Create a file 0600 that must not already exist, and write it whole.
-fn write_new_0600(path: &std::path::Path, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Write as _;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        opts.mode(0o600);
-    }
-    let mut file = opts
-        .open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    file.write_all(data)?;
-    file.sync_all()?;
-    Ok(())
 }
 
 /// Resolve a label or id to exactly one item.

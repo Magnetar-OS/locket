@@ -531,6 +531,15 @@ migration path — so it is written 0600, refuses to overwrite, and tells you to
 delete it. The flag is mandatory for the same reason the importers nag: this
 file is every credential you own, in the clear.
 
+Every file written out of the vault — the three export formats and a saved
+attachment — is written whole or not at all: to `<name>.part` beside its
+destination, synced, and only then given its name. A write that fails
+part-way (a full disk, a stick pulled out) removes what it wrote and leaves
+the destination as it was, so there is never half a plaintext export on disk
+or a truncated `.kdbx` under the name of your backup. In the application,
+where the save dialog lets you pick a file that exists, that file is replaced
+only once its successor is complete.
+
 The CSV importer matches *column aliases* rather than detecting a vendor
 dialect, because every exporter names things differently and renames them
 between releases. Chrome's `name,url,username,password,note` and Bitwarden's

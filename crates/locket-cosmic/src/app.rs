@@ -3053,11 +3053,20 @@ impl cosmic::Application for App {
                 // file there is a choice, not an accident.
                 let data = attachment.data.expose().to_vec();
                 return cosmic::task::future(async move {
-                    let outcome = write_attachment(&path, &data)
-                        .await
-                        .map(|()| path.display().to_string())
-                        .map_err(|e| e.to_string());
-                    Message::AttachmentWritten(outcome)
+                    let shown = path.display().to_string();
+                    let outcome = tokio::task::spawn_blocking(move || {
+                        locket_import::export::write_bytes(
+                            &path,
+                            locket_import::export::Existing::Replace,
+                            &data,
+                        )
+                    })
+                    .await;
+                    Message::AttachmentWritten(match outcome {
+                        Ok(Ok(())) => Ok(shown),
+                        Ok(Err(e)) => Err(e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    })
                 });
             }
 
@@ -3209,16 +3218,18 @@ impl cosmic::Application for App {
                         let Some(vault) = self.vault.as_ref() else {
                             return Task::none();
                         };
-                        let outcome = export_replacing(&path, |to| {
-                            match format {
-                                ExportFormat::Json => {
-                                    locket_import::export::to_json(vault, to).map(|n| (n, 0))
-                                }
-                                ExportFormat::Csv => locket_import::export::to_csv(vault, to),
-                                ExportFormat::Kdbx => unreachable!("handled below"),
+                        // The save dialog has asked about a file already
+                        // there, so it is replaced — once the export that
+                        // replaces it is complete.
+                        use locket_import::export::{Existing, to_csv, to_json};
+                        let outcome = match format {
+                            ExportFormat::Json => {
+                                to_json(vault, &path, Existing::Replace).map(|n| (n, 0))
                             }
-                            .map_err(|e| e.to_string())
-                        });
+                            ExportFormat::Csv => to_csv(vault, &path, Existing::Replace),
+                            ExportFormat::Kdbx => unreachable!("handled below"),
+                        }
+                        .map_err(|e| e.to_string());
                         return match outcome {
                             Ok((count, lossy)) => {
                                 let mut tasks = vec![self.toast(fl!(
@@ -3246,11 +3257,14 @@ impl cosmic::Application for App {
                         };
                         return cosmic::task::future(async move {
                             let outcome = tokio::task::spawn_blocking(move || {
-                                let result = export_replacing(&path, |to| {
-                                    locket_import::export::to_kdbx(&vault, to, passphrase.expose())
-                                        .map_err(|e| e.to_string())
-                                })
-                                .map(|count| (count, path.display().to_string()));
+                                let result = locket_import::export::to_kdbx(
+                                    &vault,
+                                    &path,
+                                    passphrase.expose(),
+                                    locket_import::export::Existing::Replace,
+                                )
+                                .map(|count| (count, path.display().to_string()))
+                                .map_err(|e| e.to_string());
                                 (vault, result)
                             })
                             .await;
@@ -4209,42 +4223,6 @@ fn health_outcome<E: std::fmt::Display>(
     }
 }
 
-/// Export to `path`, which the save dialog may have pointed at an existing
-/// file.
-///
-/// The save dialog already asked about replacing, so the exporters' own
-/// refuse-to-overwrite would second-guess an answered question — but deleting
-/// the old file first lost it whenever the export then failed. The export is
-/// written beside it and renamed over it only once complete.
-fn export_replacing<T>(
-    path: &std::path::Path,
-    write: impl FnOnce(&std::path::Path) -> Result<T, String>,
-) -> Result<T, String> {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".part");
-    let part = path.with_file_name(name);
-    // Left over from an export that crashed, never anything the person chose.
-    match std::fs::remove_file(&part) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.to_string()),
-    }
-    let written = match write(&part) {
-        Ok(written) => written,
-        Err(e) => {
-            // Half an export is still every secret it got to, in the clear.
-            if let Err(cleanup) = std::fs::remove_file(&part)
-                && cleanup.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(format!("{e}; {}: {cleanup}", part.display()));
-            }
-            return Err(e);
-        }
-    };
-    std::fs::rename(&part, path).map_err(|e| e.to_string())?;
-    Ok(written)
-}
-
 /// Read a file picked to attach, refusing one over the attachment limit
 /// before reading it — the vault would refuse it anyway, after the whole
 /// file had been pulled into memory.
@@ -4265,30 +4243,6 @@ async fn read_attachment(path: &std::path::Path) -> Result<Vec<u8>, String> {
         .to_string());
     }
     tokio::fs::read(path).await.map_err(|e| e.to_string())
-}
-
-/// Write attachment bytes where the save dialog pointed, 0600 first.
-///
-/// The mode is set at open rather than after the write, so the plaintext is
-/// never sitting there world-readable even for a moment.
-async fn write_attachment(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    let mut opts = tokio::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    opts.mode(0o600);
-    let mut file = opts.open(path).await?;
-    // The mode above applies only when the file is created. Over an existing
-    // file the dialog let the person pick, it has to be set explicitly, or
-    // the plaintext keeps whatever the old file allowed.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .await?;
-    }
-    use tokio::io::AsyncWriteExt as _;
-    file.write_all(data).await?;
-    file.sync_all().await
 }
 
 /// What the About section says. Everything here comes from the manifest, so a
@@ -4725,25 +4679,6 @@ mod tests {
         assert!(daemon_notice(DaemonAsked::Lock, Reply::Done).is_none());
     }
 
-    /// The save dialog lets the person pick an existing file. Opening it with
-    /// a mode only sets that mode on a file it creates, so a 0644 file kept
-    /// 0644 and the decrypted attachment landed world-readable.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn an_attachment_written_over_an_existing_file_is_0600() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("id_ed25519");
-        std::fs::write(&path, b"old").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-
-        write_attachment(&path, b"secret").await.unwrap();
-
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "written with mode {mode:o}");
-        assert_eq!(std::fs::read(&path).unwrap(), b"secret");
-    }
-
     /// An empty report reads as "Nothing to report: passwords look strong,
     /// unique and current". A worker that died has not looked at anything.
     #[test]
@@ -4756,34 +4691,6 @@ mod tests {
             health_outcome::<&str>(Ok(Default::default())),
             Message::HealthReady(_)
         ));
-    }
-
-    /// A failed export must not cost the person the file they chose to
-    /// replace: that file is gone only once the new one is in place.
-    #[test]
-    fn a_failed_export_leaves_the_file_it_would_replace() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("backup.kdbx");
-        std::fs::write(&path, b"last week's backup").unwrap();
-
-        let failed: Result<(), String> = export_replacing(&path, |to| {
-            std::fs::write(to, b"half an export").unwrap();
-            Err("the disk filled up".into())
-        });
-        assert!(failed.is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"last week's backup");
-
-        export_replacing(&path, |to| {
-            assert!(!to.exists(), "an exporter was handed an existing file");
-            std::fs::write(to, b"this week's").map_err(|e| e.to_string())
-        })
-        .unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"this week's");
-        assert_eq!(
-            std::fs::read_dir(dir.path()).unwrap().count(),
-            1,
-            "debris left beside it"
-        );
     }
 
     /// An attachment is at most 10 MiB; a larger file is refused before it

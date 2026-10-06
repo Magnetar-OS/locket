@@ -22,6 +22,7 @@ fn cli(vault: &Path, args: &[&str]) -> Output {
         .args(args)
         .env_clear()
         .env("LOCKET_TEST_PASSPHRASE", PASSPHRASE)
+        .env("LOCKET_TEST_KDBX_PASSPHRASE", "for the database")
         .env("DBUS_SESSION_BUS_ADDRESS", NO_BUS)
         .stdin(Stdio::null())
         .output()
@@ -190,4 +191,136 @@ fn a_dry_run_names_an_unreadable_directory() {
         out.contains("pgdata") && out.contains("unreadable"),
         "{out}"
     );
+}
+
+/// Run `locket-cli` able to write no file past one block (512 or 1024 bytes,
+/// as the shell counts them), the limit reported to it as a failed write —
+/// the signal that would otherwise end the process is ignored first.
+fn cli_on_a_full_disk(vault: &Path, args: &[&str]) -> Output {
+    std::process::Command::new("/bin/sh")
+        .args(["-c", "trap '' XFSZ; ulimit -f 1; exec \"$@\"", "sh"])
+        .arg(env!("CARGO_BIN_EXE_locket-cli"))
+        .arg("--vault")
+        .arg(vault)
+        .args(["--passphrase-env", "LOCKET_TEST_PASSPHRASE"])
+        .args(args)
+        .env_clear()
+        .env("LOCKET_TEST_PASSPHRASE", PASSPHRASE)
+        .env("LOCKET_TEST_KDBX_PASSPHRASE", "for the database")
+        .env("DBUS_SESSION_BUS_ADDRESS", NO_BUS)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// A write that fails part-way leaves nothing where the file was going. A
+/// KDBX export cut short used to stay there — an encrypted database nothing
+/// can open, under the name the backup was to have — and so did a saved
+/// attachment, in the clear.
+#[test]
+fn a_write_that_fails_part_way_leaves_no_file() {
+    let (dir, vault) = vault_with(&[]);
+
+    // Enough items that every format runs past the limit.
+    let entries: Vec<String> = (0..40)
+        .map(|n| {
+            format!(
+                r#"{{"type":"totp","name":"account-{n}","issuer":"Service {n}","info":{{"secret":"JBSWY3DPEHPK3PXP"}}}}"#
+            )
+        })
+        .collect();
+    let seeds = dir.path().join("aegis.json");
+    std::fs::write(
+        &seeds,
+        format!(r#"{{"db":{{"entries":[{}]}}}}"#, entries.join(",")),
+    )
+    .unwrap();
+    let imported = cli(&vault, &["import-totp", seeds.to_str().unwrap()]);
+    assert!(imported.status.success(), "{}", text(&imported.stderr));
+
+    let document = dir.path().join("recovery-codes.txt");
+    std::fs::write(&document, vec![b'x'; 4096]).unwrap();
+    let attached = cli(
+        &vault,
+        &["attach", "add", "Service 0", document.to_str().unwrap()],
+    );
+    assert!(attached.status.success(), "{}", text(&attached.stderr));
+
+    let out = dir.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    let kdbx = out.join("export.kdbx");
+    let json = out.join("export.json");
+    let csv = out.join("export.csv");
+    let saved = out.join("recovery-codes.txt");
+    let runs: [(&Path, Vec<&str>); 4] = [
+        (
+            &kdbx,
+            vec![
+                "export",
+                kdbx.to_str().unwrap(),
+                "--format",
+                "kdbx",
+                "--kdbx-passphrase-env",
+                "LOCKET_TEST_KDBX_PASSPHRASE",
+            ],
+        ),
+        (
+            &json,
+            vec![
+                "export",
+                json.to_str().unwrap(),
+                "--format",
+                "json",
+                "--i-understand-this-is-plaintext",
+            ],
+        ),
+        (
+            &csv,
+            vec![
+                "export",
+                csv.to_str().unwrap(),
+                "--format",
+                "csv",
+                "--i-understand-this-is-plaintext",
+            ],
+        ),
+        (
+            &saved,
+            vec![
+                "attach",
+                "save",
+                "Service 0",
+                "recovery-codes.txt",
+                "--out",
+                saved.to_str().unwrap(),
+            ],
+        ),
+    ];
+
+    for (path, args) in &runs {
+        let failed = cli_on_a_full_disk(&vault, args);
+        assert!(
+            !failed.status.success(),
+            "{}: the write was not cut short",
+            path.display()
+        );
+        // The failure being tested, and not some other one.
+        assert!(
+            text(&failed.stderr).contains("File too large"),
+            "{}",
+            text(&failed.stderr)
+        );
+        let left: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "{}: left {left:?}", path.display());
+    }
+
+    // The same commands, with room to finish, write the files whole.
+    for (path, args) in &runs {
+        let written = cli(&vault, args);
+        assert!(written.status.success(), "{}", text(&written.stderr));
+        assert!(std::fs::metadata(path).unwrap().len() > 1024);
+    }
 }

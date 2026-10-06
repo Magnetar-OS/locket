@@ -4,6 +4,24 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- `locket_import::export::{to_json, to_csv, to_kdbx}` take an `Existing`
+  argument saying whether a file already at the path is refused or replaced.
+  Breaking for anything calling the library; the command line and the
+  application behave as before.
+
+### Fixed
+
+- An export or a saved attachment that fails part-way leaves nothing behind.
+  A KDBX export cut short by a full disk used to stay where it was going — an
+  encrypted database nothing could open, under the name of the backup — and
+  an attachment saved from the command line stayed there in the clear. Every
+  file written out of the vault is now completed and synced beside its
+  destination and only then moved into place; a failure removes what was
+  written. Saving an attachment from the application over a file that exists
+  no longer empties that file before the new one is complete.
+
 ## [2.1.1] - 2026-10-03
 
 ### Changed

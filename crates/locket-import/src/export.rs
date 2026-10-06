@@ -18,8 +18,11 @@
 //! exist. Writing them 0600 and telling the user to delete them is the
 //! callers' contract, same as the importers' warnings in the other
 //! direction.
+//!
+//! Every format is written through [`write_file`]: complete and synced
+//! beside its destination, then moved into place. An export that fails
+//! leaves no part of itself behind.
 
-use std::io::Write as _;
 use std::path::Path;
 
 use locket_core::{Vault, model::field_names};
@@ -39,6 +42,21 @@ impl Format {
     }
 }
 
+/// What an export does about a file already at its path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    /// Refuse, and leave that file as it is. For a path somebody typed.
+    Refuse,
+    /// Replace it, once the new file is complete. For a path a save dialog
+    /// has already asked about.
+    Replace,
+}
+
+fn io_at(path: &Path) -> impl FnOnce(std::io::Error) -> Error {
+    let path = path.to_path_buf();
+    move |source| Error::Io { path, source }
+}
+
 /// Create `path` refusing to overwrite, 0600 before any content reaches it.
 fn create_0600(path: &Path) -> Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
@@ -48,46 +66,101 @@ fn create_0600(path: &Path) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
     }
-    opts.open(path).map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })
+    opts.open(path).map_err(io_at(path))
 }
 
-/// Create `path` with [`create_0600`], fill it with `write`, and sync it.
+/// Where an export to `path` is written until it is complete.
+fn part_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".part");
+    path.with_file_name(name)
+}
+
+/// Write a file whole or not at all: `write` fills a 0600 file beside `path`,
+/// which is synced and only then moved into place.
 ///
-/// If filling it fails, the partly written file is removed. A plaintext
-/// export that stopped half-way would otherwise leave a fragment of every
-/// secret on disk, and block the next attempt at the same name. The file is
-/// written where it will stay rather than renamed into place, because
-/// renaming without overwriting is not something FAT or exFAT — a USB stick
-/// — can do.
-fn write_new_0600(path: &Path, write: impl FnOnce(&mut std::fs::File) -> Result<()>) -> Result<()> {
-    let mut file = create_0600(path)?;
-    let filled = write(&mut file).and_then(|()| {
-        file.sync_all().map_err(|e| Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })
-    });
-    let Err(error) = filled else {
+/// Every file locket writes out of the vault comes through here. A write that
+/// stops half-way — a full disk, a stick pulled out — leaves nothing at
+/// `path` that was not there before, and removes what it had written: half a
+/// plaintext export is still every secret it got to, half a KDBX is a
+/// database nothing can open under the name of the backup, and with
+/// [`Existing::Replace`] the file being replaced is lost only once its
+/// successor is complete.
+///
+/// The file is written as `<name>.part`. One left there by a run that was
+/// killed is removed first; it is never anything a person chose.
+pub fn write_file(
+    path: &Path,
+    existing: Existing,
+    write: impl FnOnce(&mut dyn std::io::Write) -> Result<()>,
+) -> Result<()> {
+    // Asked again when the file is moved into place; asked here so that a
+    // name already taken is refused before any work is done for it.
+    if existing == Existing::Refuse && path.symlink_metadata().is_ok() {
+        return Err(io_at(path)(std::io::ErrorKind::AlreadyExists.into()));
+    }
+
+    let part = part_path(path);
+    match std::fs::remove_file(&part) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_at(&part)(e)),
+    }
+    let mut file = create_0600(&part)?;
+    let filled = write(&mut file).and_then(|()| file.sync_all().map_err(io_at(&part)));
+    drop(file);
+
+    let Err(error) = filled.and_then(|()| move_into_place(&part, path, existing)) else {
         return Ok(());
     };
-    drop(file);
-    match std::fs::remove_file(path) {
+    match std::fs::remove_file(&part) {
         Ok(()) => Err(error),
-        Err(e) => Err(Error::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::new(
-                e.kind(),
-                format!("{error}; and the partly written file could not be removed: {e}"),
-            ),
-        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(error),
+        Err(e) => Err(io_at(&part)(std::io::Error::new(
+            e.kind(),
+            format!("{error}; and the partly written file could not be removed: {e}"),
+        ))),
     }
 }
 
+/// Give the finished file its name.
+fn move_into_place(part: &Path, path: &Path, existing: Existing) -> Result<()> {
+    if existing == Existing::Refuse {
+        // A rename replaces whatever holds the name, and the form that does
+        // not is beyond FAT and exFAT — a USB stick. Creating the name
+        // exclusively works everywhere and fails if anything is there, so
+        // what the rename then replaces is this empty file and nothing else.
+        drop(create_0600(path)?);
+    }
+    let Err(e) = std::fs::rename(part, path) else {
+        return Ok(());
+    };
+    if existing == Existing::Refuse {
+        // The name was only reserved a moment ago, by the line above.
+        let _ = std::fs::remove_file(path);
+    }
+    Err(io_at(path)(e))
+}
+
+/// [`write_file`] for bytes already in hand: an attachment saved out of the
+/// vault.
+pub fn write_bytes(path: &Path, existing: Existing, data: &[u8]) -> Result<()> {
+    write_file(path, existing, |out| {
+        out.write_all(data).map_err(io_at(path))
+    })
+}
+
 /// Everything, as JSON. Returns how many items were written.
-pub fn to_json(vault: &Vault, path: &Path) -> Result<usize> {
+pub fn to_json(vault: &Vault, path: &Path, existing: Existing) -> Result<usize> {
+    let mut count = 0;
+    write_file(path, existing, |out| {
+        count = json_into(vault, out, path)?;
+        Ok(())
+    })?;
+    Ok(count)
+}
+
+fn json_into(vault: &Vault, out: &mut dyn std::io::Write, path: &Path) -> Result<usize> {
     let mut items = Vec::new();
     for (collection, item) in vault.data().all_items() {
         items.push(serde_json::json!({
@@ -119,34 +192,29 @@ pub fn to_json(vault: &Vault, path: &Path) -> Result<usize> {
     });
 
     let bytes = serde_json::to_vec_pretty(&document).map_err(|e| Error::Vault(e.to_string()))?;
-    write_new_0600(path, |file| {
-        file.write_all(&bytes).map_err(|e| Error::Io {
-            path: path.to_path_buf(),
-            source: e,
-        })
-    })?;
+    out.write_all(&bytes).map_err(io_at(path))?;
     Ok(count)
 }
 
 /// The flat CSV, Bitwarden's column names. Returns `(written, lossy)`:
 /// `lossy` counts items that had fields or attachments CSV cannot carry.
-pub fn to_csv(vault: &Vault, path: &Path) -> Result<(usize, usize)> {
+pub fn to_csv(vault: &Vault, path: &Path, existing: Existing) -> Result<(usize, usize)> {
     let mut written = 0usize;
     let mut lossy = 0usize;
-    write_new_0600(path, |file| {
-        write_csv(vault, file, path, &mut written, &mut lossy)
+    write_file(path, existing, |out| {
+        csv_into(vault, out, path, &mut written, &mut lossy)
     })?;
     Ok((written, lossy))
 }
 
-fn write_csv(
+fn csv_into(
     vault: &Vault,
-    file: &mut std::fs::File,
+    out: &mut dyn std::io::Write,
     path: &Path,
     written: &mut usize,
     lossy: &mut usize,
 ) -> Result<()> {
-    let mut writer = csv::Writer::from_writer(file);
+    let mut writer = csv::Writer::from_writer(out);
     writer
         .write_record([
             "folder",
@@ -192,23 +260,28 @@ fn write_csv(
             .map_err(|e| Error::Vault(e.to_string()))?;
         *written += 1;
     }
-    writer.flush().map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })
+    writer.flush().map_err(io_at(path))
 }
 
 /// A KDBX 4 database KeePassXC opens directly, sealed under `passphrase`.
 /// One top-level group per collection; tags, TOTP seeds and custom fields
 /// carried; field protection mirrors locket's own masking.
-pub fn to_kdbx(vault: &Vault, path: &Path, passphrase: &str) -> Result<usize> {
-    use keepass::{Database, DatabaseKey, config::KdfConfig};
-
+pub fn to_kdbx(vault: &Vault, path: &Path, passphrase: &str, existing: Existing) -> Result<usize> {
     if passphrase.is_empty() {
         return Err(Error::Vault(
             "a KDBX export needs a passphrase; it is the whole point of the format".into(),
         ));
     }
+    let mut written = 0;
+    write_file(path, existing, |out| {
+        written = kdbx_into(vault, passphrase, out)?;
+        Ok(())
+    })?;
+    Ok(written)
+}
+
+fn kdbx_into(vault: &Vault, passphrase: &str, mut out: &mut dyn std::io::Write) -> Result<usize> {
+    use keepass::{Database, DatabaseKey, config::KdfConfig};
 
     let mut db = Database::new();
     db.root_mut().name = "locket".to_owned();
@@ -280,13 +353,8 @@ pub fn to_kdbx(vault: &Vault, path: &Path, passphrase: &str) -> Result<usize> {
         }
     }
 
-    let mut file = create_0600(path)?;
-    db.save(&mut file, DatabaseKey::new().with_password(passphrase))
+    db.save(&mut out, DatabaseKey::new().with_password(passphrase))
         .map_err(|e| Error::Database(format!("could not write the kdbx: {e}")))?;
-    file.sync_all().map_err(|e| Error::Io {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
     Ok(written)
 }
 
@@ -313,33 +381,156 @@ mod tests {
         v
     }
 
-    /// No export path can be made to fail after its file exists from
-    /// outside, so this drives the writer they share: a plaintext export
-    /// that stops part-way must not leave a fragment of every secret on
-    /// disk, nor block the next attempt at the same name.
-    #[test]
-    fn a_failed_export_leaves_no_partial_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("export.csv");
-        let result = write_new_0600(&path, |file| {
-            file.write_all(b"folder,name,login_password\nWork,GitHub,hunter2\n")
-                .unwrap();
-            Err(Error::Vault("stopped part-way".into()))
-        });
-        assert!(result.is_err());
-        assert!(!path.exists(), "the partly written export was left behind");
+    /// A writer that takes so many bytes and then fails the way a full disk
+    /// does.
+    struct FullAfter<'a> {
+        out: &'a mut dyn std::io::Write,
+        room: usize,
+    }
 
-        write_new_0600(&path, |file| {
-            file.write_all(b"ok").unwrap();
-            Ok(())
-        })
-        .unwrap();
+    impl std::io::Write for FullAfter<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.room == 0 {
+                return Err(std::io::ErrorKind::StorageFull.into());
+            }
+            let n = self.out.write(&buf[..buf.len().min(self.room)])?;
+            self.room -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.out.flush()
+        }
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Each format, with the disk "filling up" after its first bytes are
+    /// down. A KDBX export used to be written straight to its name and left
+    /// there cut short: an encrypted database nothing could open, called
+    /// what the backup was to be called.
+    #[test]
+    fn an_export_that_fails_part_way_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = vault(&dir);
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir(&out_dir).unwrap();
+
+        type Exporter = fn(&Vault, &mut dyn std::io::Write, &Path) -> Result<()>;
+        let formats: [(&str, Exporter); 3] = [
+            ("export.kdbx", |v, out, _| {
+                kdbx_into(v, "kdbx-pw", out).map(drop)
+            }),
+            ("export.json", |v, out, path| {
+                json_into(v, out, path).map(drop)
+            }),
+            ("export.csv", |v, out, path| {
+                csv_into(v, out, path, &mut 0, &mut 0)
+            }),
+        ];
+        for (name, export) in formats {
+            let path = out_dir.join(name);
+            let mut reached_the_disk = false;
+            let result = write_file(&path, Existing::Refuse, |out| {
+                let mut full = FullAfter { out, room: 24 };
+                let result = export(&v, &mut full, &path);
+                reached_the_disk = full.room == 0;
+                result
+            });
+            assert!(result.is_err(), "{name}: the failed write went unreported");
+            assert!(
+                reached_the_disk,
+                "{name}: nothing was written before it failed"
+            );
+            assert_eq!(names_in(&out_dir), [""; 0], "{name}: left behind");
+
+            // And the name is free for the next attempt.
+            write_file(&path, Existing::Refuse, |out| export(&v, out, &path)).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{name}");
+            }
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    /// A save dialog lets the person pick a file that exists, and has asked
+    /// about replacing it. That file must outlive an export that fails, and
+    /// its permissions must not be the new file's: a decrypted attachment
+    /// written over a 0644 file used to stay 0644.
+    #[test]
+    fn replacing_keeps_the_old_file_until_the_new_one_is_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backup.kdbx");
+        std::fs::write(&path, b"last week's backup").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let failed = write_file(&path, Existing::Replace, |out| {
+            out.write_all(b"half an export").unwrap();
+            Err(Error::Vault("the disk filled up".into()))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"last week's backup");
+        assert_eq!(names_in(dir.path()), ["backup.kdbx"]);
+
+        write_bytes(&path, Existing::Replace, b"this week's").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"this week's");
+        assert_eq!(
+            names_in(dir.path()),
+            ["backup.kdbx"],
+            "debris left beside it"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
+            assert_eq!(mode & 0o777, 0o600, "written with mode {mode:o}");
         }
+    }
+
+    /// Refusing to overwrite has to hold when the file turns up while the
+    /// export is being written, not only when it was there at the start.
+    #[test]
+    fn a_file_that_appears_meanwhile_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.json");
+
+        let result = write_file(&path, Existing::Refuse, |out| {
+            std::fs::write(&path, b"somebody else's").unwrap();
+            out.write_all(b"ours").map_err(io_at(&path))
+        });
+        assert!(result.is_err(), "replaced a file it was to refuse");
+        assert_eq!(std::fs::read(&path).unwrap(), b"somebody else's");
+        assert_eq!(names_in(dir.path()), ["export.json"]);
+
+        assert!(write_bytes(&path, Existing::Refuse, b"ours").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"somebody else's");
+    }
+
+    /// What a killed export leaves is its `.part`, which must not stop the
+    /// next one.
+    #[test]
+    fn a_part_file_left_by_a_killed_export_is_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.csv");
+        std::fs::write(dir.path().join("export.csv.part"), b"half of everything").unwrap();
+
+        write_bytes(&path, Existing::Refuse, b"whole").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"whole");
+        assert_eq!(names_in(dir.path()), ["export.csv"]);
     }
 
     #[test]
@@ -347,14 +538,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = vault(&dir);
         let out = dir.path().join("export.json");
-        assert_eq!(to_json(&v, &out).unwrap(), 2);
+        assert_eq!(to_json(&v, &out, Existing::Refuse).unwrap(), 2);
 
         let parsed: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
         assert_eq!(parsed["format"], "locket-export-v1");
         assert_eq!(parsed["items"].as_array().unwrap().len(), 2);
 
-        assert!(to_json(&v, &out).is_err(), "overwrote an existing export");
+        assert!(
+            to_json(&v, &out, Existing::Refuse).is_err(),
+            "overwrote an existing export"
+        );
     }
 
     #[test]
@@ -362,7 +556,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = vault(&dir);
         let out = dir.path().join("export.csv");
-        let (written, lossy) = to_csv(&v, &out).unwrap();
+        let (written, lossy) = to_csv(&v, &out, Existing::Refuse).unwrap();
         assert_eq!(written, 2);
         assert_eq!(lossy, 1, "the custom `recovery` field went uncounted");
 
@@ -380,7 +574,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = vault(&dir);
         let out = dir.path().join("export.kdbx");
-        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+        to_kdbx(&v, &out, "kdbx-pw", Existing::Refuse).unwrap();
 
         let db = Database::open(
             &mut std::fs::File::open(&out).unwrap(),
@@ -424,7 +618,7 @@ mod tests {
         v.add_item_default(Item::new(ItemKind::Login, "Router").with_secret("first"));
         v.add_item_default(Item::new(ItemKind::Login, "Router").with_secret("second"));
         let out = dir.path().join("export.kdbx");
-        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+        to_kdbx(&v, &out, "kdbx-pw", Existing::Refuse).unwrap();
 
         let mut target =
             Vault::create(dir.path().join("t.vault"), "pw", KdfParams::insecure_fast()).unwrap();
@@ -460,7 +654,7 @@ mod tests {
         item.favorite = true;
         v.add_item_default(item);
         let out = dir.path().join("export.csv");
-        to_csv(&v, &out).unwrap();
+        to_csv(&v, &out, Existing::Refuse).unwrap();
 
         let mut target =
             Vault::create(dir.path().join("t.vault"), "pw", KdfParams::insecure_fast()).unwrap();
@@ -492,7 +686,7 @@ mod tests {
         item.tags = vec!["work".into()];
         v.add_item_default(item);
         let out = dir.path().join("export.kdbx");
-        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+        to_kdbx(&v, &out, "kdbx-pw", Existing::Refuse).unwrap();
 
         let mut target =
             Vault::create(dir.path().join("t.vault"), "pw", KdfParams::insecure_fast()).unwrap();
@@ -526,7 +720,7 @@ mod tests {
                 .with_field(Field::text(field_names::USERNAME, "ada")),
         );
         let out = dir.path().join("export.kdbx");
-        to_kdbx(&v, &out, "kdbx-pw").unwrap();
+        to_kdbx(&v, &out, "kdbx-pw", Existing::Refuse).unwrap();
 
         // What the importer made of this entry before it recorded UUIDs, with
         // the password it had then.
@@ -557,7 +751,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = vault(&dir);
         let out = dir.path().join("export.kdbx");
-        assert_eq!(to_kdbx(&v, &out, "kdbx-pw").unwrap(), 2);
+        assert_eq!(to_kdbx(&v, &out, "kdbx-pw", Existing::Refuse).unwrap(), 2);
 
         // No plaintext on disk: it is a real encrypted database.
         let raw = std::fs::read(&out).unwrap();
@@ -590,7 +784,7 @@ mod tests {
         );
 
         assert!(
-            to_kdbx(&v, &dir.path().join("x.kdbx"), "").is_err(),
+            to_kdbx(&v, &dir.path().join("x.kdbx"), "", Existing::Refuse).is_err(),
             "an empty kdbx passphrase was accepted"
         );
     }
