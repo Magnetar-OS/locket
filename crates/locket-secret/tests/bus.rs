@@ -976,3 +976,155 @@ async fn a_dismissed_prompt_completes_once() {
     .await;
     assert_eq!(heard, 1, "the prompt completed {heard} times");
 }
+
+/// A vault with a passphrase and a hardware slot, the way enrolling a TPM or
+/// a security key leaves it, and that slot's key — which is all the daemon
+/// ever sees of the device.
+fn vault_with_a_hardware_slot(
+    kind: locket_core::slots::SlotKind,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    locket_core::crypto::SymKey,
+) {
+    use locket_core::slots::{SlotFactor, SlotKind, base64_encode};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.vault");
+    let mut vault = locket_core::Vault::create(
+        &path,
+        support_passphrase(),
+        locket_core::crypto::KdfParams::insecure_fast(),
+    )
+    .unwrap();
+    let factor = match kind {
+        SlotKind::Tpm2 => SlotFactor::Tpm2 {
+            sealed: base64_encode(b"sealed by a chip the daemon never talks to"),
+            parent: Default::default(),
+            pcrs: vec![],
+            with_pin: true,
+        },
+        _ => SlotFactor::Fido2 {
+            credential_id: base64_encode(b"credential"),
+            salt: base64_encode(&[3u8; 32]),
+            rp_id: "locket.local".into(),
+            user_verification: false,
+        },
+    };
+    let key = locket_core::crypto::SymKey::random().unwrap();
+    vault.add_slot(kind.label(), factor, &key).unwrap();
+    (dir, path, key)
+}
+
+/// The daemon unlocks with the key a TPM or a security key released to the
+/// dialog. Nothing unlocked it with a hardware slot before: `Unlock` takes a
+/// passphrase, and a vault opened by PIN in the window stayed locked for
+/// every application.
+#[tokio::test]
+async fn the_key_of_a_hardware_slot_unlocks_the_daemon() {
+    use locket_core::slots::SlotKind;
+
+    for kind in [SlotKind::Tpm2, SlotKind::Fido2] {
+        let (dir, path, key) = vault_with_a_hardware_slot(kind);
+        let daemon = Daemon::start_locked(dir, path).await;
+        let manager = daemon.client().await.manager().await;
+        let locked = || async { daemon.state.lock().await.is_locked() };
+        assert!(locked().await);
+
+        // Not that slot's key; not a key at all; a key for a slot of the
+        // other kind: each is a plain "no", and the vault stays locked.
+        let other = if kind == SlotKind::Tpm2 {
+            SlotKind::Fido2
+        } else {
+            SlotKind::Tpm2
+        };
+        for (factor, bytes) in [
+            (kind.name(), [0u8; 32].to_vec()),
+            (kind.name(), key.expose()[..16].to_vec()),
+            (other.name(), key.expose().to_vec()),
+        ] {
+            let opened: bool = manager
+                .call("UnlockWithKey", &(factor, bytes))
+                .await
+                .unwrap();
+            assert!(!opened, "{factor}: unlocked with the wrong key");
+            assert!(locked().await);
+        }
+        // A passphrase slot is not opened this way, whatever is sent.
+        let refused = manager
+            .call::<_, _, bool>("UnlockWithKey", &("passphrase", key.expose().to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            locket_secret::testing::error_name(&refused),
+            "org.freedesktop.DBus.Error.InvalidArgs"
+        );
+
+        let opened: bool = manager
+            .call("UnlockWithKey", &(kind.name(), key.expose().to_vec()))
+            .await
+            .unwrap();
+        assert!(opened, "{}: the slot's key was refused", kind.name());
+        assert!(!locked().await);
+        // Unlocked for its clients, not only in name.
+        assert!(daemon.client().await.search_all().await.is_ok());
+    }
+}
+
+/// What `pam_locket.so` does at login and at a password change, against a
+/// vault that also has a hardware factor: the login password still unlocks
+/// it, and following a password change re-wraps the passphrase slot without
+/// costing the TPM or security-key factor its way in.
+#[tokio::test]
+async fn the_login_path_works_beside_a_hardware_factor_and_keeps_it() {
+    use locket_core::slots::{RawKeyOpener, SlotKind};
+
+    let (dir, path, key) = vault_with_a_hardware_slot(SlotKind::Tpm2);
+    let socket = dir.path().join("unlock.sock");
+    let daemon = Daemon::start_locked(dir, path.clone()).await;
+    let listener = locket_secret::unlock_socket::bind(&socket).unwrap();
+    tokio::spawn(locket_secret::unlock_socket::serve(
+        listener,
+        daemon.state.clone(),
+        path.clone(),
+        daemon.server.clone(),
+    ));
+    // The client is the blocking one PAM links.
+    let ask = |request: fn(&std::path::Path) -> Result<bool, locket_ipc::Error>| {
+        let socket = socket.clone();
+        async move {
+            tokio::task::spawn_blocking(move || request(&socket))
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+
+    assert!(!ask(|s| locket_ipc::request_unlock(s, "not the login password")).await);
+    assert!(daemon.state.lock().await.is_locked());
+    assert!(ask(|s| locket_ipc::request_unlock(s, locket_secret::testing::PASSPHRASE)).await);
+    assert!(!daemon.state.lock().await.is_locked());
+
+    // `passwd`: the old password proves the right to change it.
+    assert!(!ask(|s| locket_ipc::request_rekey(s, "a guess", "attacker's choice")).await);
+    assert!(
+        ask(|s| locket_ipc::request_rekey(
+            s,
+            locket_secret::testing::PASSPHRASE,
+            "the new login password"
+        ))
+        .await
+    );
+    // The daemon followed its own rewrite and is still serving the vault.
+    assert!(!daemon.state.lock().await.is_locked());
+
+    assert!(locket_core::Vault::open(&path, locket_secret::testing::PASSPHRASE).is_err());
+    assert!(locket_core::Vault::open(&path, "the new login password").is_ok());
+    let by_key = RawKeyOpener {
+        kind: SlotKind::Tpm2,
+        key,
+    };
+    let opened = locket_core::Vault::open_with(&path, &by_key)
+        .expect("the hardware factor was lost in the rekey");
+    assert_eq!(opened.slots().len(), 2);
+}

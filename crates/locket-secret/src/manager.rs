@@ -6,6 +6,9 @@
 //! missing half — the frontend calls [`Manager::unlock`] with a passphrase,
 //! and the daemon reopens the vault and republishes the object tree.
 //!
+//! A vault with a TPM or security-key slot can be unlocked with that slot's
+//! key instead, through [`Manager::unlock_with_key`].
+//!
 //! It also closes the loop on prompts. When a `libsecret` client calls
 //! `Prompt()` on a locked vault, the daemon emits [`unlock_requested`]; a
 //! running frontend raises its unlock dialog and calls `Unlock`. The Prompt
@@ -17,7 +20,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use locket_core::Vault;
+use locket_core::{
+    Vault,
+    crypto::SymKey,
+    slots::{RawKeyOpener, SlotKind},
+};
 use tokio::sync::Mutex;
 use zbus::object_server::SignalEmitter;
 use zbus::{ObjectServer, fdo, interface};
@@ -37,6 +44,45 @@ impl Manager {
     pub fn new(state: SharedState, vault_path: PathBuf) -> Self {
         Self { state, vault_path }
     }
+
+    /// Open the vault with `open` and publish its objects, unless it is open
+    /// already. `false` when `open` was refused.
+    async fn unlock_by(
+        &self,
+        server: &ObjectServer,
+        with: &'static str,
+        open: impl FnOnce(&std::path::Path) -> locket_core::Result<Vault> + Send + 'static,
+    ) -> fdo::Result<bool> {
+        if !self.state.lock().await.is_locked() {
+            return Ok(true);
+        }
+
+        // Argon2id is deliberately slow; keep it off the executor's core
+        // threads so the daemon stays responsive to other bus traffic.
+        let path = self.vault_path.clone();
+        let opened = tokio::task::spawn_blocking(move || open(&path))
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("unlock task failed: {e}")))?;
+
+        let vault = match opened {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::info!("unlock with {with} refused: {e}");
+                return Ok(false);
+            }
+        };
+
+        if !self.state.lock().await.install_unlocked(vault) {
+            // Another unlock finished first; its vault stays.
+            return Ok(true);
+        }
+        sync_objects(server, &self.state)
+            .await
+            .map_err(fdo::Error::from)?;
+
+        tracing::info!("vault unlocked over org.locket.Manager1 with {with}");
+        Ok(true)
+    }
 }
 
 #[interface(name = "org.locket.Manager1")]
@@ -50,40 +96,45 @@ impl Manager {
         passphrase: String,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<bool> {
-        {
-            let state = self.state.lock().await;
-            if !state.is_locked() {
-                return Ok(true);
-            }
-        }
-
-        // Argon2id is deliberately slow; keep it off the executor's core
-        // threads so the daemon stays responsive to other bus traffic.
-        let path = self.vault_path.clone();
         // Wiped when the task ends, whichever way the unlock went.
         let passphrase = zeroize::Zeroizing::new(passphrase);
-        let opened = tokio::task::spawn_blocking(move || Vault::open(&path, &passphrase))
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("unlock task failed: {e}")))?;
+        self.unlock_by(server, "a passphrase", move |path| {
+            Vault::open(path, &passphrase)
+        })
+        .await
+    }
 
-        let vault = match opened {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::info!("unlock refused: {e}");
-                return Ok(false);
-            }
+    /// Open the vault with the key of one of its hardware slots. Returns
+    /// whether it worked.
+    ///
+    /// The daemon talks to no TPM and no security key. Whoever asks the
+    /// person for the PIN or the touch — the unlock dialog, the window —
+    /// does that, opens its own copy with the key the device released, and
+    /// hands the same key here, so one PIN or one touch unlocks both. `factor`
+    /// is the slot's type as the vault file spells it: `tpm2` or `fido2`.
+    ///
+    /// The key crosses the session bus as a passphrase does through
+    /// [`Manager::unlock`], and is worth the same there: it opens this vault.
+    async fn unlock_with_key(
+        &self,
+        factor: String,
+        key: Vec<u8>,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> fdo::Result<bool> {
+        let key = zeroize::Zeroizing::new(key);
+        let kind = SlotKind::from_name(&factor)
+            .filter(|kind| *kind != SlotKind::Passphrase)
+            .ok_or_else(|| {
+                fdo::Error::InvalidArgs(format!("`{factor}` is not a hardware factor"))
+            })?;
+        // A key of the wrong length opens nothing, like any other wrong key.
+        let Ok(key) = SymKey::try_from_slice(&key) else {
+            return Ok(false);
         };
-
-        if !self.state.lock().await.install_unlocked(vault) {
-            // Another unlock finished first; its vault stays.
-            return Ok(true);
-        }
-        sync_objects(server, &self.state)
-            .await
-            .map_err(fdo::Error::from)?;
-
-        tracing::info!("vault unlocked over org.locket.Manager1");
-        Ok(true)
+        self.unlock_by(server, kind.label(), move |path| {
+            Vault::open_with(path, &RawKeyOpener { kind, key })
+        })
+        .await
     }
 
     /// Drop the data-encryption key, and the item objects with it.

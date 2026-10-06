@@ -17,6 +17,8 @@ pub const MANAGER_PATH: &str = "/org/locket/Manager";
 #[zbus::proxy(interface = "org.locket.Manager1", assume_defaults = false)]
 pub trait Manager {
     fn unlock(&self, passphrase: &str) -> zbus::Result<bool>;
+    /// Unlock with the key of a hardware slot: `factor` is `tpm2` or `fido2`.
+    fn unlock_with_key(&self, factor: &str, key: &[u8]) -> zbus::Result<bool>;
     fn lock(&self) -> zbus::Result<()>;
     /// The person dismissed the unlock dialog.
     fn cancel_unlock(&self) -> zbus::Result<()>;
