@@ -126,11 +126,12 @@ pub enum Message {
     ToggleReveal(String),
     /// Show or hide the `otpauth://` QR for a one-time-code field.
     ToggleQr(String),
-    CopyValue(String, String),
+    /// Put this value on the clipboard; the first part says what it is.
+    CopyValue(String, SecretString),
     /// The clear timer for the copy with this number fired.
     ClearClipboard(u64),
     /// What the clipboard held when the clear timer fired.
-    ClipboardChecked(Option<String>),
+    ClipboardChecked(Option<SecretString>),
     /// The vault file changed underneath us; pick the change up.
     ReloadVaultFile,
     /// The settings store changed somewhere else; take the new values.
@@ -507,7 +508,10 @@ pub struct App {
     unlock_requested_by_app: bool,
     /// The secret we last put on the clipboard, so the clear timer can check
     /// it is still ours before wiping it.
-    clipboard_copy: Option<String>,
+    ///
+    /// Held wiping: it is a secret, and it outlives a lock on purpose so that
+    /// the clear timer still clears.
+    clipboard_copy: Option<SecretString>,
     /// The clear timer fired while no locket window had the keyboard, so the
     /// clipboard could not be read or written; it runs again when one does.
     clipboard_due: bool,
@@ -1447,7 +1451,7 @@ impl App {
         };
         controls = controls.push(
             widget::button::standard(fl!("detail-copy"))
-                .on_press(Message::CopyValue(what, value.to_owned())),
+                .on_press(Message::CopyValue(what, value.into())),
         );
 
         widget::column::with_capacity(3)
@@ -2373,7 +2377,12 @@ impl cosmic::Application for App {
                 self.clipboard_due = false;
                 self.clipboard_generation += 1;
                 let generation = self.clipboard_generation;
-                let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(value);
+                // The clipboard takes a plain `String`, and from there the
+                // compositor and whatever reads it hold their own copies:
+                // the clear timer is the only defence past this point.
+                let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
+                    value.expose().to_owned(),
+                );
                 let notice = self.toast(if clear_after > 0 {
                     fl!("toast-copied-clearing", what = what, seconds = clear_after)
                 } else {
@@ -2397,13 +2406,18 @@ impl cosmic::Application for App {
                 // Look before wiping: between the copy and this timer the user
                 // may well have copied something of their own, and clearing
                 // the clipboard out from under them is its own small disaster.
-                return cosmic::iced::clipboard::read()
-                    .map(|current| cosmic::Action::App(Message::ClipboardChecked(current)));
+                return cosmic::iced::clipboard::read().map(|current| {
+                    cosmic::Action::App(Message::ClipboardChecked(current.map(Into::into)))
+                });
             }
 
             Message::ClipboardChecked(current) => {
                 let focused = self.core.focused_window().is_some();
-                match clear_decision(current.as_deref(), self.clipboard_copy.as_deref(), focused) {
+                match clear_decision(
+                    current.as_ref().map(SecretString::expose),
+                    self.clipboard_copy.as_ref().map(SecretString::expose),
+                    focused,
+                ) {
                     ClearDecision::Clear => {
                         self.clipboard_copy = None;
                         // Overwrite rather than clear: some clipboard managers

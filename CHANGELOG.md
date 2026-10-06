@@ -58,6 +58,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Fixed
 
+- The item editor holds what it edits — the secret, and every field's value
+  whatever its kind — in buffers that are wiped when the form closes or the
+  window locks, as the window's passphrases already were. So is the copy of
+  a secret kept for clearing the clipboard. What the text input keeps of a
+  value is still beyond locket's reach; the threat model says how long.
 - The SSH agent signs with ECDSA keys. It listed them — P-256, P-384 and
   P-521 — and then refused every request: the SSH library was built without
   its curve implementations, so a key that `ssh-add -l` showed could not log

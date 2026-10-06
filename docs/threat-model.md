@@ -50,8 +50,14 @@ non-dumpable: xdg-desktop-portal identifies a caller by opening
 dialog and auto-type go through the portal. So while it is unlocked, whether
 another process running as you can attach to it or read its memory rests on
 the kernel's Yama `ptrace_scope` (1, "descendants only", on Arch and most
-distributions). Its passphrases are held in wiping buffers; the text-input
-widget's own copies are beyond its reach.
+distributions). Its passphrases, PINs, the item editor's values (the
+secret and every field, whatever its kind) and the copy kept for clearing
+the clipboard are held in wiping buffers. The text-input widget's own copies
+are beyond its reach: one per frame, and one in the widget's state that
+follows the form's value and is emptied when the form is — on save, cancel
+or lock — but freed rather than wiped. What goes on the clipboard is a plain
+string from there on, held by the compositor and whatever reads it; the
+clear timer is the defence.
 
 ## Attacker positions
 

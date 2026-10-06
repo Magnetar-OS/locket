@@ -4,6 +4,28 @@
 //! machine can be reasoned about (and tested) on its own; `app` maps
 //! [`EditorMessage`] into its own message and only handles the two outcomes
 //! the editor reports back.
+//!
+//! # What holds a secret here, and for how long
+//!
+//! Every value the form edits — the item's secret and each field's value,
+//! whatever its kind — is a [`SecretString`] from the moment it arrives: in
+//! the messages the inputs send, in the editor's state, in the item built on
+//! save. Each is wiped when it is dropped, which for the editor as a whole is
+//! when it is saved, cancelled, or the window locks. The editor keeps no undo
+//! history, and libcosmic's text input has none either.
+//!
+//! What it cannot reach are the text input's own copies (libcosmic, at the
+//! revision in `Cargo.lock`). The input is rebuilt from the value on every
+//! frame, into a list of graphemes; its `State` keeps one more such list,
+//! replaced by the frame's at every redraw because these inputs leave the
+//! value to the application (`manage_value` is off); and the string it hands
+//! to `on_input` was assembled from them before it is moved into a
+//! `SecretString`. None of them is wiped. The frame's copy lasts a frame. The
+//! state's copy follows the form: emptied at the first redraw after the form
+//! empties the value or goes away — saving, cancelling, the window locking —
+//! and freed with the input. Freed memory is reused, not cleared. The window
+//! writes no core dump; whether another process can read its memory while it
+//! runs rests on Yama (see the threat model).
 
 use crate::fl;
 use crate::labels;
@@ -11,6 +33,7 @@ use cosmic::iced::{Alignment, Length};
 use cosmic::prelude::*;
 use cosmic::widget;
 use locket_core::{
+    SecretString,
     generator::{self, PasswordRecipe},
     model::{Field, FieldKind, Item, ItemKind, attr, field_names},
 };
@@ -20,13 +43,13 @@ use uuid::Uuid;
 pub enum EditorMessage {
     Label(String),
     Kind(usize),
-    Secret(String),
+    Secret(SecretString),
     ToggleSecretReveal,
     Generate,
     LengthChanged(f64),
     ToggleSymbols(bool),
     FieldName(usize, String),
-    FieldValue(usize, String),
+    FieldValue(usize, SecretString),
     FieldKindChanged(usize, usize),
     ToggleFieldReveal(usize),
     AddField,
@@ -52,7 +75,9 @@ pub enum Outcome {
 pub struct EditField {
     pub name: String,
     pub kind: FieldKind,
-    pub value: String,
+    /// Held wiping whatever the kind: a field's kind can be changed in the
+    /// form, and a value typed as text may be about to become a secret.
+    pub value: SecretString,
     pub revealed: bool,
 }
 
@@ -61,7 +86,7 @@ pub struct Editor {
     pub id: Option<Uuid>,
     pub label: String,
     pub kind_index: usize,
-    pub secret: String,
+    pub secret: SecretString,
     pub secret_revealed: bool,
     pub fields: Vec<EditField>,
     pub generator_length: f64,
@@ -83,7 +108,7 @@ pub struct Editor {
     pub secret_is_binary: bool,
     /// What the Base64 form looked like on open, to tell an edit from a
     /// round-trip.
-    original_secret: String,
+    original_secret: SecretString,
     /// Decoded length of the binary secret, for the caption.
     binary_len: usize,
     /// When the item had last changed as it was opened here, so a save can
@@ -100,13 +125,13 @@ impl Editor {
                 EditField {
                     name: field_names::USERNAME.into(),
                     kind: FieldKind::Text,
-                    value: String::new(),
+                    value: SecretString::default(),
                     revealed: false,
                 },
                 EditField {
                     name: field_names::URL.into(),
                     kind: FieldKind::Url,
-                    value: String::new(),
+                    value: SecretString::default(),
                     revealed: false,
                 },
             ],
@@ -117,7 +142,7 @@ impl Editor {
             id: None,
             label: String::new(),
             kind_index,
-            secret: String::new(),
+            secret: SecretString::default(),
             secret_revealed: false,
             fields,
             generator_length: 20.0,
@@ -127,7 +152,7 @@ impl Editor {
             expires: String::new(),
             error: None,
             secret_is_binary: false,
-            original_secret: String::new(),
+            original_secret: SecretString::default(),
             binary_len: 0,
             base_modified: None,
         }
@@ -142,7 +167,7 @@ impl Editor {
                 .iter()
                 .position(|k| *k == item.kind)
                 .unwrap_or(0),
-            secret: item.secret.expose().to_owned(),
+            secret: item.secret.clone(),
             secret_revealed: false,
             fields: item
                 .fields
@@ -150,7 +175,7 @@ impl Editor {
                 .map(|f| EditField {
                     name: f.name.clone(),
                     kind: f.kind,
-                    value: f.value.expose().to_owned(),
+                    value: f.value.clone(),
                     revealed: false,
                 })
                 .collect(),
@@ -164,7 +189,7 @@ impl Editor {
                 .unwrap_or_default(),
             error: None,
             secret_is_binary: item.secret_is_binary(),
-            original_secret: item.secret.expose().to_owned(),
+            original_secret: item.secret.clone(),
             binary_len: if item.secret_is_binary() {
                 item.secret_bytes().len()
             } else {
@@ -224,7 +249,7 @@ impl Editor {
         if let Some(id) = self.id {
             item.id = id;
         }
-        item.secret = self.secret.clone().into();
+        item.secret = self.secret.clone();
         item.attributes = self.attributes.clone();
         // A binary secret leaves as binary only if it comes back untouched.
         // Anything typed into the field is text, and keeping the marker on it
@@ -238,7 +263,7 @@ impl Editor {
             .fields
             .iter()
             .filter(|f| !f.name.trim().is_empty())
-            .map(|f| Field::new(f.name.trim(), f.kind, f.value.clone()))
+            .map(|f| Field::new(f.name.trim(), f.kind, f.value.expose()))
             .collect();
         Ok(item)
     }
@@ -259,7 +284,7 @@ impl Editor {
 
             EditorMessage::Generate => match generator::password(&self.recipe()) {
                 Ok(pw) => {
-                    self.secret = pw.expose().to_owned();
+                    self.secret = pw;
                     // Reveal it: a password you cannot see is one you cannot
                     // check against a site's composition rules.
                     self.secret_revealed = true;
@@ -291,7 +316,7 @@ impl Editor {
             EditorMessage::AddField => self.fields.push(EditField {
                 name: String::new(),
                 kind: FieldKind::Text,
-                value: String::new(),
+                value: SecretString::default(),
                 revealed: true,
             }),
             EditorMessage::RemoveField(i) => {
@@ -366,11 +391,11 @@ impl Editor {
                     .push(
                         widget::text_input::secure_input(
                             "",
-                            &self.secret,
+                            self.secret.expose(),
                             Some(EditorMessage::ToggleSecretReveal),
                             !self.secret_revealed,
                         )
-                        .on_input(EditorMessage::Secret)
+                        .on_input(|v| EditorMessage::Secret(v.into()))
                         .width(Length::Fill),
                     )
                     .push(
@@ -427,16 +452,16 @@ impl Editor {
             let value_input: Element<'_, EditorMessage> = if field.kind.is_sensitive() {
                 widget::text_input::secure_input(
                     fl!("editor-field-value"),
-                    &field.value,
+                    field.value.expose(),
                     Some(EditorMessage::ToggleFieldReveal(i)),
                     !field.revealed,
                 )
-                .on_input(move |v| EditorMessage::FieldValue(i, v))
+                .on_input(move |v| EditorMessage::FieldValue(i, v.into()))
                 .width(Length::Fill)
                 .into()
             } else {
-                widget::text_input(fl!("editor-field-value"), &field.value)
-                    .on_input(move |v| EditorMessage::FieldValue(i, v))
+                widget::text_input(fl!("editor-field-value"), field.value.expose())
+                    .on_input(move |v| EditorMessage::FieldValue(i, v.into()))
                     .width(Length::Fill)
                     .into()
             };
@@ -567,8 +592,8 @@ mod tests {
         e.update(EditorMessage::ToggleSymbols(false));
         e.update(EditorMessage::Generate);
 
-        assert_eq!(e.secret.chars().count(), 32);
-        assert!(e.secret.chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_eq!(e.secret.expose().chars().count(), 32);
+        assert!(e.secret.expose().chars().all(|c| c.is_ascii_alphanumeric()));
         assert!(e.secret_revealed, "generated password stayed masked");
     }
 
@@ -697,6 +722,53 @@ mod tests {
         e.update(EditorMessage::Expires(String::new()));
         let item = saved(&mut e).expect("clearing the field should save");
         assert_eq!(item.expires, None, "an emptied expiry survived");
+    }
+
+    /// The secret and every field value — a TOTP seed, a private key, a
+    /// custom secret, and text that may be about to become one — are held in
+    /// wiping strings. Their `Debug` form is where a plain `String` would
+    /// show: a draft logged, or a message traced, printed the password.
+    #[test]
+    fn no_value_the_form_holds_shows_in_its_messages_or_its_state() {
+        let original = Item::new(ItemKind::Login, "GitHub")
+            .with_secret("hunter2-the-password")
+            .with_field(Field::new(
+                field_names::TOTP,
+                FieldKind::Totp,
+                "otpauth://totp/GitHub?secret=JBSWY3DPEHPK3PXP",
+            ))
+            .with_field(Field::new(
+                "deploy key",
+                FieldKind::PrivateKey,
+                "-----BEGIN OPENSSH PRIVATE KEY-----",
+            ))
+            .with_field(Field::secret("recovery", "four-recovery-codes"));
+        let mut e = Editor::from_item(&original);
+        let typed = [
+            EditorMessage::Secret("a-new-password-typed".into()),
+            EditorMessage::FieldValue(2, "a-new-recovery-code".into()),
+        ];
+        let shown = format!("{typed:?}");
+        for message in typed {
+            e.update(message);
+        }
+        let fields: Vec<_> = e.fields.iter().map(|f| format!("{f:?}")).collect();
+        let shown = format!("{shown}{:?}{fields:?}", e.secret);
+        for secret in [
+            "hunter2-the-password",
+            "a-new-password-typed",
+            "JBSWY3DPEHPK3PXP",
+            "BEGIN OPENSSH",
+            "a-new-recovery-code",
+        ] {
+            assert!(!shown.contains(secret), "`{secret}` in {shown}");
+        }
+
+        // And what is saved is what was typed.
+        let item = saved(&mut e).unwrap();
+        assert_eq!(item.secret.expose(), "a-new-password-typed");
+        assert_eq!(item.field_value("recovery"), Some("a-new-recovery-code"));
+        assert_eq!(item.field(field_names::TOTP).unwrap().kind, FieldKind::Totp);
     }
 
     #[test]
