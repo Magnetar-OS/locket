@@ -361,6 +361,17 @@ impl Vault {
         Ok(Self::read_file(path)?.collections)
     }
 
+    /// Read the key slots without unlocking anything.
+    ///
+    /// They are public metadata, stored in the clear: which factors the vault
+    /// has and what each needs in order to be tried — never key material. An
+    /// unlock screen reads them to offer the hardware factor a vault is
+    /// enrolled with, and that factor's crate to find the slot to ask its
+    /// device about. A file from before key slots has none.
+    pub fn read_slots(path: &Path) -> Result<Vec<Slot>> {
+        Ok(Self::read_file(path)?.slots)
+    }
+
     /// Create a brand-new vault with a single passphrase slot.
     pub fn create(path: impl Into<PathBuf>, passphrase: &str, params: KdfParams) -> Result<Self> {
         Self::create_with_magic(path, passphrase, params, MAGIC)
@@ -660,21 +671,34 @@ impl Vault {
         Ok(id)
     }
 
-    /// Remove a slot, refusing to remove the last one.
+    /// Whether `id` is the vault's only passphrase slot.
+    pub fn is_last_passphrase(&self, id: Uuid) -> bool {
+        let mut passphrases = self
+            .file
+            .slots
+            .iter()
+            .filter(|s| s.factor.kind() == SlotKind::Passphrase);
+        matches!((passphrases.next(), passphrases.next()), (Some(only), None) if only.id == id)
+    }
+
+    /// Remove a slot, refusing to remove the last passphrase.
     ///
-    /// A vault with no slots is unopenable, so this is a footgun worth an
-    /// explicit error rather than a silent brick.
+    /// Hardware factors are additive: a TPM dies with its motherboard and a
+    /// token gets lost, and a vault that only one of them can open is then
+    /// gone with it. So whatever else is enrolled, one passphrase stays —
+    /// which also means a vault never ends up with no slots at all.
     pub fn remove_slot(&mut self, id: Uuid) -> Result<()> {
-        if self.file.slots.len() <= 1 {
-            return Err(Error::Other(
-                "refusing to remove the only remaining unlock factor".into(),
-            ));
-        }
-        let before = self.file.slots.len();
-        self.file.slots.retain(|s| s.id != id);
-        if self.file.slots.len() == before {
+        if !self.file.slots.iter().any(|s| s.id == id) {
             return Err(Error::Other(format!("no slot {id}")));
         }
+        if self.is_last_passphrase(id) {
+            return Err(Error::Other(
+                "refusing to remove the only passphrase: a vault that only hardware can open \
+                 is lost with the hardware"
+                    .into(),
+            ));
+        }
+        self.file.slots.retain(|s| s.id != id);
         self.dirty = true;
         self.save()
     }
@@ -1175,6 +1199,80 @@ mod tests {
         let only = v.slots()[0].id;
         assert!(v.remove_slot(only).is_err(), "bricked the vault");
         assert_eq!(v.slots().len(), 1);
+    }
+
+    /// With a hardware slot enrolled the passphrase used to be removable,
+    /// leaving a vault only a device could open. The application refused
+    /// that; nothing else calling `remove_slot` did.
+    #[test]
+    fn the_only_passphrase_cannot_be_removed_while_hardware_is_enrolled() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let passphrase = v.slots()[0].id;
+        let device = v
+            .add_slot(
+                "TPM 2.0",
+                SlotFactor::Tpm2 {
+                    sealed: base64_encode(b"o"),
+                    parent: Default::default(),
+                    pcrs: vec![],
+                    with_pin: true,
+                },
+                &SymKey::random().unwrap(),
+            )
+            .unwrap();
+        assert!(v.is_last_passphrase(passphrase));
+        assert!(!v.is_last_passphrase(device));
+
+        assert!(
+            v.remove_slot(passphrase).is_err(),
+            "left a vault only hardware can open"
+        );
+        assert_eq!(v.slots().len(), 2);
+        drop(v);
+        assert!(Vault::open(&path, "pw").is_ok());
+
+        // An id that names no slot is its own error, and changes nothing.
+        let mut v = Vault::open(&path, "pw").unwrap();
+        assert!(v.remove_slot(Uuid::new_v4()).is_err());
+        assert_eq!(v.slots().len(), 2);
+    }
+
+    /// The slots are in the header, readable before anything is unlocked —
+    /// which is how an unlock screen knows to offer a TPM PIN.
+    #[test]
+    fn the_slots_are_readable_without_unlocking() {
+        let (_d, path) = tmp();
+        let mut v = Vault::create(&path, "pw", KdfParams::insecure_fast()).unwrap();
+        let device_key = SymKey::random().unwrap();
+        v.add_slot(
+            "Security key",
+            SlotFactor::Fido2 {
+                credential_id: base64_encode(b"cred"),
+                salt: base64_encode(&[7u8; 32]),
+                rp_id: "locket.local".into(),
+                user_verification: false,
+            },
+            &device_key,
+        )
+        .unwrap();
+        drop(v);
+
+        let slots = Vault::read_slots(&path).unwrap();
+        let kinds: Vec<SlotKind> = slots.iter().map(|s| s.factor.kind()).collect();
+        assert_eq!(kinds, [SlotKind::Passphrase, SlotKind::Fido2]);
+        // What was read is what was sealed over: a slot read this way opens
+        // the vault with its key like one read by `open`.
+        assert!(
+            Vault::open_with(
+                &path,
+                &RawKeyOpener {
+                    kind: SlotKind::Fido2,
+                    key: device_key
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]

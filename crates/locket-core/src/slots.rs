@@ -113,6 +113,23 @@ impl SlotKind {
             SlotKind::Fido2 => "Security key",
         }
     }
+
+    /// The kind's name where one has to be written down: the `type` a slot
+    /// carries in the vault file, and what `org.locket.Manager1` is told.
+    pub const fn name(self) -> &'static str {
+        match self {
+            SlotKind::Passphrase => "passphrase",
+            SlotKind::Tpm2 => "tpm2",
+            SlotKind::Fido2 => "fido2",
+        }
+    }
+
+    /// The kind [`SlotKind::name`] names.
+    pub fn from_name(name: &str) -> Option<Self> {
+        [SlotKind::Passphrase, SlotKind::Tpm2, SlotKind::Fido2]
+            .into_iter()
+            .find(|kind| kind.name() == name)
+    }
 }
 
 /// One way in to the vault.
@@ -654,6 +671,38 @@ mod tests {
             key: SymKey::random().unwrap(),
         };
         assert!(tpm_opener.kek_for(&fido).unwrap().is_none());
+    }
+
+    /// The names are the ones the vault file already uses for a slot's type.
+    #[test]
+    fn a_kinds_name_is_its_type_in_the_file() {
+        let factors = [
+            SlotFactor::Passphrase {
+                params: KdfParams::default(),
+                salt: String::new(),
+            },
+            SlotFactor::Tpm2 {
+                sealed: String::new(),
+                parent: Default::default(),
+                pcrs: vec![],
+                with_pin: true,
+            },
+            SlotFactor::Fido2 {
+                credential_id: String::new(),
+                salt: String::new(),
+                rp_id: String::new(),
+                user_verification: false,
+            },
+        ];
+        for factor in factors {
+            let written = serde_json::to_value(&factor).unwrap();
+            assert_eq!(written["type"], factor.kind().name());
+            assert_eq!(
+                SlotKind::from_name(factor.kind().name()),
+                Some(factor.kind())
+            );
+        }
+        assert_eq!(SlotKind::from_name("fingerprint"), None);
     }
 
     #[test]
