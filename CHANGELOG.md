@@ -11,6 +11,16 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   Breaking for anything calling the library; the command line and the
   application behave as before.
 
+### Security
+
+- The SSH agent blinds its RSA signatures. They were made through the `rsa`
+  crate's plain signer, which runs the private-key operation unblinded on
+  arithmetic that is not constant-time (RUSTSEC-2023-0071, the "Marvin"
+  timing attack): anything able to reach the agent socket, a forwarded one
+  included, could ask for signatures over data of its choosing and time them.
+  Each signature now uses a fresh blinding factor, so its timing no longer
+  depends on the key. Ed25519 and ECDSA keys were never affected.
+
 ### Fixed
 
 - An export or a saved attachment that fails part-way leaves nothing behind.

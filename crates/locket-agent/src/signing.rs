@@ -16,7 +16,8 @@
 
 use rsa::BigUint;
 use rsa::pkcs1v15::SigningKey;
-use signature::{SignatureEncoding, Signer};
+use rsa::rand_core::CryptoRngCore;
+use signature::{RandomizedSigner, SignatureEncoding};
 use ssh_key::Mpint;
 use ssh_key::private::RsaKeypair;
 
@@ -65,21 +66,39 @@ impl RsaHash {
 ///
 /// Returns the raw signature; the caller wraps it with the algorithm name.
 pub fn rsa_signature(keypair: &RsaKeypair, data: &[u8], hash: RsaHash) -> Result<Vec<u8>> {
+    rsa_signature_with(&mut rsa::rand_core::OsRng, keypair, data, hash)
+}
+
+/// [`rsa_signature`], drawing the blinding factor from `rng`.
+///
+/// Signed through the *randomised* signer on purpose. PKCS#1 v1.5 signing
+/// needs no randomness and the plain `Signer` uses none — which in the `rsa`
+/// crate means the private-key exponentiation runs unblinded, on arithmetic
+/// that is not constant-time (RUSTSEC-2023-0071). An agent signs data its
+/// callers choose, for anything that can reach its socket, a forwarded one
+/// included; with a fresh blinding factor per signature, how long one took
+/// says nothing about the key.
+fn rsa_signature_with(
+    rng: &mut impl CryptoRngCore,
+    keypair: &RsaKeypair,
+    data: &[u8],
+    hash: RsaHash,
+) -> Result<Vec<u8>> {
     let key = private_key(keypair)?;
-    // `try_sign`, not `sign`: a key too small for the digest cannot be padded,
-    // and `sign` panics on that rather than saying so.
+    // `try_sign…`, not `sign…`: a key too small for the digest cannot be
+    // padded, and the infallible form panics on that rather than saying so.
     let failed = |e: signature::Error| Error::Signing(format!("{}: {e}", hash.algorithm()));
     let signature = match hash {
         RsaHash::Sha1 => SigningKey::<sha1::Sha1>::new(key)
-            .try_sign(data)
+            .try_sign_with_rng(rng, data)
             .map_err(failed)?
             .to_vec(),
         RsaHash::Sha256 => SigningKey::<sha2::Sha256>::new(key)
-            .try_sign(data)
+            .try_sign_with_rng(rng, data)
             .map_err(failed)?
             .to_vec(),
         RsaHash::Sha512 => SigningKey::<sha2::Sha512>::new(key)
-            .try_sign(data)
+            .try_sign_with_rng(rng, data)
             .map_err(failed)?
             .to_vec(),
     };
@@ -200,6 +219,56 @@ mod tests {
         ));
         // The same key still signs where the digest fits.
         assert!(rsa_signature(&kp, b"message", RsaHash::Sha256).is_ok());
+    }
+
+    /// An RNG that counts what is drawn from it.
+    struct Counting {
+        drawn: usize,
+    }
+
+    impl rsa::rand_core::RngCore for Counting {
+        fn next_u32(&mut self) -> u32 {
+            self.drawn += 4;
+            OsRng.next_u32()
+        }
+        fn next_u64(&mut self) -> u64 {
+            self.drawn += 8;
+            OsRng.next_u64()
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            self.drawn += dest.len();
+            OsRng.fill_bytes(dest);
+        }
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
+            self.drawn += dest.len();
+            OsRng.try_fill_bytes(dest)
+        }
+    }
+
+    impl rsa::rand_core::CryptoRng for Counting {}
+
+    /// The private-key operation has to be blinded: anything that can reach
+    /// the agent socket — a forwarded one included — can ask for signatures
+    /// over data it chose and time them, and the `rsa` crate's arithmetic is
+    /// not constant-time (RUSTSEC-2023-0071). `Signer::try_sign` does not
+    /// blind; only the randomised signer does. A PKCS#1 v1.5 signature is the
+    /// same bytes either way, so what shows the difference is whether
+    /// randomness was drawn while making it.
+    #[test]
+    fn the_private_key_operation_is_blinded() {
+        let key = rsa_key();
+        let kp = keypair(&key);
+        for hash in [RsaHash::Sha1, RsaHash::Sha256, RsaHash::Sha512] {
+            let mut rng = Counting { drawn: 0 };
+            let blinded = rsa_signature_with(&mut rng, kp, b"a sign request", hash).unwrap();
+            assert!(rng.drawn > 0, "{hash:?}: signed without a blinding factor");
+            // Still the one signature there is for this key, hash and message.
+            assert_eq!(
+                blinded,
+                rsa_signature(kp, b"a sign request", hash).unwrap(),
+                "{hash:?}"
+            );
+        }
     }
 
     #[test]
