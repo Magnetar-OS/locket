@@ -4089,6 +4089,7 @@ dependencies = [
  "i18n-embed",
  "i18n-embed-fl",
  "libcosmic",
+ "locket-core",
  "locket-secret",
  "rust-embed",
  "tokio",

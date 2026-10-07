@@ -41,6 +41,7 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
   a factor is sealed to or asked of can be named, which is what lets the
   tests run against a software TPM and a software token. `open_context()` is
   now `Tpm::context()`.
+- `locket_secret::quick::secret_of` returns a `SecretString`.
 - `locket_import::export::{to_json, to_csv, to_kdbx}` take an `Existing`
   argument saying whether a file already at the path is refused or replaced.
   Breaking for anything calling the library; the command line and the
@@ -61,8 +62,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - The item editor holds what it edits — the secret, and every field's value
   whatever its kind — in buffers that are wiped when the form closes or the
   window locks, as the window's passphrases already were. So is the copy of
-  a secret kept for clearing the clipboard. What the text input keeps of a
-  value is still beyond locket's reach; the threat model says how long.
+  a secret kept for clearing the clipboard, in the window and in the panel
+  applet, and the secret the applet fetches for its Copy button. What the
+  text input keeps of a value is still beyond locket's reach; the threat
+  model says how long.
 - The SSH agent signs with ECDSA keys. It listed them — P-256, P-384 and
   P-521 — and then refused every request: the SSH library was built without
   its curve implementations, so a key that `ssh-add -l` showed could not log

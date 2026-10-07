@@ -17,6 +17,8 @@ name = "locket-applet"
 path = "src/main.rs"
 
 [dependencies]
+# For `SecretString`: the copy of a secret kept for clearing the clipboard.
+locket-core.workspace = true
 locket-secret.workspace = true
 tokio.workspace = true
 tracing.workspace = true

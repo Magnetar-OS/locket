@@ -24,6 +24,7 @@ use cosmic::iced::{Length, Rectangle, Subscription};
 use cosmic::surface::action::{app_popup, destroy_popup};
 use cosmic::widget;
 use cosmic::{Element, iced::window};
+use locket_core::SecretString;
 use locket_secret::client::Status;
 
 const ID: &str = "com.magnetaros.LocketApplet";
@@ -54,7 +55,8 @@ pub struct Applet {
     results: Vec<locket_secret::quick::Entry>,
     /// What we last put on the clipboard, so the clear timer can check it is
     /// still ours before wiping it — the same rule the main window follows.
-    clipboard_copy: Option<String>,
+    /// Held wiping, like the window's: it is a secret.
+    clipboard_copy: Option<SecretString>,
     /// The clear timer could not read the clipboard; it retries every tick.
     clipboard_due: bool,
     /// Counts copies, so each clear timer knows whether it is still current.
@@ -88,10 +90,12 @@ pub enum Message {
     Searched(Vec<locket_secret::quick::Entry>),
     /// Copy the secret behind this path; the label is for the notice.
     Copy(String, String),
-    Copied(String, Option<String>),
+    /// The secret was fetched, or could not be; the label is for the notice.
+    Copied(String, Option<SecretString>),
     /// The clear timer for the copy with this number fired.
     ClearClipboard(u64),
-    ClipboardChecked(Option<String>),
+    /// What the clipboard held when the clear timer fired.
+    ClipboardChecked(Option<SecretString>),
 }
 
 /// Launch the main window, handing on an activation token if we have one.
@@ -267,14 +271,21 @@ impl cosmic::Application for Applet {
                     self.notice = Some(fl!("copied-forever", label = label));
                     self.clipboard_copy = None;
                     self.clipboard_due = false;
-                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
+                    return cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
+                        secret.expose().to_owned(),
+                    );
                 };
                 self.notice = Some(fl!("copied", label = label, seconds = seconds));
                 self.clipboard_copy = Some(secret.clone());
                 self.clipboard_due = false;
                 self.clipboard_generation += 1;
                 let generation = self.clipboard_generation;
-                let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(secret);
+                // The clipboard takes a plain `String`, and the compositor and
+                // whatever reads it hold their own copies from there: the
+                // clear timer is the defence past this point.
+                let copy = cosmic::iced::clipboard::write::<cosmic::Action<Message>>(
+                    secret.expose().to_owned(),
+                );
                 let clear = cosmic::task::future(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
                     Message::ClearClipboard(generation)
@@ -289,14 +300,15 @@ impl cosmic::Application for Applet {
                 // Look before wiping: the person may have copied something of
                 // their own since, and clearing that would be its own small
                 // disaster. Same check the main window makes.
-                return cosmic::iced::clipboard::read()
-                    .map(|current| cosmic::Action::App(Message::ClipboardChecked(current)));
+                return cosmic::iced::clipboard::read().map(|current| {
+                    cosmic::Action::App(Message::ClipboardChecked(current.map(Into::into)))
+                });
             }
 
             Message::ClipboardChecked(current) => {
                 match clear_decision(
-                    current.as_deref(),
-                    self.clipboard_copy.as_deref(),
+                    current.as_ref().map(SecretString::expose),
+                    self.clipboard_copy.as_ref().map(SecretString::expose),
                     self.popup.is_some(),
                 ) {
                     ClearDecision::Clear => {
@@ -590,6 +602,24 @@ mod tests {
         assert_eq!(clear_after(None), Some(30));
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A secret passes through two messages on its way to the clipboard and
+    /// back, and the applet keeps one copy for the clear timer. Each was a
+    /// plain `String`: freed unwiped, and printed whole by `Debug`, which
+    /// is how a message reaches a log.
+    #[test]
+    fn the_secret_on_its_way_to_the_clipboard_is_never_shown() {
+        let messages = [
+            Message::Copied("GitHub".into(), Some("hunter2-the-password".into())),
+            Message::ClipboardChecked(Some("hunter2-the-password".into())),
+        ];
+        let shown = format!("{messages:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(
+            shown.contains("GitHub"),
+            "the label is not a secret: {shown}"
+        );
     }
 
     /// Copy A, then B ten seconds later: A's timer must leave B alone.

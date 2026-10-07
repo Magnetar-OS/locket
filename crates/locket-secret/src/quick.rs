@@ -180,7 +180,9 @@ async fn search_on(connection: &zbus::Connection, needle: &str, limit: usize) ->
 /// `None` when it cannot be read, or when it is not text — a binary secret
 /// is a key, and putting base64 on the clipboard as if it were a password
 /// would be a lie the person only finds out about after pasting it.
-pub async fn secret_of(path: &str) -> Option<String> {
+///
+/// Wiped when dropped, and so are the bytes it came in as, whichever way.
+pub async fn secret_of(path: &str) -> Option<locket_core::SecretString> {
     let connection = zbus::Connection::session().await.ok()?;
     let service = service(&connection).await?;
     let empty = zbus::zvariant::Value::from("");
@@ -196,7 +198,14 @@ pub async fn secret_of(path: &str) -> Option<String> {
         .await
         .ok()?;
     let (secret,) = item.get_secret(&session).await.ok()?;
-    String::from_utf8(secret.value).ok()
+    match String::from_utf8(secret.value) {
+        // The same buffer, moved: nothing is left behind to wipe.
+        Ok(text) => Some(text.into()),
+        Err(not_text) => {
+            zeroize::Zeroize::zeroize(&mut not_text.into_bytes());
+            None
+        }
+    }
 }
 
 #[cfg(test)]
