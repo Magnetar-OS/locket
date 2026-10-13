@@ -25,6 +25,7 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Changed
 
+- Rebuilt against the current COSMIC libraries (libcosmic `a6ac45c`).
 - The cryptography libraries moved to the current RustCrypto generation:
   argon2 0.6, chacha20poly1305 0.11, aes 0.9, cbc 0.2, hmac 0.13, hkdf 0.13,
   sha1 and sha2 0.11, signature 3. The SSH side has no stable release there
