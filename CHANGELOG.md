@@ -4,6 +4,14 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Rebuilt against the current COSMIC libraries (libcosmic `430f3d4`) with
+  Rust 1.99.1.
+- Escape pressed in a text field now does what Escape does elsewhere in the
+  window — cancels the open edit, import or confirmation. It used to
+  only take the focus out of the field, so it took a second press.
+
 ## [3.0.0] - 2026-10-13
 
 ### Added
