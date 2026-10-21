@@ -298,7 +298,10 @@ pub fn import_file(vault: &mut Vault, path: &Path, into: Option<&str>) -> Result
 
     // The data file sits under a localised folder name; match the suffix.
     let entry_name = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_owned()))
+        .filter_map(|i| {
+            let file = archive.by_index(i).ok()?;
+            file.name().ok().map(std::borrow::Cow::into_owned)
+        })
         .find(|n| n.ends_with("data.json"))
         .ok_or_else(|| Error::Database("no data.json inside; not a Proton Pass export".into()))?;
     let text = crate::read_archive_entry(

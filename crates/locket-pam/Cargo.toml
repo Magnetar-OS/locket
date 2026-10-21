@@ -19,6 +19,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 locket-ipc.workspace = true
-pam-bindings = "0.3"
+pam-bindings = "0.4"
 libc = "0.2"
 zeroize.workspace = true
