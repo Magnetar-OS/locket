@@ -4441,13 +4441,15 @@ fn about() -> widget::about::About {
 
 /// Hand a URL to the desktop's browser.
 ///
-/// Double-forked and detached by `cosmic::process`, so the browser does not
+/// Double-forked and detached by libcosmic's launcher, so the browser does not
 /// die with locket and locket does not inherit its output.
 fn open_url(url: String) -> Task<Message> {
     cosmic::iced::Task::future(async move {
         let mut command = std::process::Command::new("xdg-open");
         command.arg(url);
-        cosmic::process::spawn(command).await;
+        if cosmic_launch::process::spawn(command).await.is_none() {
+            tracing::error!("could not start xdg-open for a link");
+        }
     })
     .discard()
 }

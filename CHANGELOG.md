@@ -4,6 +4,12 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Rebuilt against the current COSMIC libraries (libcosmic `95236a9`).
+- The vault window opened from the panel applet runs as its own unit of the
+  user's systemd session, through libcosmic's new launcher.
+
 ## [3.1.0] - 2026-10-21
 
 ### Changed

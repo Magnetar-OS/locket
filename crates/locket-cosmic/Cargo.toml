@@ -60,6 +60,10 @@ i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester
 i18n-embed-fl = "0.10"
 rust-embed = "8.12"
 
+# Only for opening the About page's links: its double fork, without the
+# systemd launching the applet needs.
+cosmic-launch = { git = "https://github.com/pop-os/libcosmic", default-features = false, features = ["tokio"] }
+
 [dependencies.libcosmic]
 # No `rev`: every COSMIC application tracks the default branch and pins the
 # exact commit in `Cargo.lock` instead. A `rev` here would also desynchronise
@@ -79,9 +83,6 @@ features = [
     "multi-window",
     "wgpu",
     "about",
-    # Only for opening the About page's links; `desktop` would pull in the
-    # desktop-entry and settings-config machinery for the same one call.
-    "process",
     # Launching locket twice hands off to the running window instead of
     # opening a second one with its own vault handle — which is what the panel
     # applet's "Open locket" would otherwise do on every click.

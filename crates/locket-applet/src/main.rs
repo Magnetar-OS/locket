@@ -32,6 +32,9 @@ const ID: &str = "com.magnetaros.LocketApplet";
 /// The main window's binary, as the desktop entry spells it.
 const APP_EXEC: &str = "locket";
 
+/// The main window's application id, which names the systemd unit it runs in.
+const APP_ID: &str = "com.magnetaros.Locket";
+
 /// How often the panel icon re-checks the daemon.
 ///
 /// The applet is a passive indicator; polling a D-Bus property every few
@@ -105,16 +108,40 @@ pub enum Message {
 /// the panel with nothing to say it arrived. Both variable names are set
 /// because which one the other end reads depends on whether it came up under
 /// Wayland or X11.
+///
+/// Started as its own unit of the user's systemd session, so restarting the
+/// panel does not take the vault window down with it.
 fn launch(token: Option<String>) -> Task<Message> {
     cosmic::iced::Task::future(async move {
         let env = match token {
             Some(token) => vec![
-                ("XDG_ACTIVATION_TOKEN", token.clone()),
-                ("DESKTOP_STARTUP_ID", token),
+                ("XDG_ACTIVATION_TOKEN".to_owned(), token.clone()),
+                ("DESKTOP_STARTUP_ID".to_owned(), token),
             ],
             None => Vec::new(),
         };
-        cosmic::desktop::spawn_desktop_exec(APP_EXEC, env, Some(ID), false).await;
+        let session = match zbus::Connection::session().await {
+            Ok(session) => session,
+            Err(e) => {
+                tracing::error!("no session bus to open locket on: {e}");
+                return;
+            }
+        };
+        let executable =
+            cosmic_launch::CustomExecutable::new(APP_ID.to_owned(), APP_EXEC.to_owned());
+        if let Err(e) = cosmic_launch::spawn(
+            &session,
+            &executable,
+            None,
+            &[],
+            None,
+            env,
+            &[] as &[String],
+        )
+        .await
+        {
+            tracing::error!("could not open locket: {e}");
+        }
     })
     .discard()
 }
