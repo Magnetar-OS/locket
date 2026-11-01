@@ -1233,7 +1233,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "locket-agent"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "futures-util",
  "getrandom",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "locket-core"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "argon2",
  "base32",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "locket-import"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "base64ct",
  "csv",
@@ -1306,14 +1306,14 @@ dependencies = [
 
 [[package]]
 name = "locket-ipc"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "locket-secret"
-version = "3.1.0"
+version = "3.2.0"
 dependencies = [
  "aes",
  "cbc",
@@ -2642,9 +2642,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.2.0"
+version = "9.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f5b58784007ff6e5f280ec82c8596686a3b9b5dd5836c63288d4479f84728b9"
+checksum = "848dad21639597378c3be94c59fd4de683f0f6d8a5387575896e1245737d4f37"
 dependencies = [
  "crc32fast",
  "flate2",
