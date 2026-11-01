@@ -27,8 +27,9 @@ fido = ["dep:locket-fido"]
 [dependencies]
 locket-core.workspace = true
 locket-hibp.workspace = true
-# Auto-type goes through the RemoteDesktop portal; same ashpd generation
-# libcosmic already carries, so this adds no second copy.
+# Auto-type goes through the RemoteDesktop portal. 0.13 is newer than the
+# 0.12 libcosmic links (and the 0.11 rfd links), so this is a third copy of
+# ashpd in the build; chosen for 0.13's per-portal features (d50a24b).
 ashpd = { version = "0.13", default-features = false, features = [
     "tokio",
     # 0.13 gates each portal behind its own feature; auto-type needs this one.
