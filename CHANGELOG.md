@@ -4,6 +4,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-11-01
+
 ### Fixed
 
 - The search field's clear button appears only once there is text to
@@ -946,7 +948,8 @@ scripts/locket-setup            # reinstalls under the new id
 - `ssh-add -x` and `-X` work: the lock passphrase is kept and compared in
   constant time.
 
-[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.1...HEAD
+[3.2.1]: https://github.com/Magnetar-OS/locket/compare/v3.2.0...v3.2.1
 [3.2.0]: https://github.com/Magnetar-OS/locket/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/Magnetar-OS/locket/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/Magnetar-OS/locket/compare/v2.1.1...v3.0.0
