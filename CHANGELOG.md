@@ -4,6 +4,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Fixed
+
+- The search field's clear button appears only once there is text to
+  clear, as in Envelope and Circle; an empty field no longer carries it.
+
 ## [3.2.0] - 2026-11-01
 
 ### Changed

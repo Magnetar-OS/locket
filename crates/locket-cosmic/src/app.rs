@@ -16,6 +16,7 @@ use cosmic::iced::keyboard::{Key, Modifiers, key::Physical};
 use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::prelude::*;
 use cosmic::widget::{self, menu, nav_bar};
+use cosmic_ext_widgets::search_field;
 use locket_core::{
     SecretString, Totp, Vault,
     crypto::KdfParams,
@@ -1272,13 +1273,13 @@ impl App {
         let category = self.category();
         // Say what is being searched. "Search secrets" on a filtered category
         // implies it searches everything, which it does not.
-        let search = widget::search_input(
+        let search = search_field(
             fl!("search-placeholder", category = category.label()),
             &self.search,
+            Message::SearchChanged(String::new()),
         )
         .id(SEARCH_ID.clone())
-        .on_input(Message::SearchChanged)
-        .on_clear(Message::SearchChanged(String::new()));
+        .on_input(Message::SearchChanged);
 
         let list: Element<'_, Message> = if items.is_empty() {
             // An empty state should say which emptiness this is, and offer the
