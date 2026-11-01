@@ -59,7 +59,7 @@ rustix = { version = "1", features = ["process"] }
 # --- localization ---
 i18n-embed = { version = "0.16", features = ["fluent-system", "desktop-requester"] }
 i18n-embed-fl = "0.10"
-rust-embed = "8.12"
+rust-embed = "8.13"
 
 # Only for opening the About page's links: its double fork, without the
 # systemd launching the applet needs.
@@ -68,7 +68,7 @@ cosmic-launch = { git = "https://github.com/pop-os/libcosmic", default-features 
 # `search_field`: libcosmic's search field with a clear button only while
 # there is text. Consumed by tag; it unifies with the libcosmic below, whose
 # default features this crate's own list already covers.
-cosmic-ext-widgets = { git = "https://github.com/Magnetar-OS/cosmic-ext-widgets.git", tag = "v1.3.0" }
+cosmic-ext-widgets = { git = "https://github.com/Magnetar-OS/cosmic-ext-widgets.git", tag = "v1.3.1" }
 
 [dependencies.libcosmic]
 # No `rev`: every COSMIC application tracks the default branch and pins the

@@ -1233,7 +1233,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "locket-agent"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "futures-util",
  "getrandom",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "locket-core"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "argon2",
  "base32",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "locket-import"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "base64ct",
  "csv",
@@ -1306,14 +1306,14 @@ dependencies = [
 
 [[package]]
 name = "locket-ipc"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "locket-secret"
-version = "3.2.0"
+version = "3.2.1"
 dependencies = [
  "aes",
  "cbc",

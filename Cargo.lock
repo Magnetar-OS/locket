@@ -1375,8 +1375,8 @@ dependencies = [
 
 [[package]]
 name = "cosmic-ext-widgets"
-version = "1.3.0"
-source = "git+https://github.com/Magnetar-OS/cosmic-ext-widgets.git?tag=v1.3.0#e30376679f4ee8071461c4fb57388234062324f6"
+version = "1.3.1"
+source = "git+https://github.com/Magnetar-OS/cosmic-ext-widgets.git?tag=v1.3.1#32ef67792e6b9c9cd1cafae7c599e456c30b075d"
 dependencies = [
  "iced_accessibility",
  "libcosmic",

@@ -4,6 +4,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Built on cosmic-ext-widgets 1.3.1 and the latest releases of its
+  dependencies: tokio 1.54 and rust-embed 8.13.
+
 ## [3.2.1] - 2026-11-01
 
 ### Fixed
