@@ -11,6 +11,11 @@
       "pattern": "\\[\\[package\\]\\]\\nname = \"locket-[a-z]+\"\\nversion = \"(.+)\"",
       "all": true
     },
+    {
+      "path": "fuzz/Cargo.lock",
+      "pattern": "\\[\\[package\\]\\]\\nname = \"locket-[a-z]+\"\\nversion = \"(.+)\"",
+      "all": true
+    },
     "res/com.magnetaros.Locket.metainfo.xml",
     {
       "path": "extension/manifest.json",
