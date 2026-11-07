@@ -4,6 +4,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+## [3.2.3] - 2026-11-07
+
 ### Changed
 
 - Rebuilt against the current COSMIC libraries (libcosmic `dd108aa`).
@@ -960,7 +962,8 @@ scripts/locket-setup            # reinstalls under the new id
 - `ssh-add -x` and `-X` work: the lock passphrase is kept and compared in
   constant time.
 
-[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.2...HEAD
+[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.3...HEAD
+[3.2.3]: https://github.com/Magnetar-OS/locket/compare/v3.2.2...v3.2.3
 [3.2.2]: https://github.com/Magnetar-OS/locket/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/Magnetar-OS/locket/compare/v3.2.0...v3.2.1
 [3.2.0]: https://github.com/Magnetar-OS/locket/compare/v3.1.0...v3.2.0
