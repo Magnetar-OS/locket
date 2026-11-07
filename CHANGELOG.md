@@ -4,6 +4,10 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Built on zbus 6, as libcosmic now is.
+
 ## [3.2.2] - 2026-11-01
 
 ### Changed

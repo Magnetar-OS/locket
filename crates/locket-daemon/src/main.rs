@@ -244,7 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (prompt_tx, prompt_rx) = tokio::sync::mpsc::channel(8);
     state.lock().await.prompts = Some(prompt_tx);
 
-    let connection = zbus::connection::Builder::session()?.build().await?;
+    let connection = zbus::connection::Builder::session().build().await?;
     state.lock().await.notifications = Some(connection.clone());
     register_objects(connection.object_server(), &state).await?;
     spawn_upkeep(&connection, &state);
@@ -287,18 +287,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connection
             .request_name_with_flags(
                 "org.freedesktop.impl.portal.desktop.locket",
-                RequestNameFlags::AllowReplacement.into(),
+                RequestNameFlags::ALLOW_REPLACEMENT,
             )
             .await?;
         tracing::info!("serving org.freedesktop.impl.portal.Secret");
     }
 
-    // AllowReplacement lets a newer locketd — or the user's real keyring —
+    // ALLOW_REPLACEMENT lets a newer locketd — or the user's real keyring —
     // take the name back without a manual kill.
     let request_flags = if args.replace_keyring {
-        RequestNameFlags::AllowReplacement | RequestNameFlags::ReplaceExisting
+        RequestNameFlags::ALLOW_REPLACEMENT | RequestNameFlags::REPLACE_EXISTING
     } else {
-        RequestNameFlags::AllowReplacement.into()
+        RequestNameFlags::ALLOW_REPLACEMENT
     };
     connection
         .request_name_with_flags(bus_name.as_str(), request_flags)

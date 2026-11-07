@@ -40,8 +40,7 @@ use locket_core::{
 };
 use sha2::Sha256;
 use uuid::Uuid;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue};
-use zbus::{fdo, interface};
+use zbus::{OwnedObjectPath, OwnedVariant, fdo, interface};
 use zeroize::Zeroizing;
 
 use crate::service::{ServiceState, SharedState};
@@ -302,11 +301,11 @@ impl SecretPortal {
         &self,
         _handle: OwnedObjectPath,
         app_id: String,
-        fd: zbus::zvariant::OwnedFd,
-        _options: HashMap<String, OwnedValue>,
+        fd: zbus::OwnedFd,
+        _options: HashMap<String, OwnedVariant>,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
-    ) -> fdo::Result<(u32, HashMap<String, OwnedValue>)> {
+    ) -> fdo::Result<(u32, HashMap<String, OwnedVariant>)> {
         // The app id is only as good as whoever names it. The daemon shares
         // one connection between this backend and the Secret Service, so any
         // peer that can reach the one can call the other; only the portal

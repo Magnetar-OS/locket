@@ -13,7 +13,7 @@ mod protocol;
 
 use locket_secret::frontend::{self, Question};
 use protocol::{Match, Request, Response};
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 /// The Secret Service, from the client side.
 #[zbus::proxy(
@@ -25,8 +25,8 @@ trait SecretService {
     fn open_session(
         &self,
         algorithm: &str,
-        input: &zbus::zvariant::Value<'_>,
-    ) -> zbus::Result<(zbus::zvariant::OwnedValue, OwnedObjectPath)>;
+        input: &zbus::Variant<'_>,
+    ) -> zbus::Result<(zbus::OwnedVariant, OwnedObjectPath)>;
 
     fn search_items(
         &self,
@@ -55,13 +55,13 @@ trait SecretItem {
 trait SecretCollection {
     fn create_item(
         &self,
-        properties: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+        properties: std::collections::HashMap<&str, zbus::Variant<'_>>,
         secret: &SecretStruct,
         replace: bool,
     ) -> zbus::Result<(OwnedObjectPath, OwnedObjectPath)>;
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, zbus::zvariant::Type)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, zbus::Type)]
 struct SecretStruct {
     session: OwnedObjectPath,
     parameters: Vec<u8>,
@@ -94,7 +94,7 @@ impl<P: Presence> Host<P> {
         let service = SecretServiceProxy::new(&connection).await.ok()?;
         // `plain` is fine: this is a local client on the user's own bus, and
         // the extension is the untrusted party here, not the transport.
-        let empty = zbus::zvariant::Value::from("");
+        let empty = zbus::Variant::from("");
         let (_out, session) = service.open_session("plain", &empty).await.ok()?;
         Some(Self {
             connection,
@@ -106,9 +106,7 @@ impl<P: Presence> Host<P> {
     async fn item(&self, path: &OwnedObjectPath) -> Option<SecretItemProxy<'_>> {
         SecretItemProxy::builder(&self.connection)
             .destination("org.freedesktop.secrets")
-            .ok()?
             .path(path.clone())
-            .ok()?
             .build()
             .await
             .ok()
@@ -318,15 +316,10 @@ impl<P: Presence> Host<P> {
         // way locket's own importers attribute — so the next Search finds it.
         let collection = match SecretCollectionProxy::builder(&self.connection)
             .path("/org/freedesktop/secrets/aliases/default")
+            .build()
+            .await
         {
-            Ok(builder) => match builder.build().await {
-                Ok(collection) => collection,
-                Err(e) => {
-                    return Response::Error {
-                        message: format!("no default collection: {e}"),
-                    };
-                }
-            },
+            Ok(collection) => collection,
             Err(e) => {
                 return Response::Error {
                     message: format!("no default collection: {e}"),
@@ -341,15 +334,15 @@ impl<P: Presence> Host<P> {
             attributes.insert("username", username);
         }
         attributes.insert("xdg:schema", "org.freedesktop.Secret.Generic");
-        let mut properties: std::collections::HashMap<&str, zbus::zvariant::Value<'_>> =
+        let mut properties: std::collections::HashMap<&str, zbus::Variant<'_>> =
             std::collections::HashMap::new();
         properties.insert(
             "org.freedesktop.Secret.Item.Label",
-            zbus::zvariant::Value::from(label.as_str()),
+            zbus::Variant::from(label.as_str()),
         );
         properties.insert(
             "org.freedesktop.Secret.Item.Attributes",
-            zbus::zvariant::Value::from(attributes),
+            zbus::Variant::from(attributes),
         );
 
         match collection.create_item(properties, &secret, false).await {

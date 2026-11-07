@@ -21,7 +21,7 @@ use locket_core::{
     Vault,
     model::{Collection, Item, ItemKind, attr},
 };
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 use crate::{Error, Result, service::SecretStruct};
 
@@ -34,8 +34,8 @@ trait SourceService {
     fn open_session(
         &self,
         algorithm: &str,
-        input: &zbus::zvariant::Value<'_>,
-    ) -> zbus::Result<(zbus::zvariant::OwnedValue, OwnedObjectPath)>;
+        input: &zbus::Variant<'_>,
+    ) -> zbus::Result<(zbus::OwnedVariant, OwnedObjectPath)>;
 
     #[zbus(property)]
     fn collections(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
@@ -272,16 +272,14 @@ async fn import_over(
 ) -> Result<ImportSummary> {
     let service = SourceServiceProxy::builder(connection)
         .destination(bus_name.to_owned())
-        .map_err(Error::Dbus)?
         .path("/org/freedesktop/secrets")
-        .map_err(Error::Dbus)?
         .build()
         .await?;
 
     // `plain` keeps the importer simple; this is a local client on the user's
     // own session bus, and the DH transport protects against nothing extra
     // here that the bus itself does not already.
-    let empty = zbus::zvariant::Value::from("");
+    let empty = zbus::Variant::from("");
     let (_output, session) = service
         .open_session("plain", &empty)
         .await
@@ -292,9 +290,7 @@ async fn import_over(
     for collection_path in service.collections().await? {
         let collection = SourceCollectionProxy::builder(connection)
             .destination(bus_name.to_owned())
-            .map_err(Error::Dbus)?
             .path(collection_path.clone())
-            .map_err(Error::Dbus)?
             .build()
             .await?;
 
@@ -340,9 +336,7 @@ async fn import_over(
         for item_path in item_paths {
             let item_proxy = SourceItemProxy::builder(connection)
                 .destination(bus_name.to_owned())
-                .map_err(Error::Dbus)?
                 .path(item_path.clone())
-                .map_err(Error::Dbus)?
                 .build()
                 .await?;
 

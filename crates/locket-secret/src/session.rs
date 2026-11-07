@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 use zeroize::Zeroizing;
 
 use crate::{

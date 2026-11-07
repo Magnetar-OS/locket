@@ -27,7 +27,7 @@ use crate::service::{
 use locket_core::Vault;
 use locket_core::crypto::KdfParams;
 use tokio::sync::Mutex;
-use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
+use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 
 /// A `dbus-daemon` that lives as long as this value.
 pub struct PrivateBus {
@@ -105,7 +105,6 @@ impl PrivateBus {
     /// A new connection to this bus.
     pub async fn connect(&self) -> zbus::Connection {
         zbus::connection::Builder::address(self.address.as_str())
-            .expect("a valid bus address")
             .build()
             .await
             .expect("connect to the private bus")
@@ -281,10 +280,10 @@ impl Client {
 
     /// Open a `plain` session.
     pub async fn open_session(&self) -> OwnedObjectPath {
-        let (_, path): (OwnedValue, OwnedObjectPath) = self
+        let (_, path): (OwnedVariant, OwnedObjectPath) = self
             .service()
             .await
-            .call("OpenSession", &("plain", Value::from("")))
+            .call("OpenSession", &("plain", Variant::from("")))
             .await
             .expect("OpenSession");
         path

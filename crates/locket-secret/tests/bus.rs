@@ -58,7 +58,7 @@ async fn the_portal_master_cannot_be_deleted_or_rewritten_over_the_bus() {
         .proxy(path.as_str(), "org.freedesktop.Secret.Item")
         .await;
 
-    let deleted: zbus::Result<zbus::zvariant::OwnedObjectPath> = item.call("Delete", &()).await;
+    let deleted: zbus::Result<zbus::OwnedObjectPath> = item.call("Delete", &()).await;
     assert!(
         deleted.is_err(),
         "the portal master was deleted over the bus"
@@ -164,7 +164,7 @@ async fn locking_takes_the_item_objects_off_the_bus() {
 #[tokio::test]
 async fn aliases_follow_their_collection() {
     use std::collections::HashMap;
-    use zbus::zvariant::{OwnedObjectPath, Value};
+    use zbus::{OwnedObjectPath, Variant};
 
     let daemon = Daemon::start().await;
     let client = daemon.client().await;
@@ -173,7 +173,7 @@ async fn aliases_follow_their_collection() {
     let mut properties = HashMap::new();
     properties.insert(
         "org.freedesktop.Secret.Collection.Label",
-        Value::from("Work"),
+        Variant::from("Work"),
     );
     let (work, _prompt): (OwnedObjectPath, OwnedObjectPath) = service
         .call("CreateCollection", &(properties.clone(), "work"))
@@ -231,7 +231,7 @@ fn support_passphrase() -> &'static str {
 #[tokio::test]
 async fn a_store_that_did_not_reach_the_disk_is_an_error() {
     use std::collections::HashMap;
-    use zbus::zvariant::{OwnedObjectPath, Value};
+    use zbus::{OwnedObjectPath, Variant};
 
     let daemon = Daemon::start().await;
     let client = daemon.client().await;
@@ -253,11 +253,11 @@ async fn a_store_that_did_not_reach_the_disk_is_an_error() {
     let mut properties = HashMap::new();
     properties.insert(
         "org.freedesktop.Secret.Item.Label",
-        Value::from("from an app"),
+        Variant::from("from an app"),
     );
     properties.insert(
         "org.freedesktop.Secret.Item.Attributes",
-        Value::from(attributes),
+        Variant::from(attributes),
     );
     let secret = (session, Vec::<u8>::new(), b"s3cret".to_vec(), "text/plain");
     let stored: zbus::Result<(OwnedObjectPath, OwnedObjectPath)> = client
@@ -296,7 +296,7 @@ async fn a_store_that_did_not_reach_the_disk_is_an_error() {
 #[tokio::test]
 async fn errors_carry_the_secret_service_names() {
     use std::collections::HashMap;
-    use zbus::zvariant::OwnedObjectPath;
+    use zbus::OwnedObjectPath;
 
     let daemon = Daemon::start().await;
     let client = daemon.client().await;
@@ -331,7 +331,7 @@ async fn errors_carry_the_secret_service_names() {
 #[tokio::test]
 async fn a_prompt_returns_before_the_person_answers() {
     use futures_util::StreamExt as _;
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+    use zbus::{OwnedObjectPath, OwnedVariant};
 
     let daemon = Daemon::start().await;
     let client = daemon.client().await;
@@ -372,7 +372,7 @@ async fn a_prompt_returns_before_the_person_answers() {
         .await
         .expect("Completed never arrived")
         .unwrap();
-    let (dismissed, _result): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+    let (dismissed, _result): (bool, OwnedVariant) = signal.body().deserialize().unwrap();
     assert!(!dismissed);
     answer.await.unwrap();
 }
@@ -414,7 +414,7 @@ async fn sessions_end_with_their_client_and_with_lock_service() {
 #[tokio::test]
 async fn one_client_cannot_use_anothers_session() {
     use std::collections::HashMap;
-    use zbus::zvariant::OwnedObjectPath;
+    use zbus::OwnedObjectPath;
 
     let daemon = Daemon::start().await;
     let owner = daemon.client().await;
@@ -466,7 +466,7 @@ async fn a_late_unlock_does_not_replace_the_open_vault() {
 #[tokio::test]
 async fn dismissing_the_unlock_dialog_refuses_the_prompt() {
     use futures_util::StreamExt as _;
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+    use zbus::{OwnedObjectPath, OwnedVariant};
 
     let daemon = Daemon::start().await;
     let client = daemon.client().await;
@@ -505,7 +505,7 @@ async fn dismissing_the_unlock_dialog_refuses_the_prompt() {
         .await
         .expect("the dismissed prompt was not answered")
         .unwrap();
-    let (dismissed, _): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+    let (dismissed, _): (bool, OwnedVariant) = signal.body().deserialize().unwrap();
     assert!(dismissed);
 }
 
@@ -552,13 +552,13 @@ async fn deletions_and_edits_are_announced() {
         .await
         .expect("no ItemChanged for a new label");
 
-    let _: zbus::zvariant::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
+    let _: zbus::OwnedObjectPath = item.call("Delete", &()).await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), deleted.next())
         .await
         .expect("no ItemDeleted");
 
     // The object went with it, so a stale client's second Delete fails.
-    let again: zbus::Result<zbus::zvariant::OwnedObjectPath> = item.call("Delete", &()).await;
+    let again: zbus::Result<zbus::OwnedObjectPath> = item.call("Delete", &()).await;
     assert!(again.is_err(), "deleting a deleted item succeeded");
 }
 
@@ -569,7 +569,7 @@ async fn deletions_and_edits_are_announced() {
 async fn only_the_portal_frontend_gets_an_applications_key() {
     use std::collections::HashMap;
     use std::io::Read as _;
-    use zbus::zvariant::{Fd, OwnedObjectPath, OwnedValue, Value};
+    use zbus::{Fd, OwnedObjectPath, OwnedVariant, Variant};
 
     let daemon = Daemon::start().await;
     daemon
@@ -586,7 +586,7 @@ async fn only_the_portal_frontend_gets_an_applications_key() {
         let (mut reader, writer) = std::io::pipe().unwrap();
         let handle =
             OwnedObjectPath::try_from("/org/freedesktop/portal/desktop/request/1").unwrap();
-        let (code, _): (u32, HashMap<String, OwnedValue>) = client
+        let (code, _): (u32, HashMap<String, OwnedVariant>) = client
             .proxy(
                 "/org/freedesktop/portal/desktop",
                 "org.freedesktop.impl.portal.Secret",
@@ -598,7 +598,7 @@ async fn only_the_portal_frontend_gets_an_applications_key() {
                     handle,
                     "org.example.App",
                     Fd::from(&writer),
-                    HashMap::<String, Value>::new(),
+                    HashMap::<String, Variant>::new(),
                 ),
             )
             .await
@@ -629,21 +629,18 @@ async fn only_the_portal_frontend_gets_an_applications_key() {
 /// collection, addressed by its alias.
 async fn create_item(
     client: &locket_secret::testing::Client,
-    session: &zbus::zvariant::OwnedObjectPath,
-) -> zbus::Result<(
-    zbus::zvariant::OwnedObjectPath,
-    zbus::zvariant::OwnedObjectPath,
-)> {
+    session: &zbus::OwnedObjectPath,
+) -> zbus::Result<(zbus::OwnedObjectPath, zbus::OwnedObjectPath)> {
     use std::collections::HashMap;
-    use zbus::zvariant::Value;
+    use zbus::Variant;
 
     let mut attributes = HashMap::new();
     attributes.insert("service", "example");
     let mut properties = HashMap::new();
-    properties.insert("org.freedesktop.Secret.Item.Label", Value::from("stored"));
+    properties.insert("org.freedesktop.Secret.Item.Label", Variant::from("stored"));
     properties.insert(
         "org.freedesktop.Secret.Item.Attributes",
-        Value::from(attributes),
+        Variant::from(attributes),
     );
     let secret = (session, Vec::<u8>::new(), b"s3cret".to_vec(), "text/plain");
     client
@@ -691,7 +688,7 @@ async fn a_store_into_a_locked_vault_is_refused_at_once_by_name() {
 #[tokio::test]
 async fn a_locked_store_goes_through_the_unlock_prompt_and_lands() {
     use futures_util::StreamExt as _;
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+    use zbus::{OwnedObjectPath, OwnedVariant};
 
     let daemon = Daemon::start().await;
     let client = daemon.client().await;
@@ -727,7 +724,7 @@ async fn a_locked_store_goes_through_the_unlock_prompt_and_lands() {
         .await
         .expect("Completed never arrived")
         .unwrap();
-    let (dismissed, result): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+    let (dismissed, result): (bool, OwnedVariant) = signal.body().deserialize().unwrap();
     assert!(!dismissed);
     // libsecret reads the result as `ao`, the objects now unlocked.
     let result = Vec::<OwnedObjectPath>::try_from(result).unwrap();
@@ -776,7 +773,7 @@ async fn requests_share_one_unlock_dialog_and_its_answer() {
     use futures_util::StreamExt as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+    use zbus::{OwnedObjectPath, OwnedVariant};
 
     let daemon = Daemon::start().await;
     let client = daemon.client().await;
@@ -813,7 +810,7 @@ async fn requests_share_one_unlock_dialog_and_its_answer() {
             .await
             .expect("a request was left to wait out a dialog of its own")
             .unwrap();
-        let (dismissed, _): (bool, OwnedValue) = signal.body().deserialize().unwrap();
+        let (dismissed, _): (bool, OwnedVariant) = signal.body().deserialize().unwrap();
         assert!(dismissed);
     }
     assert!(started.elapsed() < patience);
@@ -913,7 +910,7 @@ async fn a_lock_is_announced_with_its_reason() {
 /// left the object published for the daemon's lifetime.
 #[tokio::test]
 async fn a_prompt_goes_with_the_client_that_asked_for_it() {
-    use zbus::zvariant::OwnedObjectPath;
+    use zbus::OwnedObjectPath;
 
     let daemon = Daemon::start().await;
     daemon
@@ -945,7 +942,7 @@ async fn a_prompt_goes_with_the_client_that_asked_for_it() {
 #[tokio::test]
 async fn a_dismissed_prompt_completes_once() {
     use futures_util::StreamExt as _;
-    use zbus::zvariant::OwnedObjectPath;
+    use zbus::OwnedObjectPath;
 
     let daemon = Daemon::start().await;
     daemon

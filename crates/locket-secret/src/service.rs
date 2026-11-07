@@ -24,8 +24,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value};
-use zbus::{ObjectServer, fdo, interface};
+use zbus::{
+    ObjectPath, ObjectServer, OwnedObjectPath, OwnedVariant, Type, Variant, fdo, interface,
+};
 
 use crate::error::SecretError;
 use crate::{Error, Result, SessionStore};
@@ -73,7 +74,7 @@ fn caller(header: &zbus::message::Header<'_>) -> Option<String> {
 }
 
 /// The `(oayays)` struct every secret crosses the bus in.
-#[derive(Debug, Clone, Serialize, Deserialize, Type, Value, OwnedValue)]
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Variant, OwnedVariant)]
 pub struct SecretStruct {
     pub session: OwnedObjectPath,
     /// Algorithm-dependent parameters — the AES-CBC IV, for DH sessions.
@@ -659,14 +660,14 @@ pub fn parse_item_path(path: &str) -> Option<(Uuid, Uuid)> {
 // Property extraction
 // ---------------------------------------------------------------------------
 
-fn take_string(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+fn take_string(props: &HashMap<String, OwnedVariant>, key: &str) -> Option<String> {
     props
         .get(key)
         .and_then(|v| String::try_from(v.clone()).ok())
 }
 
 fn take_attributes(
-    props: &HashMap<String, OwnedValue>,
+    props: &HashMap<String, OwnedVariant>,
     key: &str,
 ) -> std::collections::BTreeMap<String, String> {
     props
@@ -722,10 +723,10 @@ impl SecretService {
     async fn open_session(
         &self,
         algorithm: String,
-        input: OwnedValue,
+        input: OwnedVariant,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> Result<(OwnedValue, OwnedObjectPath), SecretError> {
+    ) -> Result<(OwnedVariant, OwnedObjectPath), SecretError> {
         // For `plain` the input is an empty string, so a failed byte-array
         // conversion is expected rather than an error.
         let peer_public: Option<Vec<u8>> = Vec::<u8>::try_from(input).ok();
@@ -739,11 +740,10 @@ impl SecretService {
         };
 
         let output = if output.is_empty() {
-            OwnedValue::try_from(Value::from(String::new()))
+            OwnedVariant::try_from(Variant::from(String::new()))
         } else {
-            OwnedValue::try_from(Value::from(output))
-        }
-        .map_err(zbus::Error::from)?;
+            OwnedVariant::try_from(Variant::from(output))
+        }?;
 
         sync_objects(server, &self.state).await?;
         Ok((output, session.path))
@@ -751,7 +751,7 @@ impl SecretService {
 
     async fn create_collection(
         &self,
-        properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedVariant>,
         alias: String,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
@@ -1071,7 +1071,7 @@ impl CollectionIface {
     /// `gnome-keyring`'s Chromium integration, and every `libsecret` write.
     async fn create_item(
         &self,
-        properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedVariant>,
         secret: SecretStruct,
         replace: bool,
         #[zbus(object_server)] server: &ObjectServer,
@@ -1558,7 +1558,7 @@ impl PromptIface {
                 return;
             }
             let result = if granted { objects } else { Vec::new() };
-            match OwnedValue::try_from(Value::from(result)) {
+            match OwnedVariant::try_from(Variant::from(result)) {
                 Ok(result) => {
                     if let Err(e) = PromptIface::completed(&emitter, !granted, result).await {
                         tracing::warn!("could not report a prompt's outcome: {e}");
@@ -1577,8 +1577,7 @@ impl PromptIface {
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> Result<(), SecretError> {
         if PromptIface::claim(&self.finished) {
-            let empty = OwnedValue::try_from(Value::from(Vec::<OwnedObjectPath>::new()))
-                .map_err(zbus::Error::from)?;
+            let empty = OwnedVariant::try_from(Variant::from(Vec::<OwnedObjectPath>::new()))?;
             PromptIface::completed(&emitter, true, empty).await?;
         }
         PromptIface::retire(&self.state, server, &self.path).await;
@@ -1589,7 +1588,7 @@ impl PromptIface {
     async fn completed(
         emitter: &SignalEmitter<'_>,
         dismissed: bool,
-        result: OwnedValue,
+        result: OwnedVariant,
     ) -> zbus::Result<()>;
 }
 

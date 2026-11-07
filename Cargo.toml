@@ -51,7 +51,10 @@ locket-tpm = { path = "crates/locket-tpm", version = "3.2.2" }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
-zbus = { version = "5.19", default-features = false, features = ["tokio"] }
+# zbus 6 put its macros behind features: `proxy` for `#[proxy]`, `service`
+# for `#[interface]`. Without them a crate builds only beside libcosmic,
+# whose own zbus turns them on.
+zbus = { version = "6.2", default-features = false, features = ["tokio", "proxy", "service"] }
 
 # --- Crypto ----------------------------------------------------------------
 # One RustCrypto generation throughout (digest 0.11 / cipher 0.5 / aead 0.6 /
@@ -99,6 +102,12 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # agent's tests passed, and vaults and SSH keys had been read both ways
 # against the released 2.1.1 on temporary vaults (ssh-key 0.7.0-rc.11 of
 # 2026-06-29, rsa 0.10.0-rc.19 of 2026-10-06).
+#
+# rc.19 is also as far as rsa can go until ssh-key moves (checked 2026-11-07,
+# against rsa 0.10.0-rc.22): from rc.20 on, sha2 is a required dependency
+# and no longer a feature, while ssh-key 0.7.0-rc.11 still asks for the
+# `sha2` feature, so no newer rsa resolves beside it. rc.22 also put
+# `pkcs1v15` behind a feature of that name, which the agent will need then.
 #
 # `=` because release candidates promise each other nothing: `cargo update`
 # must not carry the tree from one to the next unreviewed, and ssh-key's own

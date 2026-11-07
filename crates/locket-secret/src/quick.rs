@@ -15,7 +15,7 @@
 //! * **[`secret_of`] fetches exactly one**, by a path a previous search
 //!   returned, at the moment the person asks for it.
 
-use zbus::zvariant::OwnedObjectPath;
+use zbus::OwnedObjectPath;
 
 #[zbus::proxy(
     interface = "org.freedesktop.Secret.Service",
@@ -26,8 +26,8 @@ trait QuickService {
     fn open_session(
         &self,
         algorithm: &str,
-        input: &zbus::zvariant::Value<'_>,
-    ) -> zbus::Result<(zbus::zvariant::OwnedValue, OwnedObjectPath)>;
+        input: &zbus::Variant<'_>,
+    ) -> zbus::Result<(zbus::OwnedVariant, OwnedObjectPath)>;
 
     fn search_items(
         &self,
@@ -46,7 +46,7 @@ trait QuickItem {
     fn label(&self) -> zbus::Result<String>;
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, zbus::zvariant::Type)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, zbus::Type)]
 struct SecretStruct {
     session: OwnedObjectPath,
     parameters: Vec<u8>,
@@ -114,9 +114,7 @@ async fn service(connection: &zbus::Connection) -> Option<QuickServiceProxy<'sta
     let name = manager.inner().destination().to_owned();
     QuickServiceProxy::builder(connection)
         .destination(name)
-        .ok()?
         .path("/org/freedesktop/secrets")
-        .ok()?
         .build()
         .await
         .ok()
@@ -149,15 +147,12 @@ async fn search_on(connection: &zbus::Connection, needle: &str, limit: usize) ->
         if found.len() >= limit {
             break;
         }
-        let Ok(builder) = QuickItemProxy::builder(connection)
+        let Ok(item) = QuickItemProxy::builder(connection)
             .destination(service.inner().destination().to_owned())
+            .path(path.clone())
+            .build()
+            .await
         else {
-            continue;
-        };
-        let Ok(builder) = builder.path(path.clone()) else {
-            continue;
-        };
-        let Ok(item) = builder.build().await else {
             continue;
         };
         let label = item.label().await.unwrap_or_default();
@@ -185,15 +180,13 @@ async fn search_on(connection: &zbus::Connection, needle: &str, limit: usize) ->
 pub async fn secret_of(path: &str) -> Option<locket_core::SecretString> {
     let connection = zbus::Connection::session().await.ok()?;
     let service = service(&connection).await?;
-    let empty = zbus::zvariant::Value::from("");
+    let empty = zbus::Variant::from("");
     let (_out, session) = service.open_session("plain", &empty).await.ok()?;
 
     let path = OwnedObjectPath::try_from(path).ok()?;
     let item = QuickItemProxy::builder(&connection)
         .destination(service.inner().destination().to_owned())
-        .ok()?
         .path(path)
-        .ok()?
         .build()
         .await
         .ok()?;

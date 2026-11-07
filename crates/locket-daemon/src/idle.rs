@@ -98,11 +98,11 @@ trait LoginManager {
     #[zbus(signal)]
     fn prepare_for_sleep(&self, start: bool) -> zbus::Result<()>;
 
-    fn get_session(&self, session_id: &str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+    fn get_session(&self, session_id: &str) -> zbus::Result<zbus::OwnedObjectPath>;
 
-    fn get_session_by_pid(&self, pid: u32) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+    fn get_session_by_pid(&self, pid: u32) -> zbus::Result<zbus::OwnedObjectPath>;
 
-    fn get_user(&self, uid: u32) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+    fn get_user(&self, uid: u32) -> zbus::Result<zbus::OwnedObjectPath>;
 }
 
 /// The per-user object, for the one property that survives running outside a
@@ -114,7 +114,7 @@ trait LoginManager {
 trait LoginUser {
     /// The user's primary graphical session, as `(id, object path)`.
     #[zbus(property)]
-    fn display(&self) -> zbus::Result<(String, zbus::zvariant::OwnedObjectPath)>;
+    fn display(&self) -> zbus::Result<(String, zbus::OwnedObjectPath)>;
 }
 
 #[zbus::proxy(
@@ -153,7 +153,7 @@ pub async fn lock_with_session(state: SharedState, notify: bool) -> zbus::Result
             tracing::info!(session = %path.as_str(), "following the session's lock state");
             Some(
                 LoginSessionProxy::builder(&connection)
-                    .path(path)?
+                    .path(path)
                     .build()
                     .await?,
             )
@@ -235,7 +235,7 @@ async fn lock(state: &SharedState, reason: LockReason, why: &str, notify: bool) 
 /// environment, and `GetSessionByPID` answers "does not belong to any known
 /// session" — measured on a live COSMIC session, where it left the daemon
 /// following suspend only and silently not following the screen lock at all.
-async fn session_path(manager: &LoginManagerProxy<'_>) -> Option<zbus::zvariant::OwnedObjectPath> {
+async fn session_path(manager: &LoginManagerProxy<'_>) -> Option<zbus::OwnedObjectPath> {
     if let Ok(id) = std::env::var("XDG_SESSION_ID")
         && let Ok(path) = manager.get_session(&id).await
     {
@@ -250,7 +250,6 @@ async fn session_path(manager: &LoginManagerProxy<'_>) -> Option<zbus::zvariant:
     let user = manager.get_user(uid).await.ok()?;
     let user = LoginUserProxy::builder(manager.inner().connection())
         .path(user)
-        .ok()?
         .build()
         .await
         .ok()?;

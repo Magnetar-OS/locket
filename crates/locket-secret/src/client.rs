@@ -60,13 +60,12 @@ pub async fn connect() -> Option<(Connection, ManagerProxy<'static>)> {
 /// vault — the applet's quick search — must use this one name for both.
 pub(crate) async fn manager_on(connection: &Connection) -> Option<ManagerProxy<'static>> {
     for name in BUS_NAMES {
-        let Ok(builder) = ManagerProxy::builder(connection).destination(*name) else {
-            continue;
-        };
-        let Ok(builder) = builder.path(MANAGER_PATH) else {
-            continue;
-        };
-        let Ok(proxy) = builder.build().await else {
+        let Ok(proxy) = ManagerProxy::builder(connection)
+            .destination(*name)
+            .path(MANAGER_PATH)
+            .build()
+            .await
+        else {
             continue;
         };
         // Building a proxy succeeds even for an absent service, so probe a
@@ -103,11 +102,10 @@ pub async fn reload_running(vault: &std::path::Path) -> Option<zbus::Result<bool
         let Ok(proxy) = ManagerProxy::builder(&connection)
             .cache_properties(zbus::proxy::CacheProperties::No)
             .destination(*name)
-            .and_then(|b| b.path(MANAGER_PATH))
+            .path(MANAGER_PATH)
+            .build()
+            .await
         else {
-            continue;
-        };
-        let Ok(proxy) = proxy.build().await else {
             continue;
         };
         // Something else may own the name — gnome-keyring, on the freedesktop
