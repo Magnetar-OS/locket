@@ -6,6 +6,7 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Changed
 
+- Rebuilt against the current COSMIC libraries (libcosmic `dd108aa`).
 - Built on zbus 6, as libcosmic now is.
 
 ## [3.2.2] - 2026-11-01
