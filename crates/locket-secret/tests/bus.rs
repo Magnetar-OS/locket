@@ -324,6 +324,57 @@ async fn errors_carry_the_secret_service_names() {
     );
 }
 
+/// The refusals the specification gives a standard name must reach the client
+/// under that name. They went out as `org.freedesktop.zbus.Error` — the name
+/// the error derive gives its catch-all variant whatever it holds — which no
+/// client knows.
+#[tokio::test]
+async fn standard_refusals_carry_the_standard_names() {
+    use locket_core::model::{Item, ItemKind, internal};
+    use zbus::{OwnedObjectPath, OwnedVariant, Variant};
+
+    let daemon = Daemon::start().await;
+    let collection = {
+        let mut state = daemon.state.lock().await;
+        let vault = state.vault.as_mut().unwrap();
+        let item = Item::new(ItemKind::Application, "XDG Secret portal master key")
+            .with_attribute(internal::ATTRIBUTE, internal::PORTAL_MASTER);
+        let collection = vault.data().collections[0].id;
+        vault.add_item(collection, item).unwrap();
+        vault.save().unwrap();
+        locket_secret::service::collection_path(collection)
+    };
+    locket_secret::service::sync_objects(daemon.server.object_server(), &daemon.state)
+        .await
+        .unwrap();
+    let client = daemon.client().await;
+    let service = client.service().await;
+
+    let changed: zbus::Result<OwnedObjectPath> = service.call("ChangeLock", &(&collection,)).await;
+    assert_eq!(
+        locket_secret::testing::error_name(&changed.unwrap_err()),
+        "org.freedesktop.DBus.Error.NotSupported"
+    );
+
+    let opened: zbus::Result<(OwnedVariant, OwnedObjectPath)> = service
+        .call("OpenSession", &("no-such-algorithm", Variant::from("")))
+        .await;
+    assert_eq!(
+        locket_secret::testing::error_name(&opened.unwrap_err()),
+        "org.freedesktop.DBus.Error.NotSupported"
+    );
+
+    let deleted: zbus::Result<OwnedObjectPath> = client
+        .proxy(collection.as_str(), "org.freedesktop.Secret.Collection")
+        .await
+        .call("Delete", &())
+        .await;
+    assert_eq!(
+        locket_secret::testing::error_name(&deleted.unwrap_err()),
+        "org.freedesktop.DBus.Error.AccessDenied"
+    );
+}
+
 /// `Prompt()` returns at once and the outcome arrives by `Completed`. It used
 /// to wait for the person inside the call, and a GDBus client gives up on a
 /// call after 25 seconds by default — an unlock that took longer failed on

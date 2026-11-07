@@ -34,7 +34,7 @@ use crate::{Error, Result, SessionStore};
 /// A standard D-Bus error, for the few answers the Secret Service
 /// specification does not name.
 fn fdo_error(error: fdo::Error) -> SecretError {
-    SecretError::ZBus(zbus::Error::FDO(Box::new(error)))
+    error.into()
 }
 
 /// Announce that an item changed or went away, on its collection's path.
