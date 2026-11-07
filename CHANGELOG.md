@@ -4,6 +4,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+## [3.2.4] - 2026-11-07
+
 ### Changed
 
 - Built on rsa 0.10.0-rc.22 and ashpd 0.14. The SSH agent converts an RSA key
@@ -976,7 +978,8 @@ scripts/locket-setup            # reinstalls under the new id
 - `ssh-add -x` and `-X` work: the lock passphrase is kept and compared in
   constant time.
 
-[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.3...HEAD
+[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.4...HEAD
+[3.2.4]: https://github.com/Magnetar-OS/locket/compare/v3.2.3...v3.2.4
 [3.2.3]: https://github.com/Magnetar-OS/locket/compare/v3.2.2...v3.2.3
 [3.2.2]: https://github.com/Magnetar-OS/locket/compare/v3.2.1...v3.2.2
 [3.2.1]: https://github.com/Magnetar-OS/locket/compare/v3.2.0...v3.2.1
