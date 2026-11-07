@@ -16,7 +16,6 @@ use ashpd::desktop::remote_desktop::{
     StartOptions,
 };
 use ashpd::desktop::{PersistMode, Session};
-use ashpd::enumflags2::BitFlags;
 use locket_core::SecretString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,7 +89,7 @@ async fn type_into(
         .select_devices(
             session,
             SelectDevicesOptions::default()
-                .set_devices(BitFlags::from(DeviceType::Keyboard))
+                .set_devices(DeviceType::KEYBOARD)
                 .set_persist_mode(PersistMode::Application),
         )
         .await
@@ -101,7 +100,7 @@ async fn type_into(
         .map_err(portal_error)?
         .response()
         .map_err(|_| "input access was not granted".to_owned())?;
-    if !devices.devices().contains(DeviceType::Keyboard) {
+    if !devices.devices().contains(DeviceType::KEYBOARD) {
         return Err("the compositor did not grant keyboard access".into());
     }
 

@@ -4,6 +4,20 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Built on rsa 0.10.0-rc.22 and ashpd 0.14. The SSH agent converts an RSA key
+  to sign with itself instead of through ssh-key's rsa feature, which held rsa
+  at rc.19; its signatures verify with OpenSSL.
+
+### Fixed
+
+- The Secret Service refuses with the standard D-Bus error names: NotSupported
+  for ChangeLock and for an unknown session algorithm, AccessDenied for
+  deleting the collection that holds locket's own item, and Failed for
+  anything else without a Secret Service name. They arrived as
+  org.freedesktop.zbus.Error, a name no client recognises.
+
 ## [3.2.3] - 2026-11-07
 
 ### Changed

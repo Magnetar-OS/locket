@@ -27,12 +27,13 @@ fido = ["dep:locket-fido"]
 [dependencies]
 locket-core.workspace = true
 locket-hibp.workspace = true
-# Auto-type goes through the RemoteDesktop portal. 0.13 is newer than the
-# 0.12 libcosmic links (and the 0.11 rfd links), so this is a third copy of
-# ashpd in the build; chosen for 0.13's per-portal features (d50a24b).
-ashpd = { version = "0.13", default-features = false, features = [
+# Auto-type goes through the RemoteDesktop portal. Used only for this app's
+# own portal call, never handed to or from libcosmic, so it is on 0.14 (zbus 6,
+# like the app); libcosmic's 0.13 copy is linked separately until libcosmic
+# moves.
+ashpd = { version = "0.14.0", default-features = false, features = [
     "tokio",
-    # 0.13 gates each portal behind its own feature; auto-type needs this one.
+    # ashpd gates each portal behind its own feature; auto-type needs this one.
     # `screencast` comes with it because `remote_desktop` imports that
     # module's `Stream` type without declaring the feature dependency —
     # upstream oversight, not a portal we use.
