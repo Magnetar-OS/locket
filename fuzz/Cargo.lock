@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "locket-fuzz"
-version = "3.2.4"
+version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "locket-agent",
