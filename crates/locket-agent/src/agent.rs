@@ -1159,8 +1159,7 @@ mod tests {
     fn an_rsa_key_signs_under_the_algorithm_the_client_asked_for() {
         // `ssh-key`'s own signer answers every request with rsa-sha2-512, so
         // this is the regression guard for the `signing` module being wired in.
-        let key =
-            PrivateKey::random(&mut crate::test_rng(), Algorithm::Rsa { hash: None }).unwrap();
+        let key = crate::signing::rsa_identity(2048);
         let pem = key.to_openssh(LineEnding::LF).unwrap();
         let agent_key = AgentKey::from_openssh(&pem, None, Some("rsa")).unwrap();
         let blob = agent_key.public_blob.clone();

@@ -103,27 +103,25 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # against the released 2.1.1 on temporary vaults (ssh-key 0.7.0-rc.11 of
 # 2026-06-29, rsa 0.10.0-rc.19 of 2026-10-06).
 #
-# rc.19 is also as far as rsa can go until ssh-key moves (checked 2026-11-07,
-# against rsa 0.10.0-rc.22): from rc.20 on, sha2 is a required dependency
-# and no longer a feature, while ssh-key 0.7.0-rc.11 still asks for the
-# `sha2` feature, so no newer rsa resolves beside it. rc.22 also put
-# `pkcs1v15` behind a feature of that name, which the agent will need then.
+# rsa 0.10.0-rc.22 since 2026-11-07. ssh-key's `rsa` feature is off: it asks
+# for rsa's `sha2` feature, which rc.20 made a plain dependency, so with it on
+# rsa could not move past rc.19. The feature only converted keypairs and
+# generated RSA keys; locket-agent's `signing` converts the components itself,
+# and its signatures were checked with OpenSSL against a key ssh-keygen made.
 #
 # `=` because release candidates promise each other nothing: `cargo update`
 # must not carry the tree from one to the next unreviewed, and ssh-key's own
 # requirement (`rsa ^0.10.0-rc.18`) would allow it. Raise the two together,
-# re-run that check, and drop the `=` when the stable releases exist. (rsa
-# brings pkcs1 0.8.0-rc.5 with it; the lock holds that one.)
+# re-run that check, and drop the `=` when the stable releases exist.
 #
 # rsa is here for one operation: the agent's RSA signatures, which are made
 # blinded — see locket-agent's `signing`. RUSTSEC-2023-0071 lists every
-# version of the crate, these included. Its `sha1`/`sha2` features bring the
-# OID association those digests need as PKCS#1 v1.5 hashes; SHA-1 is only
-# ever used when a client asks for `ssh-rsa` explicitly.
-rsa = { version = "=0.10.0-rc.19", features = ["sha1", "sha2"] }
+# version of the crate, these included. `pkcs1v15` is the signing scheme;
+# SHA-1 is only ever used when a client asks for `ssh-rsa` explicitly.
+rsa = { version = "=0.10.0-rc.22", features = ["pkcs1v15"] }
 # `p256`/`p384`/`p521` are what let ssh-key *sign* with an ECDSA key; `ecdsa`
 # alone only lets it read one.
-ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519", "rsa", "ecdsa", "p256", "p384", "p521", "encryption", "alloc", "std", "getrandom"] }
+ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519", "ecdsa", "p256", "p384", "p521", "encryption", "alloc", "std", "getrandom"] }
 # `rand_core` for `RandomizedSigner`, which is how those signatures are made.
 signature = { version = "3", features = ["rand_core"] }
 

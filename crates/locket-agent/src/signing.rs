@@ -11,11 +11,18 @@
 //! SHA-512 whatever the client asked for, and unblinded. So the keypair is
 //! converted to an `rsa` private key, the hash is chosen per request, and the
 //! signature is made with a blinding factor.
+//!
+//! The conversion is made here rather than through `ssh-key`'s `rsa` feature.
+//! That feature asks for an `rsa` feature (`sha2`) the crate dropped in
+//! 0.10.0-rc.20, so enabling it held `rsa` back at rc.19; it is also all the
+//! feature did for us.
 
 use getrandom::SysRng;
+use rsa::BoxedUint;
 use rsa::pkcs1v15::SigningKey;
 use rsa::rand_core::TryCryptoRng;
 use signature::{RandomizedSigner, SignatureEncoding};
+use ssh_key::Mpint;
 use ssh_key::private::RsaKeypair;
 
 use crate::error::{Error, Result};
@@ -103,12 +110,60 @@ fn rsa_signature_with(
 }
 
 /// The `rsa` private key an SSH keypair describes.
-fn private_key(keypair: &RsaKeypair) -> Result<rsa::RsaPrivateKey> {
-    rsa::RsaPrivateKey::try_from(keypair).map_err(|e| {
+///
+/// The same conversion `ssh-key` makes under its `rsa` feature: each
+/// component read as a positive big-endian integer, and the key built with
+/// [`rsa::PrivateKey::from_components`], which validates it.
+fn private_key(keypair: &RsaKeypair) -> Result<rsa::PrivateKey> {
+    let unusable = |why: &dyn std::fmt::Display| {
         Error::BadKey(format!(
-            "the RSA key's components do not form a usable key: {e}"
+            "the RSA key's components do not form a usable key: {why}"
         ))
-    })
+    };
+    let uint = |component: &Mpint| {
+        component
+            .as_positive_bytes()
+            .map(BoxedUint::from_be_slice_vartime)
+            .ok_or_else(|| unusable(&"a component is negative"))
+    };
+    let (public, private) = (keypair.public(), keypair.private());
+    rsa::PrivateKey::from_components(
+        uint(public.n())?,
+        uint(public.e())?,
+        uint(private.d())?,
+        vec![uint(private.p())?, uint(private.q())?],
+    )
+    .map_err(|e| unusable(&e))
+}
+
+/// The SSH keypair an `rsa` private key describes — the reverse of
+/// [`private_key`], as `ssh-key`'s own RSA generator builds it.
+#[cfg(test)]
+pub(crate) fn ssh_keypair(key: &rsa::PrivateKey) -> RsaKeypair {
+    use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+
+    let mpint = |uint: &BoxedUint| Mpint::from_positive_bytes(&uint.to_be_bytes());
+    let [p, q] = key.primes() else {
+        panic!("a two-prime key")
+    };
+    let public = ssh_key::public::RsaPublicKey::new(mpint(key.e()), mpint(key.n().as_ref()))
+        .expect("the public half");
+    let private = ssh_key::private::RsaPrivateKey::new(
+        mpint(key.d()),
+        mpint(&key.crt_coefficient().expect("a CRT coefficient")),
+        mpint(p.as_ref()),
+        mpint(q.as_ref()),
+    )
+    .expect("the private half");
+    RsaKeypair::new(public, private).expect("the keypair")
+}
+
+/// A fresh RSA identity of `bits`, as `ssh-key` would hold one.
+#[cfg(test)]
+pub(crate) fn rsa_identity(bits: usize) -> ssh_key::PrivateKey {
+    let key = rsa::PrivateKey::new(&mut crate::test_rng(), bits).expect("an RSA key");
+    ssh_key::PrivateKey::new(ssh_key::private::KeypairData::Rsa(ssh_keypair(&key)), "")
+        .expect("an SSH private key")
 }
 
 #[cfg(test)]
@@ -120,8 +175,7 @@ mod tests {
     /// Key generation dominates this test's runtime, so the key is the
     /// smallest size still in ordinary use rather than `ssh-key`'s default.
     fn rsa_key() -> PrivateKey {
-        let keypair = RsaKeypair::random(&mut crate::test_rng(), 2048).unwrap();
-        PrivateKey::new(KeypairData::Rsa(keypair), "").unwrap()
+        rsa_identity(2048)
     }
 
     fn keypair(key: &PrivateKey) -> &RsaKeypair {
@@ -159,7 +213,7 @@ mod tests {
 
         let key = rsa_key();
         let kp = keypair(&key);
-        let public = rsa::RsaPublicKey::from(&private_key(kp).unwrap());
+        let public = rsa::PublicKey::from(&private_key(kp).unwrap());
 
         for hash in [RsaHash::Sha1, RsaHash::Sha256, RsaHash::Sha512] {
             let raw = rsa_signature(kp, b"a sign request", hash).unwrap();
@@ -188,8 +242,8 @@ mod tests {
     fn a_key_too_small_for_the_hash_is_an_error_not_a_panic() {
         // Below the size the crate will generate without being told it is
         // on purpose; such keys still exist in files.
-        let small = rsa::RsaPrivateKey::new_unchecked(&mut crate::test_rng(), 512).unwrap();
-        let kp = RsaKeypair::try_from(&small).unwrap();
+        let small = rsa::PrivateKey::new_unchecked(&mut crate::test_rng(), 512).unwrap();
+        let kp = ssh_keypair(&small);
 
         assert!(matches!(
             rsa_signature(&kp, b"message", RsaHash::Sha512),
