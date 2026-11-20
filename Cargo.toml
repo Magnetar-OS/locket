@@ -53,7 +53,7 @@ futures-util = "0.3"
 # zbus 6 put its macros behind features: `proxy` for `#[proxy]`, `service`
 # for `#[interface]`. Without them a crate builds only beside libcosmic,
 # whose own zbus turns them on.
-zbus = { version = "6.4", default-features = false, features = ["tokio", "proxy", "service"] }
+zbus = { version = "6.5", default-features = false, features = ["tokio", "proxy", "service"] }
 
 # --- Crypto ----------------------------------------------------------------
 # One RustCrypto generation throughout (digest 0.11 / cipher 0.5 / aead 0.6 /
