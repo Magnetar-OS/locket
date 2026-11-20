@@ -840,7 +840,10 @@ impl App {
         }
 
         let hardware = security::enrolled(&self.vault_path);
-        let mut settings = Self::window_settings(prompt::size(&hardware));
+        // Not resizable by the person: the dialog sizes itself to what it
+        // shows (see `dialog`), and a resize handle on one field and three
+        // buttons is a control nobody reaches for.
+        let mut settings = Self::window_settings(crate::dialog::INITIAL_SIZE);
         settings.resizable = false;
         // Dismissing runs through `update`: the dialog may be the only window
         // this process has, and then closing it is the process ending.

@@ -7,6 +7,7 @@ mod autotype;
 mod config;
 mod confirm;
 mod daemon;
+mod dialog;
 mod editor;
 mod i18n;
 mod import;
@@ -135,7 +136,7 @@ fn ask(question: Result<locket_secret::frontend::Question, String>) -> i32 {
         .antialiasing(true)
         .client_decorations(true)
         .resizable(None)
-        .size(confirm::SIZE);
+        .size(dialog::INITIAL_SIZE);
     let flags = confirm::Flags {
         question,
         allowed: allowed.clone(),

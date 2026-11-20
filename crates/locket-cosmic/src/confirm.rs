@@ -14,15 +14,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cosmic::app::{Core, Task};
-use cosmic::iced::Length;
 use cosmic::prelude::*;
 use cosmic::widget;
 use locket_secret::frontend::{CONFIRM_FILL_FLAG, CONFIRM_SIGNING_FLAG, Question};
 
 use crate::fl;
-
-/// The window's size: one question and two answers.
-pub const SIZE: cosmic::iced::Size = cosmic::iced::Size::new(460.0, 300.0);
 
 /// The question this process was started to ask, if it was.
 ///
@@ -55,8 +51,8 @@ const MAX_SHOWN: usize = 64;
 /// question is whatever the browser extension said — which the threat model
 /// assumes is hostile. Fluent already isolates each value's direction, but a
 /// value can close that isolate itself, start new paragraphs, or run long
-/// enough to push the real question and its buttons out of a window that
-/// cannot be resized. So line breaks, tabs, direction and other invisible
+/// enough to bury the real question and stretch a window that grows to fit
+/// its text off the screen. So line breaks, tabs, direction and other invisible
 /// formatting characters become spaces, runs of space become one, and
 /// anything past [`MAX_SHOWN`] characters is cut with an ellipsis.
 fn display_safe(raw: &str) -> String {
@@ -97,6 +93,8 @@ fn shapes_text(c: char) -> bool {
 pub enum Message {
     Allow,
     Refuse,
+    /// The header bar was dragged.
+    Drag,
 }
 
 /// What the dialog needs: the question, and where to put a yes.
@@ -128,8 +126,11 @@ impl cosmic::Application for Confirm {
     }
 
     fn init(mut core: Core, flags: Self::Flags) -> (Self, Task<Self::Message>) {
-        core.window.show_maximize = false;
-        core.window.show_minimize = false;
+        // The header bar is drawn by `view`, inside the window that sizes
+        // itself to its content: libcosmic's own sits outside `view`, where
+        // the size `dialog::window` asks for would not count it.
+        core.window.show_headerbar = false;
+        core.window.content_container = false;
         let mut dialog = Confirm {
             core,
             question: flags.question,
@@ -144,10 +145,14 @@ impl cosmic::Application for Confirm {
     }
 
     fn update(&mut self, message: Self::Message) -> Task<Self::Message> {
-        if let Message::Allow = message {
-            self.allowed.store(true, Ordering::SeqCst);
+        match message {
+            Message::Allow => {
+                self.allowed.store(true, Ordering::SeqCst);
+                cosmic::iced::exit()
+            }
+            Message::Refuse => cosmic::iced::exit(),
+            Message::Drag => self.core.drag(None),
         }
-        cosmic::iced::exit()
     }
 
     fn view(&self) -> Element<'_, Self::Message> {
@@ -167,24 +172,31 @@ impl cosmic::Application for Confirm {
                 ),
             ),
         };
-        widget::dialog()
-            .icon(widget::icon::from_name(icon).size(48))
-            .title(title)
-            .body(body)
-            .primary_action(
-                widget::button::suggested(fl!("dialog-allow-once")).on_press(Message::Allow),
-            )
-            .secondary_action(
-                widget::button::standard(fl!("dialog-refuse")).on_press(Message::Refuse),
-            )
-            // Not floating over an application window — this *is* the window.
-            .is_overlay(false)
-            .width(Length::Fill)
-            .apply(widget::container)
-            .class(cosmic::theme::Container::WindowBackground)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        let focused = self
+            .core
+            .focus_chain()
+            .iter()
+            .any(|id| Some(*id) == self.core.main_window_id());
+        crate::dialog::window(
+            widget::header_bar()
+                .title(fl!("app-title"))
+                .focused(focused)
+                .on_close(Message::Refuse)
+                .on_drag(Message::Drag),
+            icon,
+            title,
+            body,
+            None,
+            None,
+            [
+                widget::button::standard(fl!("dialog-refuse"))
+                    .on_press(Message::Refuse)
+                    .into(),
+                widget::button::suggested(fl!("dialog-allow-once"))
+                    .on_press(Message::Allow)
+                    .into(),
+            ],
+        )
     }
 }
 
@@ -229,8 +241,8 @@ mod tests {
 
     /// The site comes from a browser extension assumed hostile, and none of
     /// the three names may reshape the question they sit in: no new lines or
-    /// paragraphs, no direction overrides, nothing long enough to push the
-    /// real sentence — or the buttons — out of a fixed-size window.
+    /// paragraphs, no direction overrides, nothing long enough to bury the
+    /// real sentence or stretch the window off the screen.
     #[test]
     fn dialog_arguments_cannot_add_lines_reorder_text_or_run_long() {
         let shown =

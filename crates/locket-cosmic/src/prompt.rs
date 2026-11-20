@@ -15,30 +15,13 @@
 
 use std::sync::{Arc, LazyLock, Mutex};
 
-use cosmic::iced::{Length, window};
+use cosmic::iced::window;
 use cosmic::prelude::*;
 use cosmic::widget;
 use locket_core::{SecretString, Vault};
 
 use crate::fl;
 use crate::security::{self, Factor};
-
-/// The dialog's size.
-///
-/// Fixed, and generous enough for the body text to wrap in a language wordier
-/// than English: it holds one field and three buttons, and a resize handle on
-/// that is a control nobody reaches for.
-pub const SIZE: cosmic::iced::Size = cosmic::iced::Size::new(460.0, 330.0);
-
-/// The dialog's size for a vault with these hardware factors: taller by the
-/// row that offers them and the longer text that explains one.
-pub fn size(hardware: &[Factor]) -> cosmic::iced::Size {
-    if hardware.is_empty() {
-        SIZE
-    } else {
-        cosmic::iced::Size::new(SIZE.width, SIZE.height + 70.0)
-    }
-}
 
 /// The passphrase field, so the dialog can take the caret as it appears.
 pub static PASSPHRASE_ID: LazyLock<widget::Id> =
@@ -149,45 +132,37 @@ impl Prompt {
             (false, _) => fl!("unlock-button"),
         });
 
-        let dialog = widget::dialog()
-            .icon(widget::icon::from_name("dialog-password-symbolic").size(48))
-            .title(fl!("prompt-title"))
-            .body(match self.unlock_with {
+        crate::dialog::window(
+            widget::header_bar()
+                .title(fl!("app-title"))
+                .focused(focused)
+                .on_close(Message::Dismiss)
+                .on_drag(Message::Drag),
+            "dialog-password-symbolic",
+            fl!("prompt-title"),
+            match self.unlock_with {
                 None => fl!("prompt-body"),
                 Some(Factor::TpmPin) => fl!("prompt-body-tpm"),
                 Some(Factor::SecurityKey) => fl!("prompt-body-security-key"),
-            })
-            .control(field)
+            },
+            Some(field.into()),
             // Leftmost, away from the two answers: it is a way out of the
             // dialog, not a third thing to do with the passphrase.
-            .tertiary_action(
-                widget::button::text(fl!("prompt-open-window")).on_press(Message::OpenWindow),
-            )
-            .secondary_action(
-                widget::button::standard(fl!("dialog-cancel")).on_press(Message::Dismiss),
-            )
-            .primary_action(if self.busy {
-                Element::from(unlock)
-            } else {
-                unlock.on_press(Message::Submit).into()
-            })
-            // Not floating over an application window — this *is* the window.
-            .is_overlay(false)
-            .width(Length::Fill);
-
-        widget::column::with_capacity(2)
-            .push(
-                widget::header_bar()
-                    .title(fl!("app-title"))
-                    .focused(focused)
-                    .on_close(Message::Dismiss)
-                    .on_drag(Message::Drag),
-            )
-            .push(dialog)
-            .apply(widget::container)
-            .class(cosmic::theme::Container::WindowBackground)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+            Some(
+                widget::button::text(fl!("prompt-open-window"))
+                    .on_press(Message::OpenWindow)
+                    .into(),
+            ),
+            [
+                widget::button::standard(fl!("dialog-cancel"))
+                    .on_press(Message::Dismiss)
+                    .into(),
+                if self.busy {
+                    Element::from(unlock)
+                } else {
+                    unlock.on_press(Message::Submit).into()
+                },
+            ],
+        )
     }
 }

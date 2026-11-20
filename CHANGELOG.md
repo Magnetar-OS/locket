@@ -4,6 +4,16 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Fixed
+
+- The unlock dialog an application's request raises, and the dialog that
+  confirms an SSH signature or a browser fill, now size their height to what
+  they show. They were fixed at a size that only fit the Standard interface
+  density: at Spacious the unlock dialog lost its buttons entirely and the
+  confirmation's buttons were cut to slivers.
+- Both dialogs are drawn as the window itself rather than as a bordered card
+  boxed inside it, and the confirmation text no longer breaks mid-sentence.
+
 ## [3.2.6] - 2026-11-20
 
 ### Changed
