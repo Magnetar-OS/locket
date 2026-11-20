@@ -4,6 +4,13 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+### Changed
+
+- Built with Rust 1.100.0, now the minimum supported version (was 1.99.1).
+- SSH agent RSA signatures are made with rsa 0.10.0, the stable release,
+  in place of a release candidate; ssh-key moves to 0.7.0-rc.12. Built on
+  zbus 6.4 and ashpd 0.14.1.
+
 ## [3.2.4] - 2026-11-07
 
 ### Changed

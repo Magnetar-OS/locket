@@ -22,7 +22,7 @@ members = [
 [workspace.package]
 version = "3.2.4"
 edition = "2024"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/Magnetar-OS/locket"
 authors = ["Dominikos Pritis <dominikos.pritis@gmail.com>"]
@@ -49,12 +49,11 @@ locket-tpm = { path = "crates/locket-tpm", version = "3.2.4" }
 
 # --- Async / IPC -----------------------------------------------------------
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "signal", "process"] }
-tokio-stream = "0.1"
 futures-util = "0.3"
 # zbus 6 put its macros behind features: `proxy` for `#[proxy]`, `service`
 # for `#[interface]`. Without them a crate builds only beside libcosmic,
 # whose own zbus turns them on.
-zbus = { version = "6.2", default-features = false, features = ["tokio", "proxy", "service"] }
+zbus = { version = "6.4", default-features = false, features = ["tokio", "proxy", "service"] }
 
 # --- Crypto ----------------------------------------------------------------
 # One RustCrypto generation throughout (digest 0.11 / cipher 0.5 / aead 0.6 /
@@ -109,19 +108,20 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 # generated RSA keys; locket-agent's `signing` converts the components itself,
 # and its signatures were checked with OpenSSL against a key ssh-keygen made.
 #
-# `=` because release candidates promise each other nothing: `cargo update`
-# must not carry the tree from one to the next unreviewed, and ssh-key's own
-# requirement (`rsa ^0.10.0-rc.18`) would allow it. Raise the two together,
-# re-run that check, and drop the `=` when the stable releases exist.
+# rsa 0.10.0, the stable release, since 2026-11-21, with ssh-key 0.7.0-rc.12,
+# whose own requirement is `rsa ^0.10`. ssh-key keeps its `=`: release
+# candidates promise each other nothing, and `cargo update` must not carry
+# the tree from one to the next unreviewed. Raise it by hand, re-run that
+# check, and drop the `=` when 0.7.0 is released.
 #
 # rsa is here for one operation: the agent's RSA signatures, which are made
 # blinded — see locket-agent's `signing`. RUSTSEC-2023-0071 lists every
 # version of the crate, these included. `pkcs1v15` is the signing scheme;
 # SHA-1 is only ever used when a client asks for `ssh-rsa` explicitly.
-rsa = { version = "=0.10.0-rc.22", features = ["pkcs1v15"] }
+rsa = { version = "0.10.0", features = ["pkcs1v15"] }
 # `p256`/`p384`/`p521` are what let ssh-key *sign* with an ECDSA key; `ecdsa`
 # alone only lets it read one.
-ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519", "ecdsa", "p256", "p384", "p521", "encryption", "alloc", "std", "getrandom"] }
+ssh-key = { version = "=0.7.0-rc.12", features = ["ed25519", "ecdsa", "p256", "p384", "p521", "encryption", "alloc", "std", "getrandom"] }
 # `rand_core` for `RandomizedSigner`, which is how those signatures are made.
 signature = { version = "3", features = ["rand_core"] }
 
