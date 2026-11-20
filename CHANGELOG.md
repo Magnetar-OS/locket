@@ -4,6 +4,8 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ## [Unreleased]
 
+## [3.2.6] - 2026-11-20
+
 ### Changed
 
 - Built on zbus 6.5.
@@ -992,7 +994,8 @@ scripts/locket-setup            # reinstalls under the new id
 - `ssh-add -x` and `-X` work: the lock passphrase is kept and compared in
   constant time.
 
-[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.5...HEAD
+[Unreleased]: https://github.com/Magnetar-OS/locket/compare/v3.2.6...HEAD
+[3.2.6]: https://github.com/Magnetar-OS/locket/compare/v3.2.5...v3.2.6
 [3.2.5]: https://github.com/Magnetar-OS/locket/compare/v3.2.4...v3.2.5
 [3.2.4]: https://github.com/Magnetar-OS/locket/compare/v3.2.3...v3.2.4
 [3.2.3]: https://github.com/Magnetar-OS/locket/compare/v3.2.2...v3.2.3
