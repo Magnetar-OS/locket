@@ -6,6 +6,7 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Changed
 
+- Rebuilt against the current COSMIC libraries (libcosmic `be7937d`).
 - Built with Rust 1.100.0, now the minimum supported version (was 1.99.1).
 - SSH agent RSA signatures are made with rsa 0.10.0, the stable release,
   in place of a release candidate; ssh-key moves to 0.7.0-rc.12. Built on
