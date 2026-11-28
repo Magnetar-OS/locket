@@ -14,6 +14,11 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 - Both dialogs are drawn as the window itself rather than as a bordered card
   boxed inside it, and the confirmation text no longer breaks mid-sentence.
 
+### Changed
+
+- Built with Rust 1.100.1, now the minimum supported version (was 1.100.0).
+- Built on ashpd 0.14.3.
+
 ## [3.2.6] - 2026-11-20
 
 ### Changed

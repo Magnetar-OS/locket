@@ -31,7 +31,7 @@ locket-hibp.workspace = true
 # own portal call, never handed to or from libcosmic, so it is on 0.14 (zbus 6,
 # like the app); libcosmic's 0.13 copy is linked separately until libcosmic
 # moves.
-ashpd = { version = "0.14.1", default-features = false, features = [
+ashpd = { version = "0.14.3", default-features = false, features = [
     "tokio",
     # ashpd gates each portal behind its own feature; auto-type needs this one.
     # `screencast` comes with it because `remote_desktop` imports that
@@ -69,7 +69,7 @@ cosmic-launch = { git = "https://github.com/pop-os/libcosmic", default-features 
 # `search_field`: libcosmic's search field with a clear button only while
 # there is text. Consumed by tag; it unifies with the libcosmic below, whose
 # default features this crate's own list already covers.
-cosmic-ext-widgets = { git = "https://github.com/Magnetar-OS/cosmic-ext-widgets.git", tag = "v1.3.2" }
+cosmic-ext-widgets = { git = "https://github.com/Magnetar-OS/cosmic-ext-widgets.git", tag = "v1.3.3" }
 
 [dependencies.libcosmic]
 # No `rev`: every COSMIC application tracks the default branch and pins the
