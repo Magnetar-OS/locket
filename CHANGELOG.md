@@ -16,6 +16,7 @@ Notable changes, in the format of [Keep a Changelog](https://keepachangelog.com/
 
 ### Changed
 
+- Rebuilt against the current COSMIC libraries (libcosmic `009fb9d`).
 - Built with Rust 1.100.1, now the minimum supported version (was 1.100.0).
 - Built on ashpd 0.14.3.
 
